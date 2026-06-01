@@ -21,6 +21,7 @@ from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
@@ -48,7 +49,11 @@ from app.modules.accounts.schemas import (
 )
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
-from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
+from app.modules.settings.service import parse_additional_quota_routing_policies
+from app.modules.usage.additional_quota_keys import (
+    get_additional_display_label_for_quota_key,
+    get_additional_quota_routing_policy,
+)
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
 
@@ -56,6 +61,7 @@ logger = logging.getLogger(__name__)
 
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
+_ROUTING_POLICIES = frozenset({"normal", "burn_first", "preserve"})
 
 DEFAULT_PROBE_MODEL = "gpt-5.5"
 PROBE_REQUEST_TIMEOUT_SECONDS = 30.0
@@ -115,6 +121,10 @@ class AccountsService:
         additional_quotas_by_account: dict[str, list[AccountAdditionalQuota]] = {}
         additional_usage_repo = cast(AdditionalUsageRepository | None, self._additional_usage_repo)
         if additional_usage_repo:
+            settings = await get_settings_cache().get()
+            routing_policy_overrides = parse_additional_quota_routing_policies(
+                settings.additional_quota_routing_policies_json
+            )
             quota_keys = await additional_usage_repo.list_quota_keys(account_ids=account_ids)
             for quota_key in quota_keys:
                 primary_entries = await additional_usage_repo.latest_by_account(quota_key, "primary")
@@ -132,6 +142,10 @@ class AccountsService:
                             metered_feature=reference_entry.metered_feature,
                             display_label=get_additional_display_label_for_quota_key(quota_key)
                             or reference_entry.limit_name,
+                            routing_policy=get_additional_quota_routing_policy(
+                                quota_key,
+                                overrides=routing_policy_overrides,
+                            ),
                             primary_window=AccountAdditionalWindow(
                                 used_percent=primary_entry.used_percent,
                                 reset_at=primary_entry.reset_at,
@@ -316,6 +330,16 @@ class AccountsService:
 
     async def set_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
         return await self._repo.update_limit_warmup_enabled(account_id, enabled)
+
+    async def update_routing_policy(self, account_id: str, routing_policy: str) -> str | None:
+        normalized = routing_policy.strip().lower()
+        if normalized not in _ROUTING_POLICIES:
+            raise ValueError("Invalid account routing policy")
+        result = await self._repo.update_routing_policy(account_id, normalized)
+        if result:
+            get_account_selection_cache().invalidate()
+            return normalized
+        return None
 
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
         result = await self._repo.delete(account_id, delete_history=delete_history)

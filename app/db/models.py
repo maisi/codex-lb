@@ -42,6 +42,12 @@ class AccountStatus(str, Enum):
     DEACTIVATED = "deactivated"
 
 
+class AccountRoutingPolicy(str, Enum):
+    NORMAL = "normal"
+    BURN_FIRST = "burn_first"
+    PRESERVE = "preserve"
+
+
 class StickySessionKind(str, Enum):
     CODEX_SESSION = "codex_session"
     STICKY_THREAD = "sticky_thread"
@@ -64,6 +70,12 @@ class Account(Base):
     workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)
     seat_type: Mapped[str | None] = mapped_column(String, nullable=True)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
+    routing_policy: Mapped[str] = mapped_column(
+        String,
+        default="normal",
+        server_default=text("'normal'"),
+        nullable=False,
+    )
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -394,6 +406,12 @@ class DashboardSettings(Base):
         String,
         default="gpt-5.4-mini",
         server_default=text("'gpt-5.4-mini'"),
+        nullable=False,
+    )
+    additional_quota_routing_policies_json: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+        server_default=text("'{}'"),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

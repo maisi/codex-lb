@@ -6,7 +6,7 @@ import { AccountAliasForm } from "@/features/accounts/components/account-alias-f
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
@@ -22,6 +22,7 @@ export type AccountDetailProps = {
   onReauth: () => void;
   onExportAuth: (accountId: string) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
+  onRoutingPolicyChange: (accountId: string, routingPolicy: AccountRoutingPolicy) => void;
 };
 
 export function AccountDetail({
@@ -35,6 +36,7 @@ export function AccountDetail({
   onReauth,
   onExportAuth,
   onLimitWarmupChange,
+  onRoutingPolicyChange,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -90,6 +92,7 @@ export function AccountDetail({
         onReauth={onReauth}
         onExportAuth={onExportAuth}
         onLimitWarmupChange={onLimitWarmupChange}
+        onRoutingPolicyChange={onRoutingPolicyChange}
       />
     </div>
   );
