@@ -124,13 +124,17 @@ jobs:
           GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
         run: |
           git push --force origin "refs/remotes/upstream/${UPSTREAM_BRANCH}:refs/heads/${SYNC_BRANCH}"
-          existing="$(gh pr list --head "${SYNC_BRANCH}" --base "${UPSTREAM_BRANCH}" --state open --json number --jq 'length')"
+          # Use the REST API (gh api) rather than `gh pr list`/`gh pr create`,
+          # which call the GraphQL API and are rejected for fine-grained PATs
+          # ("Resource not accessible by personal access token"). REST works.
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${SYNC_BRANCH}&base=${UPSTREAM_BRANCH}&state=open" --jq 'length')"
           if [ "${existing}" = "0" ]; then
-            gh pr create \
-              --base "${UPSTREAM_BRANCH}" \
-              --head "${SYNC_BRANCH}" \
-              --title "Sync upstream Soju06/codex-lb main" \
-              --body "Automated daily upstream sync could not land on \`main\` cleanly (git conflict, or it would leave multiple Alembic migration heads). \`main\` was left untouched.\n\nResolve the conflicts here — add a merge migration if the Alembic graph has more than one head — then merge."
+            gh api "repos/${GITHUB_REPOSITORY}/pulls" -X POST \
+              -f title="Sync upstream Soju06/codex-lb main" \
+              -f head="${SYNC_BRANCH}" \
+              -f base="${UPSTREAM_BRANCH}" \
+              -f body="Automated daily upstream sync could not land on main cleanly (git conflict, or it would leave multiple Alembic migration heads). main was left untouched. Resolve the conflicts here — add a merge migration if the Alembic graph has more than one head — then merge."
+            echo "Opened sync PR."
           else
             echo "Existing sync PR refreshed via branch update."
           fi
