@@ -15,6 +15,7 @@ import app.modules.oauth.service as oauth_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.oauth import DeviceCode, OAuthTokens
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -245,6 +246,106 @@ async def test_device_oauth_reauth_reuses_existing_row_for_same_chatgpt_identity
     # Second reauth carried the team plan; it must be applied to the
     # existing row rather than a new __copy row.
     assert data[0]["planType"] == "team"
+
+
+@pytest.mark.asyncio
+async def test_device_oauth_flow_heals_deactivated_account_when_import_without_overwrite_enabled(
+    async_client,
+    monkeypatch,
+):
+    await oauth_module._OAUTH_STORE.reset()
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "importWithoutOverwrite": True,
+            "totpRequiredOnLogin": False,
+        },
+    )
+    assert settings.status_code == 200
+    assert settings.json()["importWithoutOverwrite"] is True
+
+    email = "device-reauth@example.com"
+    raw_account_id = "acc_device_reauth"
+    account_id = generate_unique_account_id(raw_account_id, email)
+
+    encryptor = TokenEncryptor()
+    existing = Account(
+        id=account_id,
+        chatgpt_account_id=raw_account_id,
+        email=email,
+        plan_type="plus",
+        routing_policy="preserve",
+        access_token_encrypted=encryptor.encrypt("old-access"),
+        refresh_token_encrypted=encryptor.encrypt("old-refresh"),
+        id_token_encrypted=encryptor.encrypt("old-id"),
+        last_refresh=utcnow(),
+        status=AccountStatus.DEACTIVATED,
+        deactivation_reason="refresh_failed",
+    )
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(existing, merge_by_email=False)
+
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="ABCD-EFGH",
+            device_auth_id="dev_reauth",
+            interval_seconds=1,
+            expires_in_seconds=30,
+        )
+
+    async def fake_exchange_device_token(**_):
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "pro"},
+        }
+        return OAuthTokens(
+            access_token="new-access-token",
+            refresh_token="new-refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_async_sleep", fake_sleep)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+    assert start.status_code == 200
+
+    complete = await async_client.post("/api/oauth/complete", json={})
+    assert complete.status_code == 200
+    assert complete.json()["status"] == "pending"
+
+    await asyncio.sleep(0)
+
+    payload = None
+    for _ in range(20):
+        status = await async_client.get("/api/oauth/status")
+        assert status.status_code == 200
+        payload = status.json()
+        if payload["status"] == "success":
+            break
+        await asyncio.sleep(0.05)
+    assert payload and payload["status"] == "success"
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    data = [account for account in accounts.json()["accounts"] if account["email"] == email]
+    assert len(data) == 1
+    healed = data[0]
+    assert healed["accountId"] == account_id
+    assert healed["status"] == "active"
+    assert healed["deactivationReason"] is None
+    assert healed["planType"] == "pro"
+    assert healed["routingPolicy"] == "preserve"
 
 
 @pytest.mark.asyncio
@@ -620,6 +721,21 @@ async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkey
     payload = start.json()
     assert payload["method"] == "device"
     assert payload["deviceAuthId"] == "dev_fallback"
+
+
+@pytest.mark.asyncio
+async def test_device_oauth_flow_reports_proxy_route_errors(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    async def fake_oauth_route(*_args, **_kwargs):
+        raise UpstreamProxyRouteError("default_pool_unconfigured", account_id=None)
+
+    monkeypatch.setattr(oauth_module, "resolve_upstream_route", fake_oauth_route)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+
+    assert start.status_code == 502
+    assert start.json()["error"]["code"] == "default_pool_unconfigured"
 
 
 @pytest.mark.asyncio
