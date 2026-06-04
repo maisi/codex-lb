@@ -5,12 +5,6 @@ name: Docker (main)
 # this workflow only publishes rolling main tags (edge, main, sha-<commit>).
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "openspec/**"
   workflow_dispatch:
 
 concurrency:

@@ -1,5 +1,5 @@
 import { Check, Copy } from "lucide-react";
-import { useState, type MouseEvent } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,7 @@ export type CopyButtonProps = {
 export function CopyButton({ value, label = "Copy", iconOnly = false }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = async (event: MouseEvent<HTMLButtonElement>) => {
+  const handleCopy = async () => {
     try {
       const copiedToClipboard = await copyToClipboard(value);
       if (copiedToClipboard) {
@@ -36,7 +36,7 @@ export function CopyButton({ value, label = "Copy", iconOnly = false }: CopyButt
       variant="outline"
       size={iconOnly ? "icon-sm" : "sm"}
       onMouseDown={(event) => event.preventDefault()}
-      onClick={(event) => void handleCopy(event)}
+      onClick={() => void handleCopy()}
       aria-label={copied ? `${label} Copied` : label}
       title={copied ? "Copied" : label}
     >
