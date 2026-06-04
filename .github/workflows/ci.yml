@@ -1,10 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: ["main"]
   pull_request:
   merge_group:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -414,8 +413,8 @@ jobs:
 
   ci-required:
     name: CI Required
-    runs-on: ubuntu-24.04
     if: always()
+    runs-on: ubuntu-24.04
     needs:
       - contributors
       - frontend-lint

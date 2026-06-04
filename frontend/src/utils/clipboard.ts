@@ -1,17 +1,9 @@
-type CopyToClipboardOptions = {
-  container?: HTMLElement | null;
-};
-
-function fallbackCopyToClipboard(
-  text: string,
-  options: CopyToClipboardOptions,
-): boolean {
+function fallbackCopyToClipboard(text: string): boolean {
   if (typeof document.execCommand !== "function") {
     return false;
   }
 
-  const container = options.container ?? document.body;
-  if (!container) {
+  if (!document.body) {
     return false;
   }
 
@@ -26,7 +18,7 @@ function fallbackCopyToClipboard(
   textarea.style.top = "-9999px";
   textarea.style.opacity = "0";
 
-  container.appendChild(textarea);
+  document.body.appendChild(textarea);
   textarea.focus();
   textarea.select();
 
@@ -35,8 +27,8 @@ function fallbackCopyToClipboard(
   } catch {
     return false;
   } finally {
-    if (textarea.parentNode === container) {
-      container.removeChild(textarea);
+    if (textarea.parentNode === document.body) {
+      document.body.removeChild(textarea);
     }
     if (previousActiveElement?.isConnected) {
       previousActiveElement.focus();
@@ -44,21 +36,24 @@ function fallbackCopyToClipboard(
   }
 }
 
-export async function copyToClipboard(
-  text: string,
-  options: CopyToClipboardOptions = {},
-): Promise<boolean> {
-  const clipboardWritePromise =
-    window.isSecureContext && typeof navigator.clipboard?.writeText === "function"
-      ? navigator.clipboard.writeText(text).then(() => true).catch(() => false)
-      : null;
+export async function copyToClipboard(text: string): Promise<boolean> {
+  const clipboardWriteAvailable =
+    window.isSecureContext && typeof navigator.clipboard?.writeText === "function";
 
-  if (fallbackCopyToClipboard(text, options)) {
-    if (clipboardWritePromise) {
-      void clipboardWritePromise;
+  if (clipboardWriteAvailable) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      if (fallbackCopyToClipboard(text)) {
+        return true;
+      }
     }
+  }
+
+  if (fallbackCopyToClipboard(text)) {
     return true;
   }
 
-  return clipboardWritePromise ?? false;
+  return false;
 }
