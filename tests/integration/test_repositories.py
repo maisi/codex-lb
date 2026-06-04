@@ -95,7 +95,7 @@ async def test_accounts_upsert_with_merge_disabled_keeps_duplicate_identity(db_s
 
 
 @pytest.mark.asyncio
-async def test_accounts_upsert_account_slot_heals_deactivated_identity_even_when_merge_disabled(db_setup):
+async def test_accounts_upsert_reauthorized_heals_deactivated_identity_even_when_merge_disabled(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
         existing = _make_account("acc_reauth", "reauth@example.com")
@@ -106,7 +106,7 @@ async def test_accounts_upsert_account_slot_heals_deactivated_identity_even_when
 
         incoming = _make_account("acc_reauth", "reauth@example.com")
         incoming.plan_type = "team"
-        saved = await repo.upsert_account_slot(incoming, preserve_unknown_workspace_duplicates=False)
+        saved = await repo.upsert_reauthorized(incoming)
 
         assert saved.id == "acc_reauth"
         assert saved.status == AccountStatus.ACTIVE

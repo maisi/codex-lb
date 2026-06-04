@@ -1,4 +1,13 @@
-import { Download, Pause, Play, RefreshCw, Route, Trash2, Zap } from "lucide-react";
+import {
+  Download,
+  Pause,
+  Play,
+  RefreshCw,
+  Route,
+  ShieldCheck,
+  Trash2,
+  Zap,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -8,7 +17,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
+import { Switch } from "@/components/ui/switch";
+import type {
+  AccountRoutingPolicy,
+  AccountSummary,
+} from "@/features/accounts/schemas";
 
 export type AccountActionsProps = {
   account: AccountSummary;
@@ -18,8 +31,12 @@ export type AccountActionsProps = {
   onDelete: (accountId: string) => void;
   onReauth: () => void;
   onExportAuth: (accountId: string) => void;
+  onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
-  onRoutingPolicyChange: (accountId: string, routingPolicy: AccountRoutingPolicy) => void;
+  onRoutingPolicyChange: (
+    accountId: string,
+    routingPolicy: AccountRoutingPolicy,
+  ) => void;
 };
 
 export function AccountActions({
@@ -30,6 +47,7 @@ export function AccountActions({
   onDelete,
   onReauth,
   onExportAuth,
+  onSecurityWorkAuthorizedChange,
   onLimitWarmupChange,
   onRoutingPolicyChange,
 }: AccountActionsProps) {
@@ -42,10 +60,19 @@ export function AccountActions({
         </div>
         <Select
           value={account.routingPolicy ?? "normal"}
-          onValueChange={(value) => onRoutingPolicyChange(account.accountId, value as AccountRoutingPolicy)}
+          onValueChange={(value) =>
+            onRoutingPolicyChange(
+              account.accountId,
+              value as AccountRoutingPolicy,
+            )
+          }
           disabled={busy}
         >
-          <SelectTrigger aria-label="Routing policy" size="sm" className="h-8 w-44 text-xs">
+          <SelectTrigger
+            aria-label="Routing policy"
+            size="sm"
+            className="h-8 w-44 text-xs"
+          >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -56,7 +83,21 @@ export function AccountActions({
         </Select>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
+      <label className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+        <span className="flex min-w-0 items-center gap-2 text-xs font-medium">
+          <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate">Trusted Access for Cyber</span>
+        </span>
+        <Switch
+          checked={account.securityWorkAuthorized ?? false}
+          disabled={busy}
+          onCheckedChange={(checked) =>
+            onSecurityWorkAuthorizedChange(account.accountId, checked)
+          }
+        />
+      </label>
+
+      <div className="flex flex-wrap gap-2">
         {account.status === "paused" ? (
           <Button
             type="button"
@@ -101,7 +142,9 @@ export function AccountActions({
           size="sm"
           variant="outline"
           className="h-8 gap-1.5 text-xs"
-          onClick={() => onLimitWarmupChange(account.accountId, !account.limitWarmupEnabled)}
+          onClick={() =>
+            onLimitWarmupChange(account.accountId, !account.limitWarmupEnabled)
+          }
           disabled={busy}
         >
           <Zap className="h-3.5 w-3.5" />

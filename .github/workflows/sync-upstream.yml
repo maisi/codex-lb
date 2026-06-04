@@ -2,9 +2,8 @@ name: Sync upstream
 
 # Daily merge of upstream Soju06/codex-lb `main` into this fork's `main`.
 #
-# Clean merges are pushed straight to main, which re-runs CI and the
-# Docker (main) build because the push uses a PAT (UPSTREAM_SYNC_TOKEN) rather
-# than the default GITHUB_TOKEN. Merges that conflict — or that would leave
+# Clean merges are pushed straight to main. Fork-only release/build workflows are
+# manual-only so daily sync pushes do not fan out into release or Docker builds. Merges that conflict — or that would leave
 # multiple Alembic migration heads — are pushed to a sync branch and surfaced
 # as a pull request instead, leaving main untouched for manual resolution.
 #
@@ -116,7 +115,7 @@ jobs:
         if: steps.merge.outputs.result == 'clean'
         run: |
           git push origin "HEAD:${UPSTREAM_BRANCH}"
-          echo "Pushed merged upstream changes to main; CI and Docker (main) will run."
+          echo "Pushed merged upstream changes to main."
 
       - name: Open or refresh sync pull request
         if: steps.merge.outputs.result == 'conflict'

@@ -15,15 +15,23 @@ class AdditionalQuotaPolicy(DashboardModel):
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
+    upstream_proxy_routing_enabled: bool
+    upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool
-    routing_strategy: str = Field(pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability)$")
+    prefer_earlier_reset_window: str = Field(pattern=r"^(primary|secondary)$")
+    routing_strategy: str = Field(
+        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first|sequential_drain|reset_drain|single_account)$"
+    )
     relative_availability_power: float = Field(gt=0.0)
     relative_availability_top_k: int = Field(ge=1, le=20)
+    single_account_id: str | None = None
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     dashboard_session_ttl_seconds: int = Field(ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
+    sticky_reallocation_primary_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
+    sticky_reallocation_secondary_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
     warmup_model: str = Field(min_length=1)
     import_without_overwrite: bool
     totp_required_on_login: bool
@@ -45,18 +53,25 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         default=None,
         pattern=r"^(default|auto|http|websocket)$",
     )
+    upstream_proxy_routing_enabled: bool | None = None
+    upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool | None = None
+    prefer_earlier_reset_window: str | None = Field(default=None, pattern=r"^(primary|secondary)$")
     routing_strategy: str | None = Field(
         default=None,
-        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability)$",
+        pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first|sequential_drain|reset_drain|single_account)$",
     )
     relative_availability_power: float | None = Field(default=None, gt=0.0)
     relative_availability_top_k: int | None = Field(default=None, ge=1, le=20)
+    single_account_id: str | None = Field(default=None, max_length=255)
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
     dashboard_session_ttl_seconds: int | None = Field(default=None, ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool | None = None
     sticky_reallocation_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    sticky_reallocation_primary_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    sticky_reallocation_secondary_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    additional_quota_routing_policies: dict[str, str] | None = None
     warmup_model: str | None = Field(default=None, min_length=1)
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
@@ -82,3 +97,62 @@ class DashboardSettingsUpdateRequest(DashboardModel):
 
 class RuntimeConnectAddressResponse(DashboardModel):
     connect_address: str
+
+
+class UpstreamProxyEndpointCreateRequest(DashboardModel):
+    name: str = Field(min_length=1, max_length=128)
+    scheme: str = Field(pattern=r"^(http|https|socks5|socks5h)$")
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+    username: str | None = Field(default=None, max_length=255)
+    password: str | None = Field(default=None, max_length=1024)
+    is_active: bool = True
+
+
+class UpstreamProxyEndpointResponse(DashboardModel):
+    id: str
+    name: str
+    scheme: str
+    host: str
+    port: int
+    username: str | None
+    is_active: bool
+
+
+class UpstreamProxyPoolCreateRequest(DashboardModel):
+    name: str = Field(min_length=1, max_length=128)
+    endpoint_ids: list[str] = Field(default_factory=list)
+    is_active: bool = True
+
+
+class UpstreamProxyPoolMemberRequest(DashboardModel):
+    endpoint_id: str = Field(min_length=1)
+    sort_order: int = 0
+    weight: int = Field(default=1, ge=1)
+    is_active: bool = True
+
+
+class UpstreamProxyPoolResponse(DashboardModel):
+    id: str
+    name: str
+    is_active: bool
+    endpoint_ids: list[str]
+
+
+class AccountProxyBindingRequest(DashboardModel):
+    pool_id: str = Field(min_length=1)
+    is_active: bool = True
+
+
+class AccountProxyBindingResponse(DashboardModel):
+    account_id: str
+    pool_id: str
+    is_active: bool
+
+
+class UpstreamProxyAdminResponse(DashboardModel):
+    routing_enabled: bool
+    default_pool_id: str | None
+    endpoints: list[UpstreamProxyEndpointResponse]
+    pools: list[UpstreamProxyPoolResponse]
+    bindings: list[AccountProxyBindingResponse]

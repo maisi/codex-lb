@@ -10,6 +10,7 @@ import {
   pauseAccount,
   reactivateAccount,
   setAccountAlias,
+  updateAccount,
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
 } from "@/features/accounts/api";
@@ -98,6 +99,25 @@ export function useAccountMutations() {
     },
   });
 
+  const routingPolicyMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      routingPolicy,
+    }: {
+      accountId: string;
+      routingPolicy: AccountRoutingPolicy;
+    }) => updateAccountRoutingPolicy(accountId, routingPolicy),
+    onSuccess: (data) => {
+      const label =
+        data.routingPolicy === "normal" ? "normal" : data.routingPolicy.replace("_", "-");
+      toast.success(`Account routing policy set to ${label}`);
+      invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Routing policy update failed");
+    },
+  });
+
   const exportAuthMutation = useMutation({
     mutationFn: exportAccountAuth,
     onSuccess: () => {
@@ -108,15 +128,15 @@ export function useAccountMutations() {
     },
   });
 
-  const routingPolicyMutation = useMutation({
-    mutationFn: ({ accountId, routingPolicy }: { accountId: string; routingPolicy: AccountRoutingPolicy }) =>
-      updateAccountRoutingPolicy(accountId, { routingPolicy }),
+  const updateMutation = useMutation({
+    mutationFn: ({ accountId, securityWorkAuthorized }: { accountId: string; securityWorkAuthorized: boolean }) =>
+      updateAccount(accountId, { securityWorkAuthorized }),
     onSuccess: () => {
-      toast.success("Routing policy updated");
+      toast.success("Account updated");
       invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Routing policy update failed");
+      toast.error(error.message || "Update failed");
     },
   });
 
@@ -129,6 +149,7 @@ export function useAccountMutations() {
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,
+    updateMutation,
   };
 }
 

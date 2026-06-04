@@ -27,7 +27,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.load_balancer import (
     ADDITIONAL_QUOTA_DATA_UNAVAILABLE,
-    NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS,
+    ADDITIONAL_QUOTA_EXHAUSTED,
     NO_PLAN_SUPPORT_FOR_MODEL,
     AccountLease,
     AccountState,
@@ -649,6 +649,75 @@ async def test_select_account_filters_to_assigned_account_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_select_account_filters_to_security_work_authorized_accounts() -> None:
+    regular = _make_account("acc-regular", "regular@example.com")
+    authorized = _make_account("acc-cyber", "cyber@example.com")
+    authorized.security_work_authorized = True
+
+    accounts_repo = StubAccountsRepository([regular, authorized])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(require_security_work_authorized=True)
+
+    assert selection.account is not None
+    assert selection.account.id == authorized.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_reports_missing_security_work_authorized_accounts() -> None:
+    regular = _make_account("acc-regular", "regular@example.com")
+
+    accounts_repo = StubAccountsRepository([regular])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(require_security_work_authorized=True)
+
+    assert selection.account is None
+    assert selection.error_code == "no_security_work_authorized_accounts"
+
+
+@pytest.mark.asyncio
+async def test_select_account_reports_missing_security_work_authorized_before_exclusions() -> None:
+    regular = _make_account("acc-regular", "regular@example.com")
+
+    accounts_repo = StubAccountsRepository([regular])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(
+        exclude_account_ids={regular.id},
+        require_security_work_authorized=True,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "no_security_work_authorized_accounts"
+
+
+@pytest.mark.asyncio
+async def test_select_account_reports_missing_security_work_when_authorized_accounts_are_excluded() -> None:
+    authorized = _make_account("acc-cyber", "cyber@example.com")
+    authorized.security_work_authorized = True
+
+    accounts_repo = StubAccountsRepository([authorized])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(
+        exclude_account_ids={authorized.id},
+        require_security_work_authorized=True,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "no_security_work_authorized_accounts"
+
+
+@pytest.mark.asyncio
 async def test_select_account_scope_does_not_prune_runtime_for_other_accounts() -> None:
     retained = _make_account("acc-retained", "retained@example.com")
     assigned = _make_account("acc-assigned", "assigned@example.com")
@@ -841,6 +910,7 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
                 window="primary",
                 used_percent=100.0,
                 recorded_at=now,
+                reset_at=now_epoch + 300,
             ),
             account_eligible.id: _additional_entry(
                 12,
@@ -848,6 +918,7 @@ async def test_select_account_prefilters_accounts_by_additional_usage_limit() ->
                 window="primary",
                 used_percent=35.0,
                 recorded_at=now,
+                reset_at=now_epoch + 300,
             ),
         }
     )
@@ -2685,6 +2756,15 @@ async def test_select_account_limits_additional_quota_routing_policy_to_scoped_a
         lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus", "pro"})),
     )
 
+    async def _load_routing_overrides() -> dict[str, str]:
+        return {"codex_spark": "burn_first"}
+
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_load_dashboard_additional_quota_routing_overrides",
+        _load_routing_overrides,
+    )
+
     balancer = LoadBalancer(
         lambda: _repo_factory(
             accounts_repo,
@@ -2702,7 +2782,7 @@ async def test_select_account_limits_additional_quota_routing_policy_to_scoped_a
 @pytest.mark.asyncio
 async def test_select_account_fails_closed_for_unmapped_plan_without_additional_quota_rows(monkeypatch) -> None:
     account = _make_account("acc-unmapped-no-gated-rows", "unmapped-no-gated-rows@example.com")
-    account.plan_type = "edu"
+    account.plan_type = "research"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -2721,7 +2801,7 @@ async def test_select_account_fails_closed_for_unmapped_plan_without_additional_
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"edu"})),
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"research"})),
     )
 
     balancer = LoadBalancer(
@@ -2939,7 +3019,7 @@ async def test_select_account_returns_no_eligible_error_for_mapped_model(monkeyp
     selection = await balancer.select_account(model="gpt-5.3-codex-spark")
 
     assert selection.account is None
-    assert selection.error_code == NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS
+    assert selection.error_code == ADDITIONAL_QUOTA_EXHAUSTED
 
 
 @pytest.mark.asyncio
