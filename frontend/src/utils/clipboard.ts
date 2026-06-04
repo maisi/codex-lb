@@ -48,17 +48,23 @@ export async function copyToClipboard(
   text: string,
   options: CopyToClipboardOptions = {},
 ): Promise<boolean> {
-  const clipboardWritePromise =
-    window.isSecureContext && typeof navigator.clipboard?.writeText === "function"
-      ? navigator.clipboard.writeText(text).then(() => true).catch(() => false)
-      : null;
+  const clipboardWriteAvailable =
+    window.isSecureContext && typeof navigator.clipboard?.writeText === "function";
+
+  if (clipboardWriteAvailable) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      if (fallbackCopyToClipboard(text, options)) {
+        return true;
+      }
+    }
+  }
 
   if (fallbackCopyToClipboard(text, options)) {
-    if (clipboardWritePromise) {
-      void clipboardWritePromise;
-    }
     return true;
   }
 
-  return clipboardWritePromise ?? false;
+  return false;
 }
