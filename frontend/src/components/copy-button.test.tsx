@@ -129,10 +129,6 @@ describe("CopyButton", () => {
       value: undefined,
     });
 
-    const dialog = document.createElement("div");
-    dialog.setAttribute("role", "dialog");
-    document.body.appendChild(dialog);
-
     let fallbackActiveTag: string | undefined;
     let fallbackParent: Element | null = null;
     const execCommand = vi.fn(() => {
@@ -146,6 +142,10 @@ describe("CopyButton", () => {
       value: execCommand,
     });
 
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    document.body.appendChild(dialog);
+
     render(<CopyButton value="secret-value" />, { container: dialog });
 
     const copyButton = screen.getByRole("button", { name: "Copy" });
@@ -158,7 +158,7 @@ describe("CopyButton", () => {
 
     expect(execCommand).toHaveBeenCalledWith("copy");
     expect(fallbackActiveTag).toBe("TEXTAREA");
-    expect(fallbackParent).toBe(dialog);
+    expect(fallbackParent).toBe(document.body);
     expect(copyButton).toHaveFocus();
     dialog.remove();
   });
