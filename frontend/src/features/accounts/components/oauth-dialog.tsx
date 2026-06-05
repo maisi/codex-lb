@@ -31,13 +31,10 @@ function CopyButton({ text }: { text: string }) {
 
   const handleCopy = useCallback(async (event: MouseEvent<HTMLButtonElement>) => {
     const trigger = event.currentTarget;
-    const dialogContainer = trigger.closest("[role='dialog']");
     const blurAfterCopy = event.detail > 0;
 
     try {
-      const copiedToClipboard = await copyToClipboard(text, {
-        container: dialogContainer instanceof HTMLElement ? dialogContainer : undefined,
-      });
+      const copiedToClipboard = await copyToClipboard(text);
       if (!copiedToClipboard) {
         toast.error("Failed to copy");
         return;

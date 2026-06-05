@@ -1,11 +1,7 @@
 name: Sync Beta Release PR
 
 on:
-  push:
-    branches: ["main"]
-  workflow_run:
-    workflows: ["Release Please"]
-    types: [completed]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-main
@@ -17,9 +13,6 @@ permissions:
 
 jobs:
   sync-beta-release-pr:
-    if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
 
     env:
