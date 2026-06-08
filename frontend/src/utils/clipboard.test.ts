@@ -112,17 +112,15 @@ describe("copyToClipboard", () => {
     await expect(copyToClipboard("hello")).resolves.toBe(false);
   });
 
-  it("uses provided container as fallback target", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
+  it("creates fallback textarea in document.body", async () => {
     const focusTarget = document.createElement("button");
-    container.appendChild(focusTarget);
+    document.body.appendChild(focusTarget);
     focusTarget.focus();
 
     const execCommand = vi.fn(() => {
       const active = document.activeElement as HTMLTextAreaElement | null;
       expect(active?.tagName).toBe("TEXTAREA");
-      expect(active?.parentElement).toBe(container);
+      expect(active?.parentElement).toBe(document.body);
       return true;
     });
 
@@ -139,10 +137,10 @@ describe("copyToClipboard", () => {
       value: execCommand,
     });
 
-    await expect(copyToClipboard("hello", { container })).resolves.toBe(true);
+    await expect(copyToClipboard("hello")).resolves.toBe(true);
     expect(execCommand).toHaveBeenCalledWith("copy");
     expect(focusTarget).toHaveFocus();
 
-    container.remove();
+    focusTarget.remove();
   });
 });

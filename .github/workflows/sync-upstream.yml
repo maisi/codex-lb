@@ -1,0 +1,139 @@
+name: Sync upstream
+
+# Daily merge of upstream Soju06/codex-lb `main` into this fork's `main`.
+#
+# Clean merges are pushed straight to main. Fork-only release/build workflows are
+# manual-only so daily sync pushes do not fan out into release or Docker builds. Merges that conflict — or that would leave
+# multiple Alembic migration heads — are pushed to a sync branch and surfaced
+# as a pull request instead, leaving main untouched for manual resolution.
+#
+# Requires a repository secret UPSTREAM_SYNC_TOKEN: a PAT with contents +
+# workflow write (workflow scope is needed to push upstream's .github/workflows
+# changes) and pull-requests write (for the conflict PR).
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: https://github.com/Soju06/codex-lb.git
+  UPSTREAM_BRANCH: main
+  SYNC_BRANCH: sync/upstream-main
+
+jobs:
+  sync:
+    name: Merge upstream into main
+    runs-on: ubuntu-24.04
+    if: github.repository == 'maisi/codex-lb'
+
+    steps:
+      - name: Require sync token
+        env:
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          if [ -z "${UPSTREAM_SYNC_TOKEN}" ]; then
+            echo "::error::UPSTREAM_SYNC_TOKEN secret is required (PAT with contents + workflow + pull-requests write)."
+            exit 1
+          fi
+
+      - name: Checkout fork main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "${UPSTREAM_REPO}"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+
+      - name: Check whether upstream has new commits
+        id: ahead
+        run: |
+          count="$(git rev-list --count "HEAD..upstream/${UPSTREAM_BRANCH}")"
+          echo "count=${count}" >> "${GITHUB_OUTPUT}"
+          echo "Upstream is ${count} commit(s) ahead of fork main."
+
+      - name: Attempt merge
+        id: merge
+        if: steps.ahead.outputs.count != '0'
+        run: |
+          set +e
+          git merge --no-edit --no-ff "upstream/${UPSTREAM_BRANCH}"
+          if [ $? -ne 0 ]; then
+            git merge --abort || true
+            echo "result=conflict" >> "${GITHUB_OUTPUT}"
+            echo "::warning::Merge conflict with fork changes — main left untouched, routing to PR."
+            exit 0
+          fi
+          # A clean git merge can still leave multiple Alembic heads (fork and
+          # upstream each added migrations on separate branches), which breaks
+          # `alembic upgrade head`. Detect that and route to the PR instead.
+          heads="$(python3 - <<'PY'
+          import re, pathlib
+          versions = pathlib.Path("app/db/alembic/versions")
+          revs, downs = {}, {}
+          for f in versions.glob("*.py"):
+              if f.name == "__init__.py":
+                  continue
+              text = f.read_text(encoding="utf-8")
+              m = re.search(r"^revision\s*[:=].*?['\"]([0-9A-Za-z_]+)['\"]", text, re.M)
+              rev = m.group(1) if m else f.stem
+              dm = re.search(r"^down_revision\s*[:=].*?(?=^\w)", text, re.M | re.S)
+              ids = re.findall(r"['\"]([0-9A-Za-z_]+)['\"]", dm.group(0) if dm else "")
+              revs[rev] = True
+              downs[rev] = ids
+          referenced = {i for ids in downs.values() for i in ids}
+          print(len([r for r in revs if r not in referenced]))
+          PY
+          )"
+          echo "Alembic heads after merge: ${heads}"
+          if [ "${heads}" != "1" ]; then
+            echo "result=conflict" >> "${GITHUB_OUTPUT}"
+            echo "::warning::Clean git merge but ${heads} Alembic heads — needs a manual merge migration, routing to PR."
+            exit 0
+          fi
+          echo "result=clean" >> "${GITHUB_OUTPUT}"
+
+      - name: Push merged main
+        if: steps.merge.outputs.result == 'clean'
+        run: |
+          git push origin "HEAD:${UPSTREAM_BRANCH}"
+          echo "Pushed merged upstream changes to main."
+
+      - name: Open or refresh sync pull request
+        if: steps.merge.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          git push --force origin "refs/remotes/upstream/${UPSTREAM_BRANCH}:refs/heads/${SYNC_BRANCH}"
+          # Use the REST API (gh api) rather than `gh pr list`/`gh pr create`,
+          # which call the GraphQL API and are rejected for fine-grained PATs
+          # ("Resource not accessible by personal access token"). REST works.
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${SYNC_BRANCH}&base=${UPSTREAM_BRANCH}&state=open" --jq 'length')"
+          if [ "${existing}" = "0" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/pulls" -X POST \
+              -f title="Sync upstream Soju06/codex-lb main" \
+              -f head="${SYNC_BRANCH}" \
+              -f base="${UPSTREAM_BRANCH}" \
+              -f body="Automated daily upstream sync could not land on main cleanly (git conflict, or it would leave multiple Alembic migration heads). main was left untouched. Resolve the conflicts here — add a merge migration if the Alembic graph has more than one head — then merge."
+            echo "Opened sync PR."
+          else
+            echo "Existing sync PR refreshed via branch update."
+          fi

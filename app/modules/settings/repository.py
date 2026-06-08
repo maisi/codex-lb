@@ -84,7 +84,6 @@ class SettingsRepository:
         sticky_reallocation_budget_threshold_pct: float | None = None,
         sticky_reallocation_primary_budget_threshold_pct: float | None = None,
         sticky_reallocation_secondary_budget_threshold_pct: float | None = None,
-        additional_quota_routing_policies_json: str | None = None,
         warmup_model: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
@@ -95,7 +94,7 @@ class SettingsRepository:
         limit_warmup_prompt: str | None = None,
         limit_warmup_cooldown_seconds: int | None = None,
         limit_warmup_min_available_percent: float | None = None,
-        weekly_pace_working_days: str | None = None,
+        additional_quota_routing_policies_json: str | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
@@ -135,8 +134,6 @@ class SettingsRepository:
             settings.sticky_reallocation_secondary_budget_threshold_pct = (
                 sticky_reallocation_secondary_budget_threshold_pct
             )
-        if additional_quota_routing_policies_json is not None:
-            settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
         if warmup_model is not None:
             settings.warmup_model = warmup_model
         if import_without_overwrite is not None:
