@@ -1,0 +1,92 @@
+name: Project webhook
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - Docker Main
+      - Release
+      - Publish Beta Release
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  notify:
+    name: Notify project webhook
+    runs-on: ubuntu-24.04
+    if: ${{ secrets.PROJECT_WEBHOOK_URL != '' }}
+
+    steps:
+      - name: Send workflow_run webhook
+        env:
+          WEBHOOK_URL: ${{ secrets.PROJECT_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.PROJECT_WEBHOOK_SECRET }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_NAME: ${{ github.event.workflow_run.name }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          RUN_STATUS: ${{ github.event.workflow_run.status }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_HTML_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          ACTOR: ${{ github.event.workflow_run.actor.login }}
+        run: |
+          set -euo pipefail
+
+          payload=$(jq -n \
+            --arg repo "$REPO" \
+            --arg event "workflow_run.completed" \
+            --arg run_id "$RUN_ID" \
+            --arg run_name "$RUN_NAME" \
+            --arg run_attempt "$RUN_ATTEMPT" \
+            --arg run_number "$RUN_NUMBER" \
+            --arg status "$RUN_STATUS" \
+            --arg conclusion "$RUN_CONCLUSION" \
+            --arg html_url "$RUN_HTML_URL" \
+            --arg head_branch "$HEAD_BRANCH" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg workflow_event "$EVENT" \
+            --arg actor "$ACTOR" \
+            '{
+              event: $event,
+              repository: $repo,
+              workflow_run: {
+                id: ($run_id | tonumber),
+                name: $run_name,
+                attempt: ($run_attempt | tonumber),
+                number: ($run_number | tonumber),
+                status: $status,
+                conclusion: $conclusion,
+                html_url: $html_url,
+                head_branch: $head_branch,
+                head_sha: $head_sha,
+                event: $workflow_event,
+                actor: $actor
+              }
+            }')
+
+          headers=(
+            -H "Content-Type: application/json"
+            -H "X-GitHub-Repository: $REPO"
+            -H "X-GitHub-Event: workflow_run.completed"
+          )
+
+          if [ -n "$WEBHOOK_SECRET" ]; then
+            signature=$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -binary | xxd -p -c 256)
+            headers+=( -H "X-Hub-Signature-256: sha256=$signature" )
+          fi
+
+          curl --fail --show-error --silent \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --retry 2 \
+            --retry-delay 3 \
+            "${headers[@]}" \
+            --data "$payload" \
+            "$WEBHOOK_URL"
