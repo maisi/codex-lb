@@ -17,8 +17,6 @@ jobs:
   notify:
     name: Notify project webhook
     runs-on: ubuntu-24.04
-    if: ${{ secrets.PROJECT_WEBHOOK_URL != '' }}
-
     steps:
       - name: Send workflow_run webhook
         env:
@@ -38,6 +36,11 @@ jobs:
           ACTOR: ${{ github.event.workflow_run.actor.login }}
         run: |
           set -euo pipefail
+
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "PROJECT_WEBHOOK_URL is not configured; skipping notification"
+            exit 0
+          fi
 
           payload=$(jq -n \
             --arg repo "$REPO" \
