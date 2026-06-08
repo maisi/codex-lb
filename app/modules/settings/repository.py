@@ -50,6 +50,7 @@ class SettingsRepository:
             limit_warmup_prompt="Say OK.",
             limit_warmup_cooldown_seconds=3600,
             limit_warmup_min_available_percent=100.0,
+            weekly_pace_working_days="0,1,2,3,4,5,6",
         )
         self._session.add(row)
         try:
@@ -155,6 +156,8 @@ class SettingsRepository:
             settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
         if additional_quota_routing_policies_json is not None:
             settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
+        if weekly_pace_working_days is not None:
+            settings.weekly_pace_working_days = weekly_pace_working_days
         await self.commit_refresh(settings)
         return settings
 
