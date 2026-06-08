@@ -95,6 +95,7 @@ class SettingsRepository:
         limit_warmup_cooldown_seconds: int | None = None,
         limit_warmup_min_available_percent: float | None = None,
         additional_quota_routing_policies_json: str | None = None,
+        weekly_pace_working_days: str | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
