@@ -196,6 +196,7 @@ describe("AccountListItem", () => {
       displayName: "Work seat",
       email: "work@example.com",
       planType: "team",
+      chatgptAccountId: null,
       workspaceLabel: "Design Workspace",
       seatType: "member",
     });
@@ -230,5 +231,20 @@ describe("AccountListItem", () => {
     render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
 
     expect(screen.getByText("Normal")).toBeInTheDocument();
+  });
+
+  it("uses ChatGPT account id before workspace metadata or unknown fallback", () => {
+    const account = createAccountSummary({
+      planType: "team",
+      workspaceId: "legacy-workspace-id",
+      workspaceLabel: "Legacy Workspace",
+      chatgptAccountId: "chatgpt-workspace-123",
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Team | chatgpt-workspace-123")).toBeInTheDocument();
+    expect(screen.queryByText(/Legacy Workspace/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Personal \/ unknown workspace/)).not.toBeInTheDocument();
   });
 });
