@@ -58,8 +58,12 @@ export function AccountActions({
 }: AccountActionsProps) {
   const showOperatorRecoveryAction =
     account.status === "reauth_required" || account.status === "deactivated";
+  const canProbeUsage404Deactivation = isUsage404Deactivation(account);
   const probeDisabled =
-    busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
+    busy ||
+    readOnly ||
+    account.status === "paused" ||
+    (showOperatorRecoveryAction && !canProbeUsage404Deactivation);
 
   return (
     <div className="space-y-3 border-t pt-4">
@@ -204,5 +208,13 @@ export function AccountActions({
         </Button>
       </div>
     </div>
+  );
+}
+
+function isUsage404Deactivation(account: AccountSummary): boolean {
+  return (
+    account.status === "deactivated" &&
+    typeof account.deactivationReason === "string" &&
+    account.deactivationReason.startsWith("Usage API error: HTTP 404")
   );
 }

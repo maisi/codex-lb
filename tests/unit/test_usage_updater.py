@@ -1572,6 +1572,33 @@ async def test_usage_updater_does_not_deactivate_on_403(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_usage_updater_does_not_deactivate_on_plain_404(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.clients.usage import UsageFetchError
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage_404(**_: Any) -> UsagePayload:
+        raise UsageFetchError(404, "None")
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_404)
+
+    usage_repo = StubUsageRepository()
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    acc = _make_account("acc_404", "workspace_404", email="not-found@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert len(accounts_repo.status_updates) == 0
+    assert acc.status == AccountStatus.ACTIVE
+    assert acc.deactivation_reason is None
+
+
+@pytest.mark.asyncio
 async def test_usage_updater_does_not_deactivate_on_transient_4xx(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
