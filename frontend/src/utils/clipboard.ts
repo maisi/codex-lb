@@ -1,9 +1,29 @@
-function fallbackCopyToClipboard(text: string): boolean {
+type CopyToClipboardOptions = {
+  fallbackTarget?: HTMLElement | null;
+};
+
+function getFallbackContainer(fallbackTarget?: HTMLElement | null): HTMLElement | null {
+  if (!document.body) {
+    return null;
+  }
+
+  const target = fallbackTarget?.isConnected
+    ? fallbackTarget
+    : document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  const dialog = target?.closest<HTMLElement>('[role="dialog"]');
+
+  return dialog?.isConnected ? dialog : document.body;
+}
+
+function fallbackCopyToClipboard(text: string, fallbackTarget?: HTMLElement | null): boolean {
   if (typeof document.execCommand !== "function") {
     return false;
   }
 
-  if (!document.body) {
+  const container = getFallbackContainer(fallbackTarget);
+  if (!container) {
     return false;
   }
 
@@ -18,7 +38,7 @@ function fallbackCopyToClipboard(text: string): boolean {
   textarea.style.top = "-9999px";
   textarea.style.opacity = "0";
 
-  document.body.appendChild(textarea);
+  container.appendChild(textarea);
   textarea.focus();
   textarea.select();
 
@@ -27,8 +47,8 @@ function fallbackCopyToClipboard(text: string): boolean {
   } catch {
     return false;
   } finally {
-    if (textarea.parentNode === document.body) {
-      document.body.removeChild(textarea);
+    if (textarea.parentElement) {
+      textarea.parentElement.removeChild(textarea);
     }
     if (previousActiveElement?.isConnected) {
       previousActiveElement.focus();
@@ -36,7 +56,10 @@ function fallbackCopyToClipboard(text: string): boolean {
   }
 }
 
-export async function copyToClipboard(text: string): Promise<boolean> {
+export async function copyToClipboard(
+  text: string,
+  options: CopyToClipboardOptions = {},
+): Promise<boolean> {
   const clipboardWriteAvailable =
     window.isSecureContext && typeof navigator.clipboard?.writeText === "function";
 
@@ -45,13 +68,13 @@ export async function copyToClipboard(text: string): Promise<boolean> {
       await navigator.clipboard.writeText(text);
       return true;
     } catch {
-      if (fallbackCopyToClipboard(text)) {
+      if (fallbackCopyToClipboard(text, options.fallbackTarget)) {
         return true;
       }
     }
   }
 
-  if (fallbackCopyToClipboard(text)) {
+  if (fallbackCopyToClipboard(text, options.fallbackTarget)) {
     return true;
   }
 

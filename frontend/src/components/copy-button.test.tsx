@@ -158,7 +158,7 @@ describe("CopyButton", () => {
 
     expect(execCommand).toHaveBeenCalledWith("copy");
     expect(fallbackActiveTag).toBe("TEXTAREA");
-    expect(fallbackParent).toBe(document.body);
+    expect(fallbackParent).toBe(dialog);
     expect(copyButton).toHaveFocus();
     dialog.remove();
   });

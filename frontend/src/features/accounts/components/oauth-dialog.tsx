@@ -34,7 +34,7 @@ function CopyButton({ text }: { text: string }) {
     const blurAfterCopy = event.detail > 0;
 
     try {
-      const copiedToClipboard = await copyToClipboard(text);
+      const copiedToClipboard = await copyToClipboard(text, { fallbackTarget: trigger });
       if (!copiedToClipboard) {
         toast.error("Failed to copy");
         return;

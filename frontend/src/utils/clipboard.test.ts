@@ -143,4 +143,39 @@ describe("copyToClipboard", () => {
 
     focusTarget.remove();
   });
+
+  it("creates fallback textarea inside the provided dialog target", async () => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const focusTarget = document.createElement("button");
+    dialog.appendChild(focusTarget);
+    document.body.appendChild(dialog);
+    focusTarget.focus();
+
+    const execCommand = vi.fn(() => {
+      const active = document.activeElement as HTMLTextAreaElement | null;
+      expect(active?.tagName).toBe("TEXTAREA");
+      expect(active?.parentElement).toBe(dialog);
+      return true;
+    });
+
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: false,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    await expect(copyToClipboard("hello", { fallbackTarget: focusTarget })).resolves.toBe(true);
+    expect(execCommand).toHaveBeenCalledWith("copy");
+    expect(focusTarget).toHaveFocus();
+
+    dialog.remove();
+  });
 });
