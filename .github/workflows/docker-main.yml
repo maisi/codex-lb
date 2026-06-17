@@ -3,8 +3,13 @@ name: Docker (main)
 # Builds and publishes a Docker image from the latest main on every push.
 # Release builds (semver tags / latest) are handled separately by release.yml;
 # this workflow only publishes rolling main tags (edge, main, sha-<commit>).
+#
+# Runs on every push to main (including the daily upstream sync's clean-merge
+# push) so the rolling image stays current, plus manual dispatch.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:

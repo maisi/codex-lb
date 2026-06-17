@@ -2,10 +2,11 @@ name: Sync upstream
 
 # Daily merge of upstream Soju06/codex-lb `main` into this fork's `main`.
 #
-# Clean merges are pushed straight to main. Fork-only release/build workflows are
-# manual-only so daily sync pushes do not fan out into release or Docker builds. Merges that conflict — or that would leave
-# multiple Alembic migration heads — are pushed to a sync branch and surfaced
-# as a pull request instead, leaving main untouched for manual resolution.
+# Clean merges are pushed straight to main, which triggers the Docker (main)
+# workflow to rebuild the rolling image. release.yml stays manual-only so daily
+# sync pushes do not fan out into semver releases. Merges that conflict — or that
+# would leave multiple Alembic migration heads — are pushed to a sync branch and
+# surfaced as a pull request instead, leaving main untouched for manual resolution.
 #
 # Requires a repository secret UPSTREAM_SYNC_TOKEN: a PAT with contents +
 # workflow write (workflow scope is needed to push upstream's .github/workflows
