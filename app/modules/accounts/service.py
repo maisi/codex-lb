@@ -448,10 +448,23 @@ class AccountsService:
         if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED) or (
             account.status == AccountStatus.DEACTIVATED and not usage_404_recovery
         ):
+            logger.info(
+                "Account force probe rejected account_id=%s account_status=%s usage_404_recovery=%s",
+                account_id,
+                account.status.value,
+                usage_404_recovery,
+            )
             raise AccountNotProbableError(f"Account is {account.status.value} and cannot be probed")
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         status_before = account.status.value
+        logger.info(
+            "Account force probe started account_id=%s account_status=%s usage_404_recovery=%s model=%s",
+            account_id,
+            status_before,
+            usage_404_recovery,
+            model or DEFAULT_PROBE_MODEL,
+        )
 
         probe_account = account
         if self._auth_manager is not None:
@@ -463,6 +476,12 @@ class AccountsService:
             access_token=access_token,
             chatgpt_account_id=probe_account.chatgpt_account_id,
             model=probe_model,
+        )
+        logger.info(
+            "Account force probe upstream result account_id=%s probe_status_code=%s usage_404_recovery=%s",
+            account_id,
+            probe_status,
+            usage_404_recovery,
         )
         if usage_404_recovery and _probe_status_is_success(probe_status):
             updated = await self._repo.update_status_if_current(
@@ -495,6 +514,15 @@ class AccountsService:
 
         refreshed = await self._repo.get_by_id(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)
+        logger.info(
+            "Account force probe completed account_id=%s probe_status_code=%s "
+            "account_status_before=%s account_status_after=%s recovered_usage_404=%s",
+            account_id,
+            probe_status,
+            status_before,
+            refreshed.status.value,
+            usage_404_recovery and refreshed.status == AccountStatus.ACTIVE,
+        )
 
         return AccountProbeResponse(
             status="probed",

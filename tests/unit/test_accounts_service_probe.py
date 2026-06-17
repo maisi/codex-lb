@@ -255,6 +255,10 @@ async def test_probe_account_never_logs_access_token(monkeypatch, caplog):
     caplog.set_level("DEBUG")
     await service.probe_account(_ACCOUNT_ID)
     joined_log_output = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Account force probe started" in joined_log_output
+    assert "Account force probe upstream result" in joined_log_output
+    assert "Account force probe completed" in joined_log_output
+    assert "probe_status_code=200" in joined_log_output
     assert _PROBE_TOKEN_PLAINTEXT not in joined_log_output
 
 

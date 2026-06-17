@@ -41,3 +41,10 @@ Accounts deactivated by the legacy usage-refresh HTTP `404` classification MUST 
 - **WHEN** an operator force-probes that account
 - **AND** the upstream probe returns an unsuccessful status or network-failure sentinel
 - **THEN** codex-lb leaves the account status unchanged
+
+#### Scenario: Force probe emits safe application logs
+
+- **WHEN** an operator force-probes an account
+- **THEN** codex-lb logs probe start, upstream status, and completion details
+- **AND** those logs include account id, account status, probe status, and recovery outcome
+- **AND** those logs do not include access tokens or refresh tokens
