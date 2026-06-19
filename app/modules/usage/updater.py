@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Mapping, Protocol, cast
 
 from app.core import usage as usage_core
+from app.core.auth.reauth_telemetry import REAUTH_SOURCE_USAGE_REFRESH, record_account_status_transition
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import (
     PERMANENT_FAILURE_CODES,
@@ -598,6 +599,12 @@ class UsageUpdater:
         await self._auth_manager._repo.update_status(account.id, status, reason)
         account.status = status
         account.deactivation_reason = reason
+        record_account_status_transition(
+            account,
+            status=status,
+            error_code=exc.code or f"http_{exc.status_code}",
+            source=REAUTH_SOURCE_USAGE_REFRESH,
+        )
 
     async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> bool:
         next_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")

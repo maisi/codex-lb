@@ -11,6 +11,7 @@ from hashlib import sha256
 from typing import Any, Protocol, TypeAlias
 
 from app.core.auth import DEFAULT_PLAN, OpenAIAuthClaims, extract_id_token_claims
+from app.core.auth.reauth_telemetry import REAUTH_SOURCE_TOKEN_REFRESH, record_account_status_transition
 from app.core.auth.refresh import RefreshError, TokenRefreshResult, refresh_access_token, should_refresh
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
 from app.core.config.settings import get_settings
@@ -216,6 +217,12 @@ class AuthManager:
                 await self._repo.update_status(account.id, status, reason)
                 account.status = status
                 account.deactivation_reason = reason
+                record_account_status_transition(
+                    account,
+                    status=status,
+                    error_code=exc.code,
+                    source=REAUTH_SOURCE_TOKEN_REFRESH,
+                )
             raise
 
         account.access_token_encrypted = self._encryptor.encrypt(result.access_token)
