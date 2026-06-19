@@ -90,6 +90,11 @@ from app.core.utils.sse import (
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
+from app.modules.accounts.token_vending import (
+    VendTokenRequest,
+    canonical_request_body,
+    verify_vend_signature,
+)
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     TRAFFIC_CLASS_OPPORTUNISTIC,
@@ -651,6 +656,49 @@ async def internal_bridge_responses(
         # the origin run its own normalization.
         enforce_openai_sdk_contract=False,
     )
+
+
+@internal_router.post("/oauth-token", include_in_schema=False)
+async def internal_bridge_oauth_token(
+    request: Request,
+    payload: VendTokenRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+) -> Response:
+    settings = get_settings()
+    secret = settings.account_token_vending_shared_secret
+    if not secret:
+        return _logged_error_json_response(
+            request,
+            503,
+            openai_error(
+                "vend_misconfigured",
+                "Account token vending is not configured on this instance",
+                error_type="server_error",
+            ),
+        )
+    error_reason = verify_vend_signature(
+        request.headers,
+        body_json=canonical_request_body(payload),
+        secret=secret.encode("utf-8"),
+    )
+    if error_reason is not None:
+        return _logged_error_json_response(
+            request,
+            403,
+            openai_error("vend_unauthorized", error_reason, error_type="invalid_request_error"),
+        )
+    vended = await context.service.vend_access_token(payload)
+    if vended is None:
+        return _logged_error_json_response(
+            request,
+            404,
+            openai_error(
+                "vend_account_unknown",
+                "Account is not known to the authority",
+                error_type="invalid_request_error",
+            ),
+        )
+    return JSONResponse(vended.model_dump(mode="json"))
 
 
 @v1_ws_router.websocket("/responses")
