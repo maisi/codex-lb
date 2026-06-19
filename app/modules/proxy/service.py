@@ -13,6 +13,7 @@ from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast
 import aiohttp
 import anyio
 
+from app.core.auth import token_expiry_epoch_ms
 from app.core.auth.refresh import (
     RefreshError,
     pop_token_refresh_timeout_override,
@@ -103,6 +104,7 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal as SessionLocal
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.accounts.token_vending import VendTokenRequest, VendTokenResponse
 from app.modules.api_keys.service import (
     API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
     API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
@@ -1407,6 +1409,29 @@ class ProxyService(
             if reason is not None:
                 raise UpstreamProxyRouteError(reason, account_id=account.id) from exc
             raise
+
+    async def vend_access_token(self, request: VendTokenRequest) -> VendTokenResponse | None:
+        """Authority-side: resolve the local account for a follower's vend request,
+        refresh it through the normal (rotation-safe, singleflighted) path, and
+        return ONLY the short-lived access token plus non-secret identity
+        metadata. The refresh and id tokens never leave this instance. Returns
+        ``None`` when the account is unknown here."""
+        async with self._repo_factory() as repos:
+            account: Account | None = None
+            if request.chatgpt_account_id:
+                account = await repos.accounts.get_active_by_chatgpt_account_id(request.chatgpt_account_id)
+            if account is None and request.account_id:
+                account = await repos.accounts.get_by_id(request.account_id)
+        if account is None:
+            return None
+        fresh = await self._ensure_fresh_with_budget(account, force=False)
+        access_token = self._encryptor.decrypt(fresh.access_token_encrypted)
+        return VendTokenResponse(
+            access_token=access_token,
+            expires_at_ms=token_expiry_epoch_ms(access_token) or 0,
+            account_id=fresh.chatgpt_account_id,
+            plan_type=fresh.plan_type,
+        )
 
     async def _ensure_previsible_unary_fresh_with_failover(
         self,
