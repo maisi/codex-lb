@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.auth.refresh import RefreshError
+from app.core.clients.usage import UsageFetchError
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
@@ -350,6 +351,32 @@ def _route() -> ResolvedUpstreamRoute:
         pool_id="pool_1",
         endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
     )
+
+
+@pytest.mark.asyncio
+async def test_deactivate_for_client_error_records_status_transition(monkeypatch: pytest.MonkeyPatch) -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_usage_obs", "workspace_usage_obs")
+    accounts_repo.accounts_by_id[account.id] = account
+
+    calls: list[tuple[str, AccountStatus, str, str]] = []
+    monkeypatch.setattr(
+        usage_updater_module,
+        "record_account_status_transition",
+        lambda acc, *, status, error_code, source: calls.append((acc.id, status, error_code, source)),
+    )
+
+    await updater._deactivate_for_client_error(account, UsageFetchError(401, "unauthorized", "token_invalidated"))
+
+    assert calls == [
+        (
+            account.id,
+            AccountStatus.REAUTH_REQUIRED,
+            "token_invalidated",
+            usage_updater_module.REAUTH_SOURCE_USAGE_REFRESH,
+        )
+    ]
 
 
 @pytest.mark.asyncio
