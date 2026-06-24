@@ -1,16 +1,33 @@
 ## ADDED Requirements
 
-### Requirement: Follower instances never rotate refresh tokens
+### Requirement: Each account has a single rotating owner; borrowers never rotate
 
-When `account_token_vending_authority_base_url` is configured, the instance is a follower and MUST obtain account access tokens by vending them from the authority over HTTPS. A follower MUST NOT call OpenAI's token endpoint and MUST NOT mutate the stored refresh token or id token for any account. The follower gate MUST cover every path that would otherwise refresh a token (proxy request freshness, usage refresh, auth guardian, account probe, model refresh, warmup).
+Account ownership MUST be resolved per account: an account is *borrowed* when it appears in this instance's explicit borrow list (`account_token_vending_remote_accounts`, keyed by email or chatgpt_account_id), or when the all-accounts fallback `account_token_vending_authority_base_url` is set; otherwise it is owned and refreshed locally. For a borrowed account the instance MUST obtain access tokens by vending from the named peer over HTTPS, MUST NOT call OpenAI's token endpoint, and MUST NOT mutate the stored refresh or id token. The gate MUST cover every path that would otherwise refresh a token (proxy request freshness, usage refresh, auth guardian, account probe, model refresh, warmup). Two instances MAY each borrow different accounts from the other (bidirectional), provided no account is borrowed by both sides.
 
-#### Scenario: follower serves traffic without rotating
+#### Scenario: borrowed account serves traffic without rotating
 
-- **GIVEN** the authority base URL is configured on a follower
-- **WHEN** any subsystem requests a fresh token for an account
-- **THEN** the follower fetches a short-lived access token from the authority
+- **GIVEN** an account listed in this instance's borrow list
+- **WHEN** any subsystem requests a fresh token for it
+- **THEN** the instance fetches a short-lived access token from the named peer
 - **AND** it does not call OpenAI's `/oauth/token`
 - **AND** the account's stored refresh and id tokens are left unchanged
+
+#### Scenario: locally owned account is refreshed normally
+
+- **GIVEN** an account NOT in this instance's borrow list (and no all-accounts fallback configured)
+- **WHEN** a fresh token is needed
+- **THEN** the instance refreshes/rotates it locally as usual and does not vend it
+
+#### Scenario: an instance refuses to vend an account it borrows
+
+- **WHEN** a vend request reaches an instance for an account that this instance itself borrows from a peer
+- **THEN** the instance refuses (does not refresh or rotate it) so the single-owner invariant holds and no vend loop occurs
+
+#### Scenario: follower caches the vended token
+
+- **WHEN** a borrowing instance has a cached access token that is not yet within the configured expiry skew
+- **THEN** it reuses the cached token without contacting the peer
+- **AND** a forced refresh (e.g. after an upstream 401) bypasses the cache and re-vends
 
 #### Scenario: follower caches the vended token
 

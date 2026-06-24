@@ -104,7 +104,12 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal as SessionLocal
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
-from app.modules.accounts.token_vending import VendTokenRequest, VendTokenResponse
+from app.modules.accounts.token_vending import (
+    TokenVendNotOwner,
+    VendTokenRequest,
+    VendTokenResponse,
+    vend_authority_for_account,
+)
 from app.modules.api_keys.service import (
     API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
     API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
@@ -1442,6 +1447,11 @@ class ProxyService(
                 account = await repos.accounts.get_by_id(request.account_id)
         if account is None:
             return None
+        # Single-owner guard: if this instance itself borrows the account from a
+        # peer, it is not the owner and must refuse (refreshing here would
+        # rotate the owner's token and re-introduce the collision, or loop).
+        if vend_authority_for_account(account, get_settings()) is not None:
+            raise TokenVendNotOwner(account.chatgpt_account_id or account.id)
         fresh = await self._ensure_fresh_with_budget(account, force=False)
         access_token = self._encryptor.decrypt(fresh.access_token_encrypted)
         return VendTokenResponse(

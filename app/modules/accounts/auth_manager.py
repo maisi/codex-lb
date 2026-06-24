@@ -25,7 +25,7 @@ from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_ro
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus
 from app.db.session import get_background_session
-from app.modules.accounts.token_vending import vend_follower_access_token
+from app.modules.accounts.token_vending import vend_authority_for_account, vend_follower_access_token
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 
 
@@ -175,15 +175,16 @@ class AuthManager:
         self._refresh_repo_factory = refresh_repo_factory
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
-        # Follower mode: when an authority is configured this instance must NOT
-        # rotate the refresh token (rotation + OpenAI reuse-detection would
-        # collide with the authority's copy and force re-auth). Vend a
-        # short-lived access token instead. This gate sits ahead of the
+        # Follower mode (per account): when this account is borrowed from a peer,
+        # this instance must NOT rotate the refresh token (rotation + OpenAI
+        # reuse-detection would collide with the owner's copy and force re-auth).
+        # Vend a short-lived access token instead. The gate is resolved
+        # per-account (explicit borrow list) and sits ahead of the
         # singleflight/refresh path, so it covers EVERY caller of ensure_fresh
         # (proxy, usage updater, auth guardian, probe, model refresh, warmup).
-        authority_base_url = get_settings().account_token_vending_authority_base_url
-        if authority_base_url:
-            return await self._vend_follower_token(account, authority_base_url=authority_base_url, force=force)
+        vend_authority = vend_authority_for_account(account, get_settings())
+        if vend_authority:
+            return await self._vend_follower_token(account, authority_base_url=vend_authority, force=force)
         if force or should_refresh(account.last_refresh):
             account = await _REFRESH_SINGLEFLIGHT.run(
                 _refresh_singleflight_key(self._encryptor, account),
