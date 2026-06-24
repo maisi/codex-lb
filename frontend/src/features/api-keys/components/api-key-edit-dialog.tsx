@@ -78,6 +78,7 @@ type ApiKeyEditDraft = {
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   applyToCodexModel: boolean;
+  forceIncludeUsage: boolean;
   enforcedModel: string;
   enforcedReasoningEffort: string;
   enforcedServiceTier: string;
@@ -91,6 +92,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
     applyToCodexModel: apiKey.applyToCodexModel,
+    forceIncludeUsage: apiKey.forceIncludeUsage,
     enforcedModel: apiKey.enforcedModel || "",
     enforcedReasoningEffort: apiKey.enforcedReasoningEffort || "none",
     enforcedServiceTier: apiKey.enforcedServiceTier || "none",
@@ -126,6 +128,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       name: values.name,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
       applyToCodexModel: draft.applyToCodexModel,
+      forceIncludeUsage: draft.forceIncludeUsage,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort: draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
@@ -182,6 +185,17 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               />
               <label htmlFor="edit-api-key-apply-to-codex-model" className="cursor-pointer">
                 Apply to codex /model
+              </label>
+            </div>
+
+            <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <Checkbox
+                id="edit-api-key-force-include-usage"
+                checked={draft.forceIncludeUsage}
+                onCheckedChange={(checked) => updateDraft({ forceIncludeUsage: checked === true })}
+              />
+              <label htmlFor="edit-api-key-force-include-usage" className="cursor-pointer">
+                Always report token usage (streaming chat completions)
               </label>
             </div>
 

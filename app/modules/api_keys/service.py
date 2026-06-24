@@ -253,6 +253,7 @@ class ApiKeyCreateData:
     name: str
     allowed_models: list[str] | None
     apply_to_codex_model: bool = False
+    force_include_usage: bool = False
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     enforced_service_tier: str | None = None
@@ -270,6 +271,8 @@ class ApiKeyUpdateData:
     allowed_models_set: bool = False
     apply_to_codex_model: bool | None = None
     apply_to_codex_model_set: bool = False
+    force_include_usage: bool | None = None
+    force_include_usage_set: bool = False
     enforced_model: str | None = None
     enforced_model_set: bool = False
     enforced_reasoning_effort: str | None = None
@@ -303,6 +306,7 @@ class ApiKeyData:
     created_at: datetime
     last_used_at: datetime | None
     apply_to_codex_model: bool = False
+    force_include_usage: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
@@ -427,6 +431,7 @@ class ApiKeysService:
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
             apply_to_codex_model=bool(payload.apply_to_codex_model),
+            force_include_usage=bool(payload.force_include_usage),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
@@ -528,6 +533,15 @@ class ApiKeysService:
         else:
             apply_to_codex_model = _UNSET
 
+        force_include_usage: bool | _Unset
+        if payload.force_include_usage_set:
+            if payload.force_include_usage is None:
+                force_include_usage = _UNSET
+            else:
+                force_include_usage = payload.force_include_usage
+        else:
+            force_include_usage = _UNSET
+
         if payload.enforced_reasoning_effort_set:
             enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
         else:
@@ -577,6 +591,7 @@ class ApiKeysService:
                 name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
                 allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
                 apply_to_codex_model=apply_to_codex_model,
+                force_include_usage=force_include_usage,
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
                 enforced_reasoning_effort=(
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
@@ -609,6 +624,7 @@ class ApiKeysService:
             or payload.name_set
             or payload.allowed_models_set
             or payload.apply_to_codex_model_set
+            or payload.force_include_usage_set
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
             or payload.enforced_service_tier_set
@@ -1465,6 +1481,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
         apply_to_codex_model=data.apply_to_codex_model,
+        force_include_usage=data.force_include_usage,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         enforced_service_tier=data.enforced_service_tier,
@@ -1495,6 +1512,7 @@ def _to_api_key_data(
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
         apply_to_codex_model=getattr(row, "apply_to_codex_model", False),
+        force_include_usage=getattr(row, "force_include_usage", False),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         enforced_service_tier=_normalize_service_tier_lenient(row.enforced_service_tier),

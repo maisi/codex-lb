@@ -51,7 +51,7 @@ from app.core.errors import (
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
-from app.core.openai.chat_requests import ChatCompletionsRequest
+from app.core.openai.chat_requests import ChatCompletionsRequest, ChatStreamOptions
 from app.core.openai.chat_responses import (
     ChatCompletion,
     ChatCompletionResult,
@@ -2069,7 +2069,11 @@ async def v1_chat_completions(
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     if payload.stream:
         stream_options = payload.stream_options
-        include_usage = cursor_compat_client or bool(stream_options and stream_options.include_usage)
+        include_usage = _resolve_chat_completions_include_usage(
+            cursor_compat_client=cursor_compat_client,
+            api_key=api_key,
+            stream_options=stream_options,
+        )
         chat_stream = stream_chat_chunks(
             _stream_proxy_errors_as_response_failed(stream),
             model=responses_payload.model,
@@ -2713,6 +2717,27 @@ def _is_cursor_compat_client(request: Request, api_key: ApiKeyData | None) -> bo
         return True
     user_agent = request.headers.get("user-agent", "")
     return "cursor" in user_agent.lower()
+
+
+def _resolve_chat_completions_include_usage(
+    *,
+    cursor_compat_client: bool,
+    api_key: ApiKeyData | None,
+    stream_options: ChatStreamOptions | None,
+) -> bool:
+    """Decide whether a streamed chat-completion response includes a usage chunk.
+
+    OpenAI only emits usage on streamed chat completions when the client opts in
+    via ``stream_options.include_usage``. codex-lb mirrors that by default, but
+    also forces usage on for Cursor-compatible clients and for API keys flagged
+    with ``force_include_usage`` (e.g. agents like OpenClaw that read token
+    counts from the response body but never set ``stream_options``).
+    """
+    return (
+        cursor_compat_client
+        or (api_key is not None and api_key.force_include_usage)
+        or bool(stream_options and stream_options.include_usage)
+    )
 
 
 def _is_context_length_startup_error(error: ProxyResponseError | OpenAIErrorEnvelopeModel) -> bool:
