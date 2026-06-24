@@ -91,6 +91,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.accounts.token_vending import (
+    TokenVendNotOwner,
     VendTokenRequest,
     canonical_request_body,
     verify_vend_signature,
@@ -687,7 +688,18 @@ async def internal_bridge_oauth_token(
             403,
             openai_error("vend_unauthorized", error_reason, error_type="invalid_request_error"),
         )
-    vended = await context.service.vend_access_token(payload)
+    try:
+        vended = await context.service.vend_access_token(payload)
+    except TokenVendNotOwner:
+        return _logged_error_json_response(
+            request,
+            409,
+            openai_error(
+                "vend_not_owner",
+                "This instance borrows the account from a peer and is not its owner",
+                error_type="invalid_request_error",
+            ),
+        )
     if vended is None:
         return _logged_error_json_response(
             request,

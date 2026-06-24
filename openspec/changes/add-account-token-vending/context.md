@@ -18,6 +18,8 @@ Access-token vending: one authority owns refresh/rotation; followers fetch short
 
 ## Operational notes
 
-- Authority: leave `account_token_vending_authority_base_url` unset; set the shared secret. Follower: set the authority URL (https) + the same shared secret.
-- The `/internal/bridge/*` routes are not behind the public proxy firewall; keep inter-instance traffic on an isolated network.
-- Reuses the existing internal bridge router and the HMAC pattern from `http_bridge_forwarding.py`; ring-membership/rendezvous generalization is intentionally out of scope (minimal authority/follower topology).
+- Ownership is explicit and per-account. On each instance, list the accounts it *borrows* from a peer in `account_token_vending_remote_accounts` (key = email or chatgpt_account_id, value = peer https base URL); set the same `account_token_vending_shared_secret` everywhere. Accounts not listed are owned/refreshed locally. Both instances can borrow different accounts from each other; an account MUST NOT be borrowed by both sides. `account_token_vending_authority_base_url` remains an optional all-accounts fallback (legacy one-way).
+- Each instance that is borrowed *from* must be reachable over HTTPS at its base URL (e.g. its own Cloudflare tunnel hostname scoped to `/internal/bridge/.*`). Bidirectional therefore needs a tunnel per instance.
+- Single-owner guard: an instance refuses (`TokenVendNotOwner` → 409) to vend an account it itself borrows, so config drift cannot create a vend loop or a second rotator.
+- The `/internal/bridge/*` routes are not behind the public proxy firewall; keep inter-instance traffic on an isolated network / scoped tunnel.
+- Reuses the existing internal bridge router and the HMAC pattern from `http_bridge_forwarding.py`; automatic rendezvous/ring ownership is intentionally out of scope (ownership is explicit per the operator's choice).

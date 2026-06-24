@@ -226,6 +226,32 @@ def get_account_token_vending_client() -> AccountTokenVendingClient:
     return _VENDING_CLIENT
 
 
+class TokenVendNotOwner(Exception):
+    """Raised on the authority side when a vend request targets an account that
+    THIS instance itself borrows from a peer -- i.e. this instance is not the
+    owner and must not refresh it (prevents A->B->A vend loops and protects the
+    single-owner invariant under config drift)."""
+
+
+def vend_authority_for_account(account, settings) -> str | None:
+    """Return the peer base URL this instance should vend the account's access
+    token from, or ``None`` when this instance owns/refreshes the account
+    locally.
+
+    Explicit per-account borrow list (``account_token_vending_remote_accounts``),
+    keyed by email or ``chatgpt_account_id``, takes precedence. The instance-wide
+    ``account_token_vending_authority_base_url`` is an optional all-accounts
+    fallback (legacy one-way mode); leave it unset for explicit per-account
+    ownership.
+    """
+    remote = getattr(settings, "account_token_vending_remote_accounts", None) or {}
+    if remote:
+        for key in (getattr(account, "email", None), getattr(account, "chatgpt_account_id", None)):
+            if key and key in remote:
+                return remote[key]
+    return getattr(settings, "account_token_vending_authority_base_url", None)
+
+
 async def vend_follower_access_token(account, *, force: bool, authority_base_url: str) -> VendTokenResponse:
     request = VendTokenRequest(
         chatgpt_account_id=account.chatgpt_account_id,

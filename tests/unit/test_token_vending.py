@@ -22,6 +22,7 @@ from app.modules.accounts.token_vending import (
     VendTokenResponse,
     build_vend_signature,
     canonical_request_body,
+    vend_authority_for_account,
     verify_vend_signature,
 )
 
@@ -91,6 +92,51 @@ def test_settings_requires_https_authority_and_secret() -> None:
         account_token_vending_shared_secret="s",
     )
     assert ok.account_token_vending_authority_base_url == "https://authority:2455"
+
+
+def test_settings_parses_and_validates_remote_accounts() -> None:
+    # http URL in the borrow list is rejected
+    with pytest.raises(ValidationError):
+        Settings(
+            account_token_vending_remote_accounts="user@example.com=http://peer-b",
+            account_token_vending_shared_secret="s",
+        )
+    # https borrow list without a shared secret is rejected
+    with pytest.raises(ValidationError):
+        Settings(account_token_vending_remote_accounts="user@example.com=https://peer-b")
+    ok = Settings(
+        account_token_vending_remote_accounts="user@example.com=https://peer-b/,cg-1=https://peer-c",
+        account_token_vending_shared_secret="s",
+    )
+    assert ok.account_token_vending_remote_accounts == {
+        "user@example.com": "https://peer-b",
+        "cg-1": "https://peer-c",
+    }
+
+
+def test_vend_authority_for_account_resolves_explicit_ownership() -> None:
+    account = SimpleNamespace(email="user@example.com", chatgpt_account_id="cg-1")
+    # borrow list keyed by email
+    by_email = SimpleNamespace(
+        account_token_vending_remote_accounts={"user@example.com": "https://peer-b"},
+        account_token_vending_authority_base_url=None,
+    )
+    assert vend_authority_for_account(account, by_email) == "https://peer-b"
+    # borrow list keyed by chatgpt_account_id
+    by_id = SimpleNamespace(
+        account_token_vending_remote_accounts={"cg-1": "https://peer-c"},
+        account_token_vending_authority_base_url=None,
+    )
+    assert vend_authority_for_account(account, by_id) == "https://peer-c"
+    # not listed, no fallback -> owned locally (None)
+    local = SimpleNamespace(account_token_vending_remote_accounts={}, account_token_vending_authority_base_url=None)
+    assert vend_authority_for_account(account, local) is None
+    # all-accounts fallback
+    fallback = SimpleNamespace(
+        account_token_vending_remote_accounts={},
+        account_token_vending_authority_base_url="https://all",
+    )
+    assert vend_authority_for_account(account, fallback) == "https://all"
 
 
 class _RecordingRepo:
@@ -189,3 +235,63 @@ async def test_follower_fails_closed_without_reauth(monkeypatch: pytest.MonkeyPa
     assert exc_info.value.transport_error is True
     assert exc_info.value.is_permanent is False
     assert repo.status_updates == []  # never marked REAUTH_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_borrowed_account_vends_from_mapped_peer(monkeypatch: pytest.MonkeyPatch) -> None:
+    auth_manager_module._clear_refresh_singleflight_state()
+    monkeypatch.setattr(
+        auth_manager_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            account_token_vending_remote_accounts={"user@example.com": "https://peer-b"},
+            account_token_vending_authority_base_url=None,
+        ),
+    )
+
+    def _explode(*_a: object, **_k: object):
+        raise AssertionError("borrowed account must not rotate")
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _explode)
+
+    seen: dict[str, str] = {}
+
+    async def _fake_vend(account, *, force, authority_base_url):
+        seen["url"] = authority_base_url
+        return VendTokenResponse(access_token="VENDED-PEER-B", expires_at_ms=0, account_id="cg-shared", plan_type=None)
+
+    monkeypatch.setattr(auth_manager_module, "vend_follower_access_token", _fake_vend)
+
+    account, encryptor = _follower_account()  # email user@example.com (in borrow list)
+    manager = AuthManager(cast(AccountsRepositoryPort, _RecordingRepo()))
+
+    result = await manager.ensure_fresh(account, force=True)
+
+    assert seen["url"] == "https://peer-b"  # vended from the per-account owner, not a global authority
+    assert encryptor.decrypt(result.access_token_encrypted) == "VENDED-PEER-B"
+
+
+@pytest.mark.asyncio
+async def test_owned_account_does_not_vend(monkeypatch: pytest.MonkeyPatch) -> None:
+    auth_manager_module._clear_refresh_singleflight_state()
+    monkeypatch.setattr(
+        auth_manager_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            account_token_vending_remote_accounts={},  # this account is NOT borrowed
+            account_token_vending_authority_base_url=None,
+        ),
+    )
+
+    def _no_vend(*_a: object, **_k: object):
+        raise AssertionError("owned account must not vend")
+
+    monkeypatch.setattr(auth_manager_module, "vend_follower_access_token", _no_vend)
+
+    account, _ = _follower_account()  # chatgpt_account_id set + fresh last_refresh
+    manager = AuthManager(cast(AccountsRepositoryPort, _RecordingRepo()))
+
+    # force=False + fresh last_refresh => no rotation, and not borrowed => no vend.
+    result = await manager.ensure_fresh(account, force=False)
+
+    assert result is account
