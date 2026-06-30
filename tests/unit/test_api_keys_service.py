@@ -1117,9 +1117,7 @@ async def test_create_key_defaults_force_include_usage_off() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
 
-    created = await service.create_key(
-        ApiKeyCreateData(name="default-usage", allowed_models=None, expires_at=None)
-    )
+    created = await service.create_key(ApiKeyCreateData(name="default-usage", allowed_models=None, expires_at=None))
 
     assert created.force_include_usage is False
 

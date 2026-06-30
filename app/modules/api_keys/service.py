@@ -80,6 +80,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         name: str | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
         apply_to_codex_model: bool | _Unset = ...,
+        force_include_usage: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         enforced_service_tier: str | None | _Unset = ...,

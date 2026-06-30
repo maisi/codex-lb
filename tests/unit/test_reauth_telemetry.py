@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from typing import Any, cast
 
 import pytest
 
@@ -44,7 +45,7 @@ def _counter_value(status: str, error_code: str, source: str) -> float | None:
     registry = prometheus_metrics.REGISTRY
     if registry is None:
         return None
-    return registry.get_sample_value(
+    return cast(Any, registry).get_sample_value(
         "codex_lb_account_status_transition_total",
         {"status": status, "error_code": error_code, "source": source},
     )
@@ -85,7 +86,8 @@ def test_records_counter_and_structured_log(caplog: pytest.LogCaptureFixture) ->
 
 def test_missing_last_refresh_and_none_error_code_degrade_gracefully(caplog: pytest.LogCaptureFixture) -> None:
     account = _account("acc_no_refresh")
-    account.last_refresh = None  # defensive: column is non-nullable but the hook must not raise
+    # defensive: column is non-nullable but the hook must not raise; setattr bypasses the typed descriptor
+    setattr(account, "last_refresh", None)
 
     with caplog.at_level(logging.WARNING):
         record_account_status_transition(

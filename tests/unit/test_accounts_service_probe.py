@@ -118,7 +118,7 @@ async def test_probe_account_recovers_usage_404_deactivated_account(monkeypatch)
     assert result.account_status_after == "active"
     assert account.status == AccountStatus.ACTIVE
     assert account.deactivation_reason is None
-    service._repo.update_status_if_current.assert_awaited_once_with(
+    cast(AsyncMock, service._repo.update_status_if_current).assert_awaited_once_with(
         _ACCOUNT_ID,
         AccountStatus.ACTIVE,
         None,
@@ -150,7 +150,7 @@ async def test_probe_account_keeps_usage_404_deactivated_account_on_failed_probe
     assert result.account_status_after == "deactivated"
     assert account.status == AccountStatus.DEACTIVATED
     assert account.deactivation_reason == "Usage API error: HTTP 404 - None"
-    service._repo.update_status_if_current.assert_not_awaited()
+    cast(AsyncMock, service._repo.update_status_if_current).assert_not_awaited()
 
 
 @pytest.mark.asyncio

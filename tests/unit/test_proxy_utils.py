@@ -24657,9 +24657,7 @@ def test_resolve_include_usage_forced_by_api_key_flag() -> None:
     # though the client never sent stream_options.include_usage.
     key = _include_usage_api_key(force_include_usage=True)
     assert (
-        proxy_api._resolve_chat_completions_include_usage(
-            cursor_compat_client=False, api_key=key, stream_options=None
-        )
+        proxy_api._resolve_chat_completions_include_usage(cursor_compat_client=False, api_key=key, stream_options=None)
         is True
     )
 
@@ -24667,16 +24665,12 @@ def test_resolve_include_usage_forced_by_api_key_flag() -> None:
 def test_resolve_include_usage_off_by_default() -> None:
     key = _include_usage_api_key(force_include_usage=False)
     assert (
-        proxy_api._resolve_chat_completions_include_usage(
-            cursor_compat_client=False, api_key=key, stream_options=None
-        )
+        proxy_api._resolve_chat_completions_include_usage(cursor_compat_client=False, api_key=key, stream_options=None)
         is False
     )
     # Unauthenticated request (auth disabled) with no opt-in stays off.
     assert (
-        proxy_api._resolve_chat_completions_include_usage(
-            cursor_compat_client=False, api_key=None, stream_options=None
-        )
+        proxy_api._resolve_chat_completions_include_usage(cursor_compat_client=False, api_key=None, stream_options=None)
         is False
     )
 
@@ -24693,8 +24687,6 @@ def test_resolve_include_usage_respects_stream_options_and_cursor() -> None:
         is True
     )
     assert (
-        proxy_api._resolve_chat_completions_include_usage(
-            cursor_compat_client=True, api_key=None, stream_options=None
-        )
+        proxy_api._resolve_chat_completions_include_usage(cursor_compat_client=True, api_key=None, stream_options=None)
         is True
     )

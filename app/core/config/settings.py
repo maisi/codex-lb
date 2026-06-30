@@ -535,9 +535,7 @@ class Settings(BaseSettings):
         if authority is not None:
             parsed = urlparse(authority)
             if parsed.scheme != "https" or not parsed.hostname:
-                raise ValueError(
-                    "account_token_vending_authority_base_url must be an https:// URL with a hostname"
-                )
+                raise ValueError("account_token_vending_authority_base_url must be an https:// URL with a hostname")
             if not self.account_token_vending_shared_secret:
                 raise ValueError(
                     "account_token_vending_shared_secret is required when "
