@@ -209,6 +209,15 @@ class Settings(BaseSettings):
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None
+    # Inter-instance access-token vending. When the authority base URL is set,
+    # THIS instance is a follower: it fetches short-lived access tokens from the
+    # authority over HTTPS and never rotates the refresh token. When unset, the
+    # instance refreshes/rotates normally (authority or single-instance mode).
+    # The shared secret authenticates vend requests and must match across the
+    # authority and all followers; it is independent of the encryption key.
+    account_token_vending_authority_base_url: str | None = None
+    account_token_vending_shared_secret: str | None = None
+    account_token_vending_access_token_skew_seconds: float = Field(default=60.0, ge=0)
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     quota_planner_scheduler_enabled: bool = True
@@ -435,6 +444,16 @@ class Settings(BaseSettings):
             return stripped or None
         raise TypeError("http_responses_session_bridge_advertise_base_url must be a string")
 
+    @field_validator("account_token_vending_authority_base_url", mode="before")
+    @classmethod
+    def _normalize_account_token_vending_authority_base_url(cls, value: OptionalStringInput) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip().rstrip("/")
+            return stripped or None
+        raise TypeError("account_token_vending_authority_base_url must be a string")
+
     @field_validator("model_context_window_overrides", mode="before")
     @classmethod
     def _parse_model_context_window_overrides(cls, value: ModelContextWindowOverridesInput) -> dict[str, int]:
@@ -507,6 +526,22 @@ class Settings(BaseSettings):
             ):
                 raise ValueError(
                     "http_responses_session_bridge_advertise_base_url must be replica-specific for bridge routing"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_account_token_vending(self) -> "Settings":
+        authority = self.account_token_vending_authority_base_url
+        if authority is not None:
+            parsed = urlparse(authority)
+            if parsed.scheme != "https" or not parsed.hostname:
+                raise ValueError(
+                    "account_token_vending_authority_base_url must be an https:// URL with a hostname"
+                )
+            if not self.account_token_vending_shared_secret:
+                raise ValueError(
+                    "account_token_vending_shared_secret is required when "
+                    "account_token_vending_authority_base_url is set"
                 )
         return self
 

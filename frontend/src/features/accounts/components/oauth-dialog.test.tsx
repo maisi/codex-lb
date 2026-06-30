@@ -161,7 +161,9 @@ describe("OauthDialog", () => {
   it("restores keyboard focus after fallback copy inside dialog", async () => {
     const user = userEvent.setup();
     const execCommand = vi.fn(() => {
-      expect(document.activeElement?.tagName).toBe("TEXTAREA");
+      const active = document.activeElement;
+      expect(active?.tagName).toBe("TEXTAREA");
+      expect(active?.closest('[role="dialog"]')).not.toBeNull();
       return true;
     });
 
@@ -237,6 +239,53 @@ describe("OauthDialog", () => {
     await waitFor(() => {
       expect(execCommand).toHaveBeenCalledWith("copy");
       expect(toastError).toHaveBeenCalledWith("Failed to copy");
+    });
+  });
+
+  it("falls back inside the dialog for device code and verification URL copy", async () => {
+    const user = userEvent.setup();
+    const copiedValues: string[] = [];
+    const execCommand = vi.fn(() => {
+      const active = document.activeElement as HTMLTextAreaElement | null;
+      expect(active?.tagName).toBe("TEXTAREA");
+      expect(active?.closest('[role="dialog"]')).not.toBeNull();
+      copiedValues.push(active?.value ?? "");
+      return true;
+    });
+
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: false,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    render(
+      <OauthDialog
+        open
+        state={devicePendingState}
+        onOpenChange={vi.fn()}
+        onStart={vi.fn().mockResolvedValue(undefined)}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+      />,
+    );
+
+    const copyButtons = screen.getAllByRole("button", { name: "Copy" });
+    expect(copyButtons).toHaveLength(2);
+
+    await user.click(copyButtons[0]);
+    await user.click(copyButtons[1]);
+
+    await waitFor(() => {
+      expect(copiedValues).toEqual(["AAAA-BBBB", "https://auth.example.com/device"]);
     });
   });
 

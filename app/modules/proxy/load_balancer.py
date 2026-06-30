@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Iterable, Literal
 from uuid import uuid4
 
 from app.core import usage as usage_core
+from app.core.auth.reauth_telemetry import REAUTH_SOURCE_PROXY, record_account_status_transition
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -1465,6 +1466,12 @@ class LoadBalancer:
                 await self._persist_state(repos.accounts, account, state)
             mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
+            record_account_status_transition(
+                account,
+                status=state.status,
+                error_code=error_code,
+                source=REAUTH_SOURCE_PROXY,
+            )
 
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)

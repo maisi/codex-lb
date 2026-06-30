@@ -15,6 +15,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import DEFAULT_PLAN, OpenAIAuthClaims, extract_id_token_claims
+from app.core.auth.reauth_telemetry import REAUTH_SOURCE_TOKEN_REFRESH, record_account_status_transition
 from app.core.auth.refresh import RefreshError, TokenRefreshResult, refresh_access_token, should_refresh
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
 from app.core.config.settings import get_settings
@@ -24,6 +25,7 @@ from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_ro
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus
 from app.db.session import get_background_session
+from app.modules.accounts.token_vending import vend_follower_access_token
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 
 
@@ -173,12 +175,36 @@ class AuthManager:
         self._refresh_repo_factory = refresh_repo_factory
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+        # Follower mode: when an authority is configured this instance must NOT
+        # rotate the refresh token (rotation + OpenAI reuse-detection would
+        # collide with the authority's copy and force re-auth). Vend a
+        # short-lived access token instead. This gate sits ahead of the
+        # singleflight/refresh path, so it covers EVERY caller of ensure_fresh
+        # (proxy, usage updater, auth guardian, probe, model refresh, warmup).
+        authority_base_url = get_settings().account_token_vending_authority_base_url
+        if authority_base_url:
+            return await self._vend_follower_token(account, authority_base_url=authority_base_url, force=force)
         if force or should_refresh(account.last_refresh):
             account = await _REFRESH_SINGLEFLIGHT.run(
                 _refresh_singleflight_key(self._encryptor, account),
                 lambda: self._run_refresh(account),
             )
         return await self._ensure_chatgpt_account_id(account)
+
+    async def _vend_follower_token(self, account: Account, *, authority_base_url: str, force: bool) -> Account:
+        vended = await vend_follower_access_token(account, force=force, authority_base_url=authority_base_url)
+        # Re-encrypt the vended access token with THIS instance's own key so all
+        # downstream callers that decrypt account.access_token_encrypted keep
+        # working unchanged. Never touch the refresh/id token material in
+        # follower mode, and never persist (the in-memory vend cache provides
+        # warmth within the process).
+        account.access_token_encrypted = self._encryptor.encrypt(vended.access_token)
+        account.last_refresh = utcnow()
+        if vended.plan_type:
+            account.plan_type = coerce_account_plan_type(vended.plan_type, account.plan_type or DEFAULT_PLAN)
+        if vended.account_id and not account.chatgpt_account_id:
+            account.chatgpt_account_id = vended.account_id
+        return account
 
     async def _run_refresh(self, account: Account) -> Account:
         """Singleflight body for token refresh.
@@ -223,6 +249,12 @@ class AuthManager:
                 account.deactivation_reason = reason
                 mark_account_routing_unavailable(account.id)
                 get_account_selection_cache().invalidate()
+                record_account_status_transition(
+                    account,
+                    status=status,
+                    error_code=exc.code,
+                    source=REAUTH_SOURCE_TOKEN_REFRESH,
+                )
             raise
 
         account.access_token_encrypted = self._encryptor.encrypt(result.access_token)

@@ -126,6 +126,38 @@ describe("AccountActions", () => {
     },
   );
 
+  it("enables force probe for usage 404 deactivated accounts", async () => {
+    const user = userEvent.setup();
+    const account = createAccountSummary({
+      status: "deactivated",
+      deactivationReason: "Usage API error: HTTP 404 - None",
+    });
+    const onProbe = vi.fn();
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={onProbe}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Force probe" });
+    expect(button).toBeEnabled();
+
+    await user.click(button);
+
+    expect(onProbe).toHaveBeenCalledWith(account.accountId);
+  });
+
   it("disables force probe in read-only mode", async () => {
     const user = userEvent.setup();
     const account = createAccountSummary();

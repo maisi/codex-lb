@@ -59,7 +59,7 @@ from app.core.errors import (
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
-from app.core.openai.chat_requests import ChatCompletionsRequest
+from app.core.openai.chat_requests import ChatCompletionsRequest, ChatStreamOptions
 from app.core.openai.chat_responses import (
     ChatCompletion,
     ChatCompletionResult,
@@ -102,6 +102,11 @@ from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.token_vending import (
+    VendTokenRequest,
+    canonical_request_body,
+    verify_vend_signature,
+)
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     TRAFFIC_CLASS_OPPORTUNISTIC,
@@ -684,6 +689,49 @@ async def internal_bridge_responses(
         # the origin run its own normalization.
         enforce_openai_sdk_contract=False,
     )
+
+
+@internal_router.post("/oauth-token", include_in_schema=False)
+async def internal_bridge_oauth_token(
+    request: Request,
+    payload: VendTokenRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+) -> Response:
+    settings = get_settings()
+    secret = settings.account_token_vending_shared_secret
+    if not secret:
+        return _logged_error_json_response(
+            request,
+            503,
+            openai_error(
+                "vend_misconfigured",
+                "Account token vending is not configured on this instance",
+                error_type="server_error",
+            ),
+        )
+    error_reason = verify_vend_signature(
+        request.headers,
+        body_json=canonical_request_body(payload),
+        secret=secret.encode("utf-8"),
+    )
+    if error_reason is not None:
+        return _logged_error_json_response(
+            request,
+            403,
+            openai_error("vend_unauthorized", error_reason, error_type="invalid_request_error"),
+        )
+    vended = await context.service.vend_access_token(payload)
+    if vended is None:
+        return _logged_error_json_response(
+            request,
+            404,
+            openai_error(
+                "vend_account_unknown",
+                "Account is not known to the authority",
+                error_type="invalid_request_error",
+            ),
+        )
+    return JSONResponse(vended.model_dump(mode="json"))
 
 
 @v1_ws_router.websocket("/responses")
@@ -2390,7 +2438,11 @@ async def v1_chat_completions(
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     if payload.stream:
         stream_options = payload.stream_options
-        include_usage = cursor_compat_client or bool(stream_options and stream_options.include_usage)
+        include_usage = _resolve_chat_completions_include_usage(
+            cursor_compat_client=cursor_compat_client,
+            api_key=api_key,
+            stream_options=stream_options,
+        )
         chat_stream = stream_chat_chunks(
             _stream_proxy_errors_as_response_failed(stream),
             model=responses_payload.model,
@@ -3088,6 +3140,27 @@ def _is_cursor_compat_client(request: Request, api_key: ApiKeyData | None) -> bo
         return True
     user_agent = request.headers.get("user-agent", "")
     return "cursor" in user_agent.lower()
+
+
+def _resolve_chat_completions_include_usage(
+    *,
+    cursor_compat_client: bool,
+    api_key: ApiKeyData | None,
+    stream_options: ChatStreamOptions | None,
+) -> bool:
+    """Decide whether a streamed chat-completion response includes a usage chunk.
+
+    OpenAI only emits usage on streamed chat completions when the client opts in
+    via ``stream_options.include_usage``. codex-lb mirrors that by default, but
+    also forces usage on for Cursor-compatible clients and for API keys flagged
+    with ``force_include_usage`` (e.g. agents like OpenClaw that read token
+    counts from the response body but never set ``stream_options``).
+    """
+    return (
+        cursor_compat_client
+        or (api_key is not None and api_key.force_include_usage)
+        or bool(stream_options and stream_options.include_usage)
+    )
 
 
 def _is_context_length_startup_error(error: ProxyResponseError | OpenAIErrorEnvelopeModel) -> bool:

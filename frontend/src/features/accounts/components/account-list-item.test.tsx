@@ -209,6 +209,30 @@ describe("AccountListItem", () => {
     ).toBeInTheDocument();
   });
 
+  it("marks burn-first accounts in the list", () => {
+    const account = createAccountSummary({ routingPolicy: "burn_first" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Burn first")).toBeInTheDocument();
+  });
+
+  it("marks preserved accounts in the list", () => {
+    const account = createAccountSummary({ routingPolicy: "preserve" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Preserve")).toBeInTheDocument();
+  });
+
+  it("marks normal accounts in the list", () => {
+    const account = createAccountSummary({ routingPolicy: "normal" });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Normal")).toBeInTheDocument();
+  });
+
   it("uses ChatGPT account id before workspace metadata or unknown fallback", () => {
     const account = createAccountSummary({
       planType: "team",

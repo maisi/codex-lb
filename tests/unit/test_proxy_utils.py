@@ -24633,3 +24633,68 @@ async def test_inline_http_bridge_image_urls_rejects_when_fetch_fails(monkeypatc
 
     assert exc_info.value.status_code == 400
     assert "image_download_failed" in json.dumps(exc_info.value.payload)
+
+
+def _include_usage_api_key(*, force_include_usage: bool, name: str = "Openclaw") -> ApiKeyData:
+    return ApiKeyData(
+        id="key_include_usage",
+        name=name,
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        force_include_usage=force_include_usage,
+    )
+
+
+def test_resolve_include_usage_forced_by_api_key_flag() -> None:
+    # The OpenClaw fix: a key flagged force_include_usage gets a usage chunk even
+    # though the client never sent stream_options.include_usage.
+    key = _include_usage_api_key(force_include_usage=True)
+    assert (
+        proxy_api._resolve_chat_completions_include_usage(
+            cursor_compat_client=False, api_key=key, stream_options=None
+        )
+        is True
+    )
+
+
+def test_resolve_include_usage_off_by_default() -> None:
+    key = _include_usage_api_key(force_include_usage=False)
+    assert (
+        proxy_api._resolve_chat_completions_include_usage(
+            cursor_compat_client=False, api_key=key, stream_options=None
+        )
+        is False
+    )
+    # Unauthenticated request (auth disabled) with no opt-in stays off.
+    assert (
+        proxy_api._resolve_chat_completions_include_usage(
+            cursor_compat_client=False, api_key=None, stream_options=None
+        )
+        is False
+    )
+
+
+def test_resolve_include_usage_respects_stream_options_and_cursor() -> None:
+    from app.core.openai.chat_requests import ChatStreamOptions
+
+    assert (
+        proxy_api._resolve_chat_completions_include_usage(
+            cursor_compat_client=False,
+            api_key=None,
+            stream_options=ChatStreamOptions(include_usage=True),
+        )
+        is True
+    )
+    assert (
+        proxy_api._resolve_chat_completions_include_usage(
+            cursor_compat_client=True, api_key=None, stream_options=None
+        )
+        is True
+    )

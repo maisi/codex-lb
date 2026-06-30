@@ -304,6 +304,7 @@ class ApiKeysRepository:
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
+        force_include_usage: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
@@ -329,6 +330,9 @@ class ApiKeysRepository:
         if apply_to_codex_model is not _UNSET:
             assert isinstance(apply_to_codex_model, bool)
             row.apply_to_codex_model = apply_to_codex_model
+        if force_include_usage is not _UNSET:
+            assert isinstance(force_include_usage, bool)
+            row.force_include_usage = force_include_usage
         if enforced_model is not _UNSET:
             assert enforced_model is None or isinstance(enforced_model, str)
             row.enforced_model = enforced_model
