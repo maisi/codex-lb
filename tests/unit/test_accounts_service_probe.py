@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import (
     DEFAULT_PROBE_MODEL,
     AccountNotProbableError,
@@ -116,7 +118,7 @@ async def test_probe_account_recovers_usage_404_deactivated_account(monkeypatch)
     assert result.account_status_after == "active"
     assert account.status == AccountStatus.ACTIVE
     assert account.deactivation_reason is None
-    service._repo.update_status_if_current.assert_awaited_once_with(
+    cast(AsyncMock, service._repo.update_status_if_current).assert_awaited_once_with(
         _ACCOUNT_ID,
         AccountStatus.ACTIVE,
         None,
@@ -148,7 +150,7 @@ async def test_probe_account_keeps_usage_404_deactivated_account_on_failed_probe
     assert result.account_status_after == "deactivated"
     assert account.status == AccountStatus.DEACTIVATED
     assert account.deactivation_reason == "Usage API error: HTTP 404 - None"
-    service._repo.update_status_if_current.assert_not_awaited()
+    cast(AsyncMock, service._repo.update_status_if_current).assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -275,6 +277,28 @@ async def test_probe_account_surfaces_network_failure_status(monkeypatch):
     result = await service.probe_account(_ACCOUNT_ID)
     assert result is not None
     assert result.probe_status_code == 0
+
+
+@pytest.mark.asyncio
+async def test_import_usage_refresh_allowed_tolerates_missing_upstream_proxy_settings_schema(monkeypatch):
+    account = _make_account()
+
+    async def _resolve_upstream_route(*_args: Any, **_kwargs: Any):
+        return None
+
+    class _Session:
+        async def get(self, *_args: Any, **_kwargs: Any) -> None:
+            raise OperationalError(
+                "select dashboard_settings",
+                {},
+                Exception("column dashboard_settings.upstream_proxy_routing_enabled does not exist"),
+            )
+
+    monkeypatch.setattr("app.modules.accounts.service.resolve_upstream_route", _resolve_upstream_route)
+    repo = cast(AccountsRepository, SimpleNamespace(session=_Session()))
+    service = AccountsService(repo=repo)
+
+    assert await service._import_usage_refresh_allowed(account) is True
 
 
 @pytest.mark.asyncio
