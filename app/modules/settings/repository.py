@@ -146,6 +146,8 @@ class SettingsRepository:
             settings.sticky_reallocation_secondary_budget_threshold_pct = (
                 sticky_reallocation_secondary_budget_threshold_pct
             )
+        if additional_quota_routing_policies_json is not None:
+            settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
         if warmup_model is not None:
             settings.warmup_model = warmup_model
         if import_without_overwrite is not None:
