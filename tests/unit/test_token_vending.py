@@ -94,21 +94,35 @@ def test_settings_requires_https_authority_and_secret() -> None:
     assert ok.account_token_vending_authority_base_url == "https://authority:2455"
 
 
-def test_settings_parses_and_validates_remote_accounts() -> None:
+def test_settings_validates_remote_accounts() -> None:
     # http URL in the borrow list is rejected
     with pytest.raises(ValidationError):
         Settings(
-            account_token_vending_remote_accounts="user@example.com=http://peer-b",
+            account_token_vending_remote_accounts={"user@example.com": "http://peer-b"},
             account_token_vending_shared_secret="s",
         )
     # https borrow list without a shared secret is rejected
     with pytest.raises(ValidationError):
-        Settings(account_token_vending_remote_accounts="user@example.com=https://peer-b")
+        Settings(account_token_vending_remote_accounts={"user@example.com": "https://peer-b"})
+    # dict input normalizes a trailing slash
     ok = Settings(
-        account_token_vending_remote_accounts="user@example.com=https://peer-b/,cg-1=https://peer-c",
+        account_token_vending_remote_accounts={"user@example.com": "https://peer-b/", "cg-1": "https://peer-c"},
         account_token_vending_shared_secret="s",
     )
     assert ok.account_token_vending_remote_accounts == {
+        "user@example.com": "https://peer-b",
+        "cg-1": "https://peer-c",
+    }
+
+
+def test_settings_parses_remote_accounts_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "CODEX_LB_ACCOUNT_TOKEN_VENDING_REMOTE_ACCOUNTS",
+        "user@example.com=https://peer-b,cg-1=https://peer-c",
+    )
+    monkeypatch.setenv("CODEX_LB_ACCOUNT_TOKEN_VENDING_SHARED_SECRET", "s")
+    settings = Settings()
+    assert settings.account_token_vending_remote_accounts == {
         "user@example.com": "https://peer-b",
         "cg-1": "https://peer-c",
     }
