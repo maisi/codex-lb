@@ -18,7 +18,7 @@
 - [x] 4.2 `POST /internal/bridge/oauth-token` — verify HMAC signature, 503 if unconfigured, 403 on bad/expired signature, 409 if not the owner, 404 on unknown account, else the vend response.
 
 ## 4a. Loopback-secured transport + lazy background vend
-- [x] 4a.1 Allow `http://` for loopback hosts (127.0.0.1/localhost/::1) in vending-URL validation, so the owner can be reached via an SSH tunnel / local terminator; non-loopback `http://` still rejected.
+- [x] 4a.1 Allow `http://` for local hosts (loopback / RFC1918-private / link-local / `localhost` / `host.docker.internal`) in vending-URL validation, so the owner can be reached via an SSH tunnel / local terminator / docker-bridge relay; `http://` to a public address still rejected.
 - [x] 4a.2 Add `ensure_fresh(..., background=False)`; borrowed accounts are NOT vended on background passes (auth guardian, usage refresh, model refresh, limit warm-up all pass `background=True`) — only on the live request path. Owned accounts unaffected.
 
 ## 5. Tests

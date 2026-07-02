@@ -113,12 +113,19 @@ def test_settings_validates_remote_accounts() -> None:
         "user@example.com": "https://peer-b",
         "cg-1": "https://peer-c",
     }
-    # http:// is allowed ONLY for a loopback host (SSH tunnel / local terminator)
-    loopback_ok = Settings(
-        account_token_vending_remote_accounts={"user@example.com": "http://127.0.0.1:19455"},
-        account_token_vending_shared_secret="s",
-    )
-    assert loopback_ok.account_token_vending_remote_accounts == {"user@example.com": "http://127.0.0.1:19455"}
+    # http:// is allowed for loopback / private (RFC1918) / link-local hosts (tunnel / relay)
+    for local_url in ("http://127.0.0.1:19455", "http://192.168.64.1:19455", "http://host.docker.internal:19455"):
+        ok_local = Settings(
+            account_token_vending_remote_accounts={"user@example.com": local_url},
+            account_token_vending_shared_secret="s",
+        )
+        assert ok_local.account_token_vending_remote_accounts == {"user@example.com": local_url}
+    # http:// to a PUBLIC address is still rejected
+    with pytest.raises(ValidationError):
+        Settings(
+            account_token_vending_remote_accounts={"user@example.com": "http://8.8.8.8:19455"},
+            account_token_vending_shared_secret="s",
+        )
 
 
 def test_settings_parses_remote_accounts_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

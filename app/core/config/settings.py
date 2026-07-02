@@ -573,15 +573,24 @@ class Settings(BaseSettings):
                     raise ValueError(
                         "account token vending URLs (authority_base_url / remote_accounts) must include a hostname"
                     )
-                # https is required, EXCEPT http:// is allowed for a loopback host — used when the
-                # owner endpoint is reached through an SSH tunnel / local terminator that already
-                # provides transport security (see openspec account-token-vending).
-                is_loopback = hostname in {"127.0.0.1", "localhost", "::1"}
-                if parsed.scheme == "https" or (parsed.scheme == "http" and is_loopback):
+                # https is required for public hosts, EXCEPT http:// is allowed for a
+                # loopback / private (RFC1918) / link-local address or host.docker.internal —
+                # i.e. a local hop that already carries its own transport security: an SSH
+                # tunnel, a co-located TLS terminator, or a docker-bridge relay
+                # (see openspec account-token-vending).
+                http_ok = hostname in {"localhost", "host.docker.internal"}
+                if not http_ok:
+                    try:
+                        ip = ip_address(hostname)
+                        http_ok = ip.is_loopback or ip.is_private or ip.is_link_local
+                    except ValueError:
+                        http_ok = False
+                if parsed.scheme == "https" or (parsed.scheme == "http" and http_ok):
                     continue
                 raise ValueError(
                     "account token vending URLs must be https:// (http:// is allowed only for a "
-                    "loopback host used with an SSH tunnel / local terminator)"
+                    "loopback/private/link-local host or host.docker.internal — SSH tunnel / "
+                    "local terminator / docker relay)"
                 )
             if not self.account_token_vending_shared_secret:
                 raise ValueError(

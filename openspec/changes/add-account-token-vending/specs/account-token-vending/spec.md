@@ -81,15 +81,15 @@ When the authority is unreachable, a follower MUST continue to serve a cached ac
 
 Neither the follower nor the authority may log access, refresh, or id token values when vending.
 
-### Requirement: Vending URLs are HTTPS, except loopback over a secured local channel
+### Requirement: Vending URLs are HTTPS, except a local host over a secured channel
 
-Configured vending URLs (`account_token_vending_authority_base_url` and every value in `account_token_vending_remote_accounts`) MUST use `https://`, EXCEPT `http://` is permitted when the host is a loopback address (`127.0.0.1`, `localhost`, `::1`). The loopback exception exists so the owner endpoint can be reached through an SSH tunnel or a co-located TLS terminator that already provides transport security; a non-loopback `http://` URL MUST fail configuration validation at startup.
+Configured vending URLs (`account_token_vending_authority_base_url` and every value in `account_token_vending_remote_accounts`) MUST use `https://`, EXCEPT `http://` is permitted when the host is local: a loopback address, a private (RFC1918) or link-local address, or `localhost`/`host.docker.internal`. This exists so the owner endpoint can be reached over a hop that already carries its own transport security — an SSH tunnel, a co-located TLS terminator, or a docker-bridge relay. `http://` to a public address MUST fail configuration validation at startup.
 
-#### Scenario: loopback http is accepted for a tunnelled owner
+#### Scenario: http to a local host is accepted; public http is rejected
 
-- **WHEN** a borrow-list entry points at `http://127.0.0.1:<port>` (an SSH-tunnelled owner endpoint)
+- **WHEN** a borrow-list entry points at `http://` a loopback / private / link-local address or `host.docker.internal` (e.g. a docker-bridge relay or SSH-tunnelled owner endpoint)
 - **THEN** configuration validation accepts it
-- **AND** a non-loopback `http://` URL is rejected at startup
+- **AND** an `http://` URL to a public address is rejected at startup
 
 ### Requirement: Borrowed accounts are vended lazily, only on the live request path
 
