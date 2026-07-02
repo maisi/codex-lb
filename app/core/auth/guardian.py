@@ -34,7 +34,7 @@ class _AccountsRepositoryLike(Protocol):
 
 
 class _AuthManagerLike(Protocol):
-    async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account: ...
+    async def ensure_fresh(self, account: Account, *, force: bool = False, background: bool = False) -> Account: ...
 
 
 _RepoFactory = Callable[[], AbstractAsyncContextManager[_AccountsRepositoryLike]]
@@ -139,7 +139,7 @@ class AuthGuardianScheduler:
                     return
                 manager = self.auth_manager_factory(repo)
                 try:
-                    refresh_task = asyncio.create_task(manager.ensure_fresh(account, force=True))
+                    refresh_task = asyncio.create_task(manager.ensure_fresh(account, force=True, background=True))
                     try:
                         await asyncio.shield(refresh_task)
                     except asyncio.CancelledError:

@@ -80,3 +80,23 @@ When the authority is unreachable, a follower MUST continue to serve a cached ac
 ### Requirement: Token material is never logged
 
 Neither the follower nor the authority may log access, refresh, or id token values when vending.
+
+### Requirement: Vending URLs are HTTPS, except loopback over a secured local channel
+
+Configured vending URLs (`account_token_vending_authority_base_url` and every value in `account_token_vending_remote_accounts`) MUST use `https://`, EXCEPT `http://` is permitted when the host is a loopback address (`127.0.0.1`, `localhost`, `::1`). The loopback exception exists so the owner endpoint can be reached through an SSH tunnel or a co-located TLS terminator that already provides transport security; a non-loopback `http://` URL MUST fail configuration validation at startup.
+
+#### Scenario: loopback http is accepted for a tunnelled owner
+
+- **WHEN** a borrow-list entry points at `http://127.0.0.1:<port>` (an SSH-tunnelled owner endpoint)
+- **THEN** configuration validation accepts it
+- **AND** a non-loopback `http://` URL is rejected at startup
+
+### Requirement: Borrowed accounts are vended lazily, only on the live request path
+
+Background/maintenance passes (auth guardian, usage refresh, model refresh, limit warm-up) MUST NOT vend a borrowed account; they leave it untouched so no request reaches the owner (e.g. an on-demand SSH tunnel to the owner stays idle). A borrowed account is vended only when the live proxy request path selects it.
+
+#### Scenario: background pass does not reach the owner for a borrowed account
+
+- **WHEN** a background scheduler processes a borrowed account
+- **THEN** it does not vend the account and does not contact the owner
+- **AND** the account is vended only when a live request selects it

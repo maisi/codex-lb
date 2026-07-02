@@ -405,7 +405,7 @@ class UsageUpdater:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             try:
-                account = await self._auth_manager.ensure_fresh(account, force=True)
+                account = await self._auth_manager.ensure_fresh(account, force=True, background=True)
             except RefreshError:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)

@@ -113,6 +113,12 @@ def test_settings_validates_remote_accounts() -> None:
         "user@example.com": "https://peer-b",
         "cg-1": "https://peer-c",
     }
+    # http:// is allowed ONLY for a loopback host (SSH tunnel / local terminator)
+    loopback_ok = Settings(
+        account_token_vending_remote_accounts={"user@example.com": "http://127.0.0.1:19455"},
+        account_token_vending_shared_secret="s",
+    )
+    assert loopback_ok.account_token_vending_remote_accounts == {"user@example.com": "http://127.0.0.1:19455"}
 
 
 def test_settings_parses_remote_accounts_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,6 +289,33 @@ async def test_borrowed_account_vends_from_mapped_peer(monkeypatch: pytest.Monke
 
     assert seen["url"] == "https://peer-b"  # vended from the per-account owner, not a global authority
     assert encryptor.decrypt(result.access_token_encrypted) == "VENDED-PEER-B"
+
+
+@pytest.mark.asyncio
+async def test_borrowed_account_not_vended_on_background_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lazy vend: a background/maintenance pass must not vend (or touch the owner /
+    SSH tunnel for) a borrowed account; it returns the account untouched."""
+    auth_manager_module._clear_refresh_singleflight_state()
+    monkeypatch.setattr(
+        auth_manager_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            account_token_vending_remote_accounts={"user@example.com": "http://127.0.0.1:19455"},
+            account_token_vending_authority_base_url=None,
+        ),
+    )
+
+    def _no_vend(*_a: object, **_k: object):
+        raise AssertionError("background pass must not vend a borrowed account")
+
+    monkeypatch.setattr(auth_manager_module, "vend_follower_access_token", _no_vend)
+
+    account, _ = _follower_account()  # email user@example.com (borrowed)
+    manager = AuthManager(cast(AccountsRepositoryPort, _RecordingRepo()))
+
+    result = await manager.ensure_fresh(account, force=True, background=True)
+
+    assert result is account  # returned as-is; no vend, no tunnel touch
 
 
 @pytest.mark.asyncio

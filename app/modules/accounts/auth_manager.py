@@ -174,7 +174,7 @@ class AuthManager:
         # connection. See _run_refresh.
         self._refresh_repo_factory = refresh_repo_factory
 
-    async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+    async def ensure_fresh(self, account: Account, *, force: bool = False, background: bool = False) -> Account:
         # Follower mode (per account): when this account is borrowed from a peer,
         # this instance must NOT rotate the refresh token (rotation + OpenAI
         # reuse-detection would collide with the owner's copy and force re-auth).
@@ -184,6 +184,13 @@ class AuthManager:
         # (proxy, usage updater, auth guardian, probe, model refresh, warmup).
         vend_authority = vend_authority_for_account(account, get_settings())
         if vend_authority:
+            if background:
+                # Lazy vend: borrowed accounts are vended only on the live request
+                # path, never on background/maintenance passes (auth guardian, usage
+                # refresh, model refresh). Return as-is so background work never
+                # reaches out to the owner — e.g. an on-demand SSH tunnel to the
+                # owner stays idle until real traffic needs the account.
+                return account
             return await self._vend_follower_token(account, authority_base_url=vend_authority, force=force)
         if force or should_refresh(account.last_refresh):
             account = await _REFRESH_SINGLEFLIGHT.run(
