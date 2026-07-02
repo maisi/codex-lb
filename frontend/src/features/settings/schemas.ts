@@ -43,6 +43,13 @@ const LimitWarmupModelSchema = z.string().min(1).max(128);
 const LimitWarmupPromptSchema = z.string().min(1).max(512);
 const WeeklyPaceWorkingDaysValueSchema = z.string().regex(/^[0-6](,[0-6])*$/);
 const WeeklyPaceWorkingDaysSchema = WeeklyPaceWorkingDaysValueSchema.default("0,1,2,3,4,5,6");
+const WeeklyPaceSmoothingMinutesSchema = z.union([
+  z.literal(15),
+  z.literal(30),
+  z.literal(60),
+  z.literal(120),
+  z.literal(240),
+]);
 
 export const DashboardSettingsSchema = z
   .object({
@@ -95,6 +102,12 @@ export const DashboardSettingsSchema = z
     limitWarmupModel: LimitWarmupModelSchema.optional().default("auto"),
     limitWarmupPrompt: LimitWarmupPromptSchema.optional().default("Say OK."),
     limitWarmupCooldownSeconds: z.number().int().min(60).optional().default(3600),
+    limitWarmupExhaustedThresholdPercent: z
+      .number()
+      .positive()
+      .max(100)
+      .optional()
+      .default(99),
     limitWarmupMinAvailablePercent: z
       .number()
       .positive()
@@ -102,6 +115,7 @@ export const DashboardSettingsSchema = z
       .optional()
       .default(100),
     weeklyPaceWorkingDays: WeeklyPaceWorkingDaysSchema,
+    weeklyPaceSmoothingMinutes: WeeklyPaceSmoothingMinutesSchema.optional().default(30),
     guestAccessEnabled: z.boolean().optional().default(false),
     guestPasswordConfigured: z.boolean().optional().default(false),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional().default(false),
@@ -159,8 +173,10 @@ export const SettingsUpdateRequestSchema = z.object({
   limitWarmupModel: LimitWarmupModelSchema.optional(),
   limitWarmupPrompt: LimitWarmupPromptSchema.optional(),
   limitWarmupCooldownSeconds: z.number().int().min(60).optional(),
+  limitWarmupExhaustedThresholdPercent: z.number().positive().max(100).optional(),
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
   weeklyPaceWorkingDays: WeeklyPaceWorkingDaysValueSchema.optional(),
+  weeklyPaceSmoothingMinutes: WeeklyPaceSmoothingMinutesSchema.optional(),
   guestAccessEnabled: z.boolean().optional(),
   limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
 });

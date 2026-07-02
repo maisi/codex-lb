@@ -584,6 +584,12 @@ class DashboardSettings(Base):
         server_default=text("3600"),
         nullable=False,
     )
+    limit_warmup_exhausted_threshold_percent: Mapped[float] = mapped_column(
+        Float,
+        default=99.0,
+        server_default=text("99.0"),
+        nullable=False,
+    )
     limit_warmup_min_available_percent: Mapped[float] = mapped_column(
         Float,
         default=100.0,
@@ -593,6 +599,12 @@ class DashboardSettings(Base):
         String,
         default="0,1,2,3,4,5,6",
         server_default=text("'0,1,2,3,4,5,6'"),
+        nullable=False,
+    )
+    weekly_pace_smoothing_minutes: Mapped[int] = mapped_column(
+        Integer,
+        default=30,
+        server_default=text("30"),
         nullable=False,
     )
     limit_warmup_staggered_idle_enabled: Mapped[bool] = mapped_column(

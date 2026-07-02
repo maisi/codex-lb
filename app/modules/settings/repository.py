@@ -53,8 +53,10 @@ class SettingsRepository:
             limit_warmup_model="auto",
             limit_warmup_prompt="Say OK.",
             limit_warmup_cooldown_seconds=3600,
+            limit_warmup_exhausted_threshold_percent=99.0,
             limit_warmup_min_available_percent=100.0,
             weekly_pace_working_days="0,1,2,3,4,5,6",
+            weekly_pace_smoothing_minutes=30,
             limit_warmup_staggered_idle_enabled=False,
         )
         self._session.add(row)
@@ -100,9 +102,11 @@ class SettingsRepository:
         limit_warmup_model: str | None = None,
         limit_warmup_prompt: str | None = None,
         limit_warmup_cooldown_seconds: int | None = None,
+        limit_warmup_exhausted_threshold_percent: float | None = None,
         limit_warmup_min_available_percent: float | None = None,
         additional_quota_routing_policies_json: str | None = None,
         weekly_pace_working_days: str | None = None,
+        weekly_pace_smoothing_minutes: int | None = None,
         guest_access_enabled: bool | None = None,
         limit_warmup_staggered_idle_enabled: bool | None = None,
     ) -> DashboardSettings:
@@ -168,10 +172,14 @@ class SettingsRepository:
             settings.limit_warmup_prompt = limit_warmup_prompt
         if limit_warmup_cooldown_seconds is not None:
             settings.limit_warmup_cooldown_seconds = limit_warmup_cooldown_seconds
+        if limit_warmup_exhausted_threshold_percent is not None:
+            settings.limit_warmup_exhausted_threshold_percent = limit_warmup_exhausted_threshold_percent
         if limit_warmup_min_available_percent is not None:
             settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
         if weekly_pace_working_days is not None:
             settings.weekly_pace_working_days = weekly_pace_working_days
+        if weekly_pace_smoothing_minutes is not None:
+            settings.weekly_pace_smoothing_minutes = weekly_pace_smoothing_minutes
         if guest_access_enabled is not None:
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:
