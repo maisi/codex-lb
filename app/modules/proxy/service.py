@@ -1445,21 +1445,29 @@ class ProxyService(
                 account = await repos.accounts.get_active_by_chatgpt_account_id(request.chatgpt_account_id)
             if account is None and request.account_id:
                 account = await repos.accounts.get_by_id(request.account_id)
-        if account is None:
-            return None
-        # Single-owner guard: if this instance itself borrows the account from a
-        # peer, it is not the owner and must refuse (refreshing here would
-        # rotate the owner's token and re-introduce the collision, or loop).
-        if vend_authority_for_account(account, get_settings()) is not None:
-            raise TokenVendNotOwner(account.chatgpt_account_id or account.id)
-        fresh = await self._ensure_fresh_with_budget(account, force=False)
-        access_token = self._encryptor.decrypt(fresh.access_token_encrypted)
-        return VendTokenResponse(
-            access_token=access_token,
-            expires_at_ms=token_expiry_epoch_ms(access_token) or 0,
-            account_id=fresh.chatgpt_account_id,
-            plan_type=fresh.plan_type,
-        )
+            if account is None:
+                return None
+            # Single-owner guard: if this instance itself borrows the account from a
+            # peer, it is not the owner and must refuse (refreshing here would
+            # rotate the owner's token and re-introduce the collision, or loop).
+            if vend_authority_for_account(account, get_settings()) is not None:
+                raise TokenVendNotOwner(account.chatgpt_account_id or account.id)
+            # Refresh WITHIN this session so the Account stays bound — a detached
+            # instance would raise DetachedInstanceError when ensure_fresh reads
+            # account.last_refresh. Mirrors _ensure_fresh's AuthManager wiring.
+            auth_manager = AuthManager(
+                repos.accounts,
+                acquire_refresh_admission=self._get_work_admission().acquire_token_refresh,
+                refresh_repo_factory=self._accounts_refresh_scope,
+            )
+            fresh = await auth_manager.ensure_fresh(account, force=False)
+            access_token = self._encryptor.decrypt(fresh.access_token_encrypted)
+            return VendTokenResponse(
+                access_token=access_token,
+                expires_at_ms=token_expiry_epoch_ms(access_token) or 0,
+                account_id=fresh.chatgpt_account_id,
+                plan_type=fresh.plan_type,
+            )
 
     async def _ensure_previsible_unary_fresh_with_failover(
         self,
