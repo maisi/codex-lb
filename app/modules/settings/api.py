@@ -149,8 +149,10 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         limit_warmup_model=settings.limit_warmup_model,
         limit_warmup_prompt=settings.limit_warmup_prompt,
         limit_warmup_cooldown_seconds=settings.limit_warmup_cooldown_seconds,
+        limit_warmup_exhausted_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
         limit_warmup_min_available_percent=settings.limit_warmup_min_available_percent,
         weekly_pace_working_days=settings.weekly_pace_working_days,
+        weekly_pace_smoothing_minutes=settings.weekly_pace_smoothing_minutes,
         guest_access_enabled=settings.guest_access_enabled,
         guest_password_configured=settings.guest_password_configured,
         limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
@@ -664,6 +666,11 @@ async def update_settings(
                     if payload.limit_warmup_cooldown_seconds is not None
                     else current.limit_warmup_cooldown_seconds
                 ),
+                limit_warmup_exhausted_threshold_percent=(
+                    payload.limit_warmup_exhausted_threshold_percent
+                    if payload.limit_warmup_exhausted_threshold_percent is not None
+                    else current.limit_warmup_exhausted_threshold_percent
+                ),
                 limit_warmup_min_available_percent=(
                     payload.limit_warmup_min_available_percent
                     if payload.limit_warmup_min_available_percent is not None
@@ -673,6 +680,11 @@ async def update_settings(
                     payload.weekly_pace_working_days
                     if payload.weekly_pace_working_days is not None
                     else current.weekly_pace_working_days
+                ),
+                weekly_pace_smoothing_minutes=(
+                    payload.weekly_pace_smoothing_minutes
+                    if payload.weekly_pace_smoothing_minutes is not None
+                    else current.weekly_pace_smoothing_minutes
                 ),
                 guest_access_enabled=(
                     payload.guest_access_enabled
@@ -722,8 +734,10 @@ async def update_settings(
             "limit_warmup_model",
             "limit_warmup_prompt",
             "limit_warmup_cooldown_seconds",
+            "limit_warmup_exhausted_threshold_percent",
             "limit_warmup_min_available_percent",
             "weekly_pace_working_days",
+            "weekly_pace_smoothing_minutes",
             "guest_access_enabled",
             "limit_warmup_staggered_idle_enabled",
         )

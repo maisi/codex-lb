@@ -19,6 +19,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     ProxyResponseError,
     UpstreamProxyRouteTrace,
     _as_image_fetch_session,
+    _client_metadata_uses_responses_lite,
     _inline_content_images,
     _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
@@ -96,6 +97,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _normalize_session_id,
     _openai_error_envelope_from_response_failed_payload,
     _partial_output_proxy_error_event_block,
+    _response_create_client_metadata,
     _responses_request_contains_input_image,
     _responses_request_uses_image_generation,
     _service_get_settings,
@@ -215,7 +217,10 @@ def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float
     code, message = _proxy_error_code_message(exc)
     if code in {"account_response_create_cap", "account_stream_cap", "capacity_exhausted_active_sessions"}:
         return None
-    return _account_selection_recovery_sleep_seconds_from_message(message)
+    return _account_selection_recovery_sleep_seconds_from_message(
+        message,
+        error_code=code,
+    )
 
 
 def _http_bridge_capacity_wait_plan(
@@ -424,6 +429,42 @@ class _HTTPBridgeStreamingMixin:
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
+        bridge_payload = payload.to_payload()
+        bridge_client_metadata = _response_create_client_metadata(
+            bridge_payload,
+            headers=headers,
+            preserve_existing_responses_lite=forwarded_request,
+        )
+        bridge_uses_responses_lite = bridge_client_metadata is not None and _client_metadata_uses_responses_lite(
+            bridge_client_metadata
+        )
+        if bridge_client_metadata is not None or "client_metadata" in bridge_payload:
+            payload = payload.model_copy(update={"client_metadata": bridge_client_metadata})
+
+        def prepare_bridge_request(
+            request_payload: ResponsesRequest,
+            *,
+            reservation: ApiKeyUsageReservationData | None = api_key_reservation,
+        ) -> tuple[_WebSocketRequestState, str]:
+            if bridge_uses_responses_lite:
+                return self._prepare_http_bridge_request(
+                    request_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=reservation,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                    preserve_responses_lite_client_metadata=True,
+                )
+            return self._prepare_http_bridge_request(
+                request_payload,
+                headers,
+                api_key=api_key,
+                api_key_reservation=reservation,
+                request_id=request_id,
+                client_ip=client_ip,
+            )
+
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
@@ -511,14 +552,7 @@ class _HTTPBridgeStreamingMixin:
                     update={"previous_response_id": durable_lookup.latest_response_id}
                 )
                 proxy_injected_previous_response_id = True
-                _fresh_request_state, fresh_upstream_request_text = self._prepare_http_bridge_request(
-                    payload,
-                    headers,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                    client_ip=client_ip,
-                )
+                _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
                 del _fresh_request_state
                 _log_http_bridge_event(
                     "fresh_reattach_anchor_injected",
@@ -551,14 +585,7 @@ class _HTTPBridgeStreamingMixin:
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
                 effective_payload = effective_payload.model_copy(update={"input": trimmed_input_items})
-        request_state, text_data = self._prepare_http_bridge_request(
-            effective_payload,
-            headers,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-            request_id=request_id,
-            client_ip=client_ip,
-        )
+        request_state, text_data = prepare_bridge_request(effective_payload)
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
         if downstream_turn_state is not None:
@@ -661,6 +688,7 @@ class _HTTPBridgeStreamingMixin:
                     affinity=affinity,
                     api_key=api_key,
                     request_model=effective_payload.model,
+                    request_service_tier=request_state.requested_service_tier,
                     idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
                         affinity=affinity,
                         idle_ttl_seconds=idle_ttl_seconds,
@@ -720,14 +748,7 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
-                request_state, text_data = self._prepare_http_bridge_request(
-                    payload,
-                    headers,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                    client_ip=client_ip,
-                )
+                request_state, text_data = prepare_bridge_request(payload)
                 request_state.affinity_policy = affinity
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -826,6 +847,7 @@ class _HTTPBridgeStreamingMixin:
                             affinity=affinity,
                             api_key=api_key,
                             request_model=effective_payload.model,
+                            request_service_tier=request_state.requested_service_tier,
                             idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
                                 affinity=affinity,
                                 idle_ttl_seconds=idle_ttl_seconds,
@@ -893,13 +915,9 @@ class _HTTPBridgeStreamingMixin:
                         )
                         retry_reservation_reacquired = True
 
-                    retry_request_state, retry_text_data = self._prepare_http_bridge_request(
+                    retry_request_state, retry_text_data = prepare_bridge_request(
                         effective_payload,
-                        headers,
-                        api_key=api_key,
-                        api_key_reservation=retry_api_key_reservation,
-                        request_id=request_id,
-                        client_ip=client_ip,
+                        reservation=retry_api_key_reservation,
                     )
                     retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                     retry_request_state.affinity_policy = affinity
@@ -989,14 +1007,7 @@ class _HTTPBridgeStreamingMixin:
                 update={"previous_response_id": session.last_completed_response_id}
             )
             proxy_injected_previous_response_id = True
-            request_state, text_data = self._prepare_http_bridge_request(
-                effective_payload,
-                headers,
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                request_id=request_id,
-                client_ip=client_ip,
-            )
+            request_state, text_data = prepare_bridge_request(effective_payload)
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
             request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -1042,14 +1053,7 @@ class _HTTPBridgeStreamingMixin:
                 trimmed_input = incoming_input_list[stored_count:]
                 trimmed_payload = effective_payload.model_copy(update={"input": trimmed_input})
                 previous_preferred_account_id = request_state.preferred_account_id
-                request_state, text_data = self._prepare_http_bridge_request(
-                    trimmed_payload,
-                    headers,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                    client_ip=client_ip,
-                )
+                request_state, text_data = prepare_bridge_request(trimmed_payload)
                 request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 request_state.affinity_policy = affinity
                 if downstream_turn_state is not None:
@@ -1309,6 +1313,7 @@ class _HTTPBridgeStreamingMixin:
                         affinity=affinity,
                         api_key=api_key,
                         request_model=retry_payload.model,
+                        request_service_tier=request_state.requested_service_tier,
                         idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
                             affinity=affinity,
                             idle_ttl_seconds=idle_ttl_seconds,
@@ -1371,13 +1376,9 @@ class _HTTPBridgeStreamingMixin:
                     )
                     retry_reservation_reacquired = True
 
-                retry_request_state, retry_text_data = self._prepare_http_bridge_request(
+                retry_request_state, retry_text_data = prepare_bridge_request(
                     retry_payload,
-                    headers,
-                    api_key=api_key,
-                    api_key_reservation=retry_api_key_reservation,
-                    request_id=request_id,
-                    client_ip=client_ip,
+                    reservation=retry_api_key_reservation,
                 )
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if downstream_turn_state is not None:

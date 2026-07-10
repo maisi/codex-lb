@@ -32,6 +32,7 @@ import {
   formatCompactNumber,
   formatCurrency,
   formatModelLabel,
+  formatElapsed,
   formatSlug,
   formatTimeLong,
 } from "@/utils/formatters";
@@ -47,12 +48,15 @@ const TRANSPORT_LABELS: Record<string, string> = {
   auto: "Auto",
   http: "HTTP",
   websocket: "WS",
+  automation: "Automation",
 };
 
 const TRANSPORT_CLASS_MAP: Record<string, string> = {
   auto: "bg-purple-500/10 text-purple-700 border-purple-500/20 hover:bg-purple-500/15 dark:text-purple-300",
   http: "bg-slate-500/10 text-slate-700 border-slate-500/20 hover:bg-slate-500/15 dark:text-slate-300",
   websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
+  automation:
+    "bg-indigo-500/15 text-indigo-700 border-indigo-500/20 hover:bg-indigo-500/20 dark:text-indigo-300",
 };
 
 const PLAN_CLASS_MAP: Record<string, string> = {
@@ -175,8 +179,8 @@ export function RecentRequestsTable({
               <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Plan</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
-              <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
-              <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
+              <TableHead className="w-32 pr-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
+              <TableHead className="w-24 pl-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
               <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
               <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Details</TableHead>
@@ -243,7 +247,7 @@ export function RecentRequestsTable({
                       ) : null}
                     </div>
                   </TableCell>
-                  <TableCell className="align-top">
+                  <TableCell className="pr-3 align-top">
                     {request.transport ? (
                       <div className="space-y-1">
                         <Badge
@@ -263,7 +267,7 @@ export function RecentRequestsTable({
                       <span className="text-xs text-muted-foreground">--</span>
                     )}
                   </TableCell>
-                  <TableCell className="align-top">
+                  <TableCell className="pl-3 align-top">
                     <Badge
                       variant="outline"
                       className={STATUS_CLASS_MAP[request.status] ?? STATUS_CLASS_MAP.error}
@@ -359,6 +363,7 @@ export function RecentRequestsTable({
                 <RequestDetailField label="Model" value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
                 <RequestDetailField label="Request kind" value={selectedRequest ? (REQUEST_KIND_LABELS[selectedRequest.requestKind] ?? selectedRequest.requestKind) : "—"} />
                 <RequestDetailField label="Plan" value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
+                <RequestDetailField label="Elapsed" value={formatElapsed(selectedRequest?.latencyMs ?? null)} />
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Transport" value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
