@@ -452,7 +452,7 @@ from app.modules.proxy._service.response_create import (
     _response_create_too_large_error_envelope as _response_create_too_large_error_envelope,
 )
 from app.modules.proxy._service.response_create import (
-    _response_output_item_done_function_call_id as _response_output_item_done_function_call_id,
+    _response_output_item_done_tool_call as _response_output_item_done_tool_call,
 )
 from app.modules.proxy._service.response_create import (
     _responses_request_contains_input_image as _responses_request_contains_input_image,
@@ -1999,7 +1999,10 @@ class ProxyService(
 
 
 def _is_account_neutral_error_code(code: str | None) -> bool:
-    return is_local_overload_error_code(code) or code == "proxy_unavailable"
+    return is_local_overload_error_code(code) or code in {
+        "proxy_unavailable",
+        "responses_compact_input_too_large",
+    }
 
 
 def _is_local_account_cap_code(code: str | None) -> bool:
@@ -2090,6 +2093,13 @@ def _normalize_session_id(session_id: str | None) -> str | None:
     return stripped or None
 
 
+_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES = (
+    "no tool output found for function call call_",
+    "no tool output found for custom tool call call_",
+    "no tool output found for apply patch call call_",
+)
+
+
 def _is_missing_tool_output_error(
     *,
     code: str | None,
@@ -2099,7 +2109,7 @@ def _is_missing_tool_output_error(
     if code != "invalid_request_error" or param != "input" or message is None:
         return False
     normalized = " ".join(message.lower().split())
-    return normalized.startswith("no tool output found for function call call_")
+    return normalized.startswith(_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES)
 
 
 def _is_previous_response_not_found_error(
