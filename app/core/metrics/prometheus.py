@@ -250,6 +250,12 @@ if PROMETHEUS_AVAILABLE:
         ["reason", "affinity_kind", "model_class"],
         registry=REGISTRY,
     )
+    account_status_transition_total = Counter(
+        "codex_lb_account_status_transition_total",
+        "Total account flips to a non-routable auth status by target status, upstream error code, and source",
+        ["status", "error_code", "source"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -303,6 +309,7 @@ else:
     proxy_phase_latency_seconds: HistogramLike | None = None
     http_bridge_prewarm_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
+    account_status_transition_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -318,6 +325,7 @@ __all__ = [
     "active_connections",
     "account_cap_rejections_total",
     "account_inflight_leases",
+    "account_status_transition_total",
     "account_lease_acquired_total",
     "account_lease_released_total",
     "account_lease_stale_reclaimed_total",

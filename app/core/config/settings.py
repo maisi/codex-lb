@@ -221,6 +221,19 @@ class Settings(BaseSettings):
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None
+    # Inter-instance access-token vending. For each account this instance
+    # *borrows* from a peer, list it in `account_token_vending_remote_accounts`
+    # (key=email-or-chatgpt_account_id, value=peer https base URL): the instance
+    # fetches short-lived access tokens for it and never rotates its refresh
+    # token. Accounts not listed are owned/refreshed locally. Both instances can
+    # borrow different accounts from each other (bidirectional). The optional
+    # `_authority_base_url` is an all-accounts fallback (legacy one-way mode).
+    # The shared secret authenticates vend requests, must match across instances,
+    # and is independent of the encryption key.
+    account_token_vending_authority_base_url: str | None = None
+    account_token_vending_remote_accounts: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
+    account_token_vending_shared_secret: str | None = None
+    account_token_vending_access_token_skew_seconds: float = Field(default=60.0, ge=0)
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     quota_planner_scheduler_enabled: bool = True
@@ -472,6 +485,43 @@ class Settings(BaseSettings):
             return stripped or None
         raise TypeError("http_responses_session_bridge_advertise_base_url must be a string")
 
+    @field_validator("account_token_vending_authority_base_url", mode="before")
+    @classmethod
+    def _normalize_account_token_vending_authority_base_url(cls, value: OptionalStringInput) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip().rstrip("/")
+            return stripped or None
+        raise TypeError("account_token_vending_authority_base_url must be a string")
+
+    @field_validator("account_token_vending_remote_accounts", mode="before")
+    @classmethod
+    def _parse_account_token_vending_remote_accounts(cls, value: object) -> dict[str, str]:
+        if value is None or value == "":
+            return {}
+        if isinstance(value, dict):
+            return {
+                str(k).strip(): str(v).strip().rstrip("/")
+                for k, v in value.items()
+                if str(k).strip() and str(v).strip()
+            }
+        if isinstance(value, str):
+            result: dict[str, str] = {}
+            for entry in value.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if "=" not in entry:
+                    raise ValueError("account_token_vending_remote_accounts entries must be key=url")
+                key, url = entry.split("=", 1)
+                key = key.strip()
+                url = url.strip().rstrip("/")
+                if key and url:
+                    result[key] = url
+            return result
+        raise TypeError("account_token_vending_remote_accounts must be a dict or comma-separated key=url string")
+
     @field_validator("model_context_window_overrides", mode="before")
     @classmethod
     def _parse_model_context_window_overrides(cls, value: ModelContextWindowOverridesInput) -> dict[str, int]:
@@ -544,6 +594,44 @@ class Settings(BaseSettings):
             ):
                 raise ValueError(
                     "http_responses_session_bridge_advertise_base_url must be replica-specific for bridge routing"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_account_token_vending(self) -> "Settings":
+        vend_urls = list(self.account_token_vending_remote_accounts.values())
+        if self.account_token_vending_authority_base_url is not None:
+            vend_urls.append(self.account_token_vending_authority_base_url)
+        if vend_urls:
+            for url in vend_urls:
+                parsed = urlparse(url)
+                hostname = parsed.hostname
+                if not hostname:
+                    raise ValueError(
+                        "account token vending URLs (authority_base_url / remote_accounts) must include a hostname"
+                    )
+                # https is required for public hosts, EXCEPT http:// is allowed for a
+                # loopback / private (RFC1918) / link-local address or host.docker.internal —
+                # i.e. a local hop that already carries its own transport security: an SSH
+                # tunnel, a co-located TLS terminator, or a docker-bridge relay
+                # (see openspec account-token-vending).
+                http_ok = hostname in {"localhost", "host.docker.internal"}
+                if not http_ok:
+                    try:
+                        ip = ip_address(hostname)
+                        http_ok = ip.is_loopback or ip.is_private or ip.is_link_local
+                    except ValueError:
+                        http_ok = False
+                if parsed.scheme == "https" or (parsed.scheme == "http" and http_ok):
+                    continue
+                raise ValueError(
+                    "account token vending URLs must be https:// (http:// is allowed only for a "
+                    "loopback/private/link-local host or host.docker.internal — SSH tunnel / "
+                    "local terminator / docker relay)"
+                )
+            if not self.account_token_vending_shared_secret:
+                raise ValueError(
+                    "account_token_vending_shared_secret is required when any account token vending URL is configured"
                 )
         return self
 

@@ -629,7 +629,10 @@ async def test_ensure_fresh_reuses_recent_failure_without_reissuing_refresh(monk
     monkeypatch.setattr(
         auth_manager_module,
         "get_settings",
-        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
+        lambda: SimpleNamespace(
+            proxy_refresh_failure_cooldown_seconds=30.0,
+            account_token_vending_authority_base_url=None,
+        ),
     )
 
     encryptor = TokenEncryptor()
@@ -669,7 +672,10 @@ async def test_ensure_fresh_does_not_reuse_recent_transport_failure(monkeypatch)
     monkeypatch.setattr(
         auth_manager_module,
         "get_settings",
-        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
+        lambda: SimpleNamespace(
+            proxy_refresh_failure_cooldown_seconds=30.0,
+            account_token_vending_authority_base_url=None,
+        ),
     )
 
     encryptor = TokenEncryptor()
@@ -710,7 +716,10 @@ async def test_ensure_fresh_does_not_reuse_failure_after_refresh_token_changes(m
     monkeypatch.setattr(
         auth_manager_module,
         "get_settings",
-        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
+        lambda: SimpleNamespace(
+            proxy_refresh_failure_cooldown_seconds=30.0,
+            account_token_vending_authority_base_url=None,
+        ),
     )
 
     encryptor = TokenEncryptor()
@@ -871,3 +880,88 @@ async def test_refresh_account_requires_reauth_when_upstream_session_is_invalid(
     reason = repo.status_payload["deactivation_reason"]
     assert isinstance(reason, str)
     assert "re-login" in reason.lower() or "expired" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_refresh_account_records_status_transition_on_permanent_failure(monkeypatch):
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        raise RefreshError("refresh_token_reused", "refresh token was reused", True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    calls: list[tuple[str, AccountStatus, str, str]] = []
+    monkeypatch.setattr(
+        auth_manager_module,
+        "record_account_status_transition",
+        lambda account, *, status, error_code, source: calls.append((account.id, status, error_code, source)),
+    )
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_obs_flip",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError):
+        await manager.refresh_account(account)
+
+    assert calls == [
+        (
+            "acc_obs_flip",
+            AccountStatus.REAUTH_REQUIRED,
+            "refresh_token_reused",
+            auth_manager_module.REAUTH_SOURCE_TOKEN_REFRESH,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_account_does_not_record_transition_on_race_recovery(monkeypatch):
+    """The refresh-token-changed early return is a concurrent-rotation recovery,
+    not a real flip; it must NOT emit a reauth status-transition signal."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        raise RefreshError("invalid_grant", "refresh failed", True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    calls: list[object] = []
+    monkeypatch.setattr(
+        auth_manager_module,
+        "record_account_status_transition",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    encryptor = TokenEncryptor()
+    stale_account = Account(
+        id="acc_obs_race",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    latest_account = Account(
+        **{column.name: getattr(stale_account, column.name) for column in Account.__table__.columns}
+    )
+    latest_account.refresh_token_encrypted = encryptor.encrypt("refresh-new")
+    repo.accounts_by_id[stale_account.id] = latest_account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    result = await manager.refresh_account(stale_account)
+
+    assert result is latest_account
+    assert calls == []

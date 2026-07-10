@@ -265,13 +265,15 @@ class StreamingLimitWarmupSender:
         )
 
     async def _ensure_fresh(self, account: Account) -> Account:
+        # Warm-up is a background/maintenance pass; borrowed accounts must not be
+        # vended here (only on the live request path), so pass background=True.
         if self._accounts_repo_factory is None:
-            return await self._auth_manager.ensure_fresh(account)
+            return await self._auth_manager.ensure_fresh(account, background=True)
         async with self._accounts_repo_factory() as accounts_repo:
             return await AuthManager(
                 accounts_repo,
                 refresh_repo_factory=self._accounts_repo_factory,
-            ).ensure_fresh(account)
+            ).ensure_fresh(account, background=True)
 
     async def _resolve_upstream_route(self, account: Account) -> ResolvedUpstreamRoute | None:
         if self._accounts_repo_factory is not None:

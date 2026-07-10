@@ -91,7 +91,7 @@
     },
     {
       "login": "dwnmf",
-      "name": "LYA⚚CAP⚚OCEAN",
+      "name": "LYA\u269aCAP\u269aOCEAN",
       "avatar_url": "https://avatars.githubusercontent.com/u/56194792?v=4",
       "profile": "https://github.com/dwnmf",
       "contributions": [
@@ -604,7 +604,7 @@
     },
     {
       "login": "mahirozdin",
-      "name": "Mahir Taha Özdin",
+      "name": "Mahir Taha \u00d6zdin",
       "avatar_url": "https://avatars.githubusercontent.com/u/9491185?v=4",
       "profile": "https://www.linkedin.com/in/mahir-ozdin/",
       "contributions": [
@@ -680,13 +680,14 @@
       ]
     },
     {
-      "login": "jhordanjw123",
-      "name": "jhordanjw123",
-      "avatar_url": "https://avatars.githubusercontent.com/u/123907587?v=4",
-      "profile": "https://github.com/jhordanjw123",
+      "login": "maisi",
+      "name": "Martin Maisriemler",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1303504?v=4",
+      "profile": "https://github.com/maisi",
       "contributions": [
         "code",
-        "test"
+        "maintenance",
+        "infra"
       ]
     },
     {

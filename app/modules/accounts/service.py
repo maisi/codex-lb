@@ -89,6 +89,7 @@ PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
 # return.
 PROBE_NETWORK_FAILURE_STATUS = 0
 IMPORT_PROXY_REQUIRED_PAUSE_REASON = "upstream_proxy_required_on_import"
+_USAGE_404_DEACTIVATION_REASON_PREFIX = "Usage API error: HTTP 404"
 
 
 class InvalidAuthJsonError(Exception):
@@ -716,11 +717,27 @@ class AccountsService:
         account = await self._repo.get_by_id(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        usage_404_recovery = _is_usage_404_deactivated(account)
+        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED) or (
+            account.status == AccountStatus.DEACTIVATED and not usage_404_recovery
+        ):
+            logger.info(
+                "Account force probe rejected account_id=%s account_status=%s usage_404_recovery=%s",
+                account_id,
+                account.status.value,
+                usage_404_recovery,
+            )
             raise AccountNotProbableError(f"Account is {account.status.value} and cannot be probed")
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         status_before = account.status.value
+        logger.info(
+            "Account force probe started account_id=%s account_status=%s usage_404_recovery=%s model=%s",
+            account_id,
+            status_before,
+            usage_404_recovery,
+            model or DEFAULT_PROBE_MODEL,
+        )
 
         probe_account = account
         if self._auth_manager is not None:
@@ -733,6 +750,36 @@ class AccountsService:
             chatgpt_account_id=probe_account.chatgpt_account_id,
             model=probe_model,
         )
+        logger.info(
+            "Account force probe upstream result account_id=%s probe_status_code=%s usage_404_recovery=%s",
+            account_id,
+            probe_status,
+            usage_404_recovery,
+        )
+        if usage_404_recovery and _probe_status_is_success(probe_status):
+            updated = await self._repo.update_status_if_current(
+                account_id,
+                AccountStatus.ACTIVE,
+                None,
+                None,
+                blocked_at=None,
+                expected_status=account.status,
+                expected_deactivation_reason=account.deactivation_reason,
+                expected_reset_at=account.reset_at,
+                expected_blocked_at=account.blocked_at,
+            )
+            if not updated:
+                raise AccountStateTransitionError("Account state changed; retry the operation")
+            account.status = AccountStatus.ACTIVE
+            account.deactivation_reason = None
+            account.reset_at = None
+            account.blocked_at = None
+            if probe_account.id == account.id:
+                probe_account.status = AccountStatus.ACTIVE
+                probe_account.deactivation_reason = None
+                probe_account.reset_at = None
+                probe_account.blocked_at = None
+            get_account_selection_cache().invalidate()
 
         if self._usage_repo and self._usage_updater:
             await self._usage_updater.force_refresh(probe_account, ignore_refresh_disabled=True)
@@ -740,6 +787,15 @@ class AccountsService:
 
         refreshed = await self._repo.get_by_id(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)
+        logger.info(
+            "Account force probe completed account_id=%s probe_status_code=%s "
+            "account_status_before=%s account_status_after=%s recovered_usage_404=%s",
+            account_id,
+            probe_status,
+            status_before,
+            refreshed.status.value,
+            usage_404_recovery and refreshed.status == AccountStatus.ACTIVE,
+        )
 
         return AccountProbeResponse(
             status="probed",
@@ -812,6 +868,20 @@ class AccountsService:
                 exc,
             )
             return PROBE_NETWORK_FAILURE_STATUS
+
+
+def _is_usage_404_deactivated(account: Account) -> bool:
+    return account.status == AccountStatus.DEACTIVATED and _deactivation_reason_is_usage_404(
+        account.deactivation_reason,
+    )
+
+
+def _deactivation_reason_is_usage_404(reason: str | None) -> bool:
+    return isinstance(reason, str) and reason.startswith(_USAGE_404_DEACTIVATION_REASON_PREFIX)
+
+
+def _probe_status_is_success(status_code: int) -> bool:
+    return 200 <= status_code < 300
 
 
 def _opencode_auth_export_filename(account: Account) -> str:

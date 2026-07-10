@@ -1,16 +1,28 @@
 type CopyToClipboardOptions = {
-  container?: HTMLElement | null;
+  fallbackTarget?: HTMLElement | null;
 };
 
-function fallbackCopyToClipboard(
-  text: string,
-  options: CopyToClipboardOptions,
-): boolean {
+function getFallbackContainer(fallbackTarget?: HTMLElement | null): HTMLElement | null {
+  if (!document.body) {
+    return null;
+  }
+
+  const target = fallbackTarget?.isConnected
+    ? fallbackTarget
+    : document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  const dialog = target?.closest<HTMLElement>('[role="dialog"]');
+
+  return dialog?.isConnected ? dialog : document.body;
+}
+
+function fallbackCopyToClipboard(text: string, fallbackTarget?: HTMLElement | null): boolean {
   if (typeof document.execCommand !== "function") {
     return false;
   }
 
-  const container = options.container ?? document.body;
+  const container = getFallbackContainer(fallbackTarget);
   if (!container) {
     return false;
   }
@@ -35,8 +47,8 @@ function fallbackCopyToClipboard(
   } catch {
     return false;
   } finally {
-    if (textarea.parentNode === container) {
-      container.removeChild(textarea);
+    if (textarea.parentElement) {
+      textarea.parentElement.removeChild(textarea);
     }
     if (previousActiveElement?.isConnected) {
       previousActiveElement.focus();
@@ -48,17 +60,23 @@ export async function copyToClipboard(
   text: string,
   options: CopyToClipboardOptions = {},
 ): Promise<boolean> {
-  const clipboardWritePromise =
-    window.isSecureContext && typeof navigator.clipboard?.writeText === "function"
-      ? navigator.clipboard.writeText(text).then(() => true).catch(() => false)
-      : null;
+  const clipboardWriteAvailable =
+    window.isSecureContext && typeof navigator.clipboard?.writeText === "function";
 
-  if (fallbackCopyToClipboard(text, options)) {
-    if (clipboardWritePromise) {
-      void clipboardWritePromise;
+  if (clipboardWriteAvailable) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      if (fallbackCopyToClipboard(text, options.fallbackTarget)) {
+        return true;
+      }
     }
+  }
+
+  if (fallbackCopyToClipboard(text, options.fallbackTarget)) {
     return true;
   }
 
-  return clipboardWritePromise ?? false;
+  return false;
 }

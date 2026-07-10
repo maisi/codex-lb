@@ -182,6 +182,7 @@ async def _fetch_with_failover(
                 auth_manager,
                 account,
                 transport_recovery=transport_recovery,
+                background=True,
             )
             models = await _fetch_models_with_transport_recovery(
                 account,
@@ -198,6 +199,7 @@ async def _fetch_with_failover(
                         account,
                         force=True,
                         transport_recovery=transport_recovery,
+                        background=True,
                     )
                     models = await _fetch_models_with_transport_recovery(
                         account,
@@ -272,16 +274,17 @@ async def _ensure_fresh_with_transport_recovery(
     *,
     transport_recovery: _TransportRecoveryState,
     force: bool = False,
+    background: bool = False,
 ) -> Account:
     try:
-        return await auth_manager.ensure_fresh(account, force=force)
+        return await auth_manager.ensure_fresh(account, force=force, background=background)
     except RefreshError as exc:
         if not exc.transport_error or transport_recovery.attempted:
             raise
 
         await _refresh_http_client_after_transport_error(account, exc)
         transport_recovery.attempted = True
-        return await auth_manager.ensure_fresh(account, force=force)
+        return await auth_manager.ensure_fresh(account, force=force, background=background)
 
 
 async def _fetch_models_with_transport_recovery(

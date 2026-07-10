@@ -75,6 +75,7 @@ type ApiKeyCreateDraft = {
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
   applyToCodexModel: boolean;
+  forceIncludeUsage: boolean;
 };
 
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
@@ -90,6 +91,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   trafficClass: "foreground",
   transportPolicyOverride: null,
   applyToCodexModel: false,
+  forceIncludeUsage: false,
 };
 
 function apiKeyCreateDraftReducer(
@@ -113,6 +115,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       name: values.name,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
+      forceIncludeUsage: draft.forceIncludeUsage,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
       ...(draft.selectedSourceIds.length > 0 ? { assignedSourceIds: draft.selectedSourceIds } : {}),
       usageSections: draft.usageSections,
@@ -171,6 +174,17 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
               />
               <label htmlFor="create-api-key-apply-to-codex-model" className="cursor-pointer">
                 Apply to codex /model
+              </label>
+            </div>
+
+            <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <Checkbox
+                id="create-api-key-force-include-usage"
+                checked={draft.forceIncludeUsage}
+                onCheckedChange={(checked) => updateDraft({ forceIncludeUsage: checked === true })}
+              />
+              <label htmlFor="create-api-key-force-include-usage" className="cursor-pointer">
+                Always report token usage (streaming chat completions)
               </label>
             </div>
 

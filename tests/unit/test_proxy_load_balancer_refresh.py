@@ -310,6 +310,27 @@ async def _repo_factory(
 
 
 @pytest.mark.asyncio
+async def test_mark_permanent_failure_records_status_transition(monkeypatch: pytest.MonkeyPatch) -> None:
+    account = _make_account("acc-reauth-obs")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    calls: list[tuple[str, AccountStatus, str, str]] = []
+    monkeypatch.setattr(
+        load_balancer_module,
+        "record_account_status_transition",
+        lambda acc, *, status, error_code, source: calls.append((acc.id, status, error_code, source)),
+    )
+
+    await balancer.mark_permanent_failure(account, "invalid_grant")
+
+    assert calls == [(account.id, AccountStatus.REAUTH_REQUIRED, "invalid_grant", "proxy")]
+    assert accounts_repo.status_updates  # the flip was persisted before recording
+
+
+@pytest.mark.asyncio
 async def test_select_account_reads_cached_usage_once_per_window() -> None:
     account = _make_account("acc-load-balancer")
     now = utcnow()

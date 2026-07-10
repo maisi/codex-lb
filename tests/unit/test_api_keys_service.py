@@ -144,6 +144,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
+        force_include_usage: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
@@ -166,6 +167,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "name": name,
             "allowed_models": allowed_models,
             "apply_to_codex_model": apply_to_codex_model,
+            "force_include_usage": force_include_usage,
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
             "enforced_service_tier": enforced_service_tier,
@@ -1201,6 +1203,90 @@ async def test_update_key_ignores_null_apply_to_codex_model_patch_value() -> Non
     stored = await repo.get_by_id(created.id)
     assert stored is not None
     assert stored.apply_to_codex_model is True
+
+
+@pytest.mark.asyncio
+async def test_create_key_persists_force_include_usage_flag() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="openclaw-usage",
+            allowed_models=["gpt-5.2"],
+            force_include_usage=True,
+            expires_at=None,
+        )
+    )
+
+    assert created.force_include_usage is True
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.force_include_usage is True
+
+
+@pytest.mark.asyncio
+async def test_create_key_defaults_force_include_usage_off() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(ApiKeyCreateData(name="default-usage", allowed_models=None, expires_at=None))
+
+    assert created.force_include_usage is False
+
+
+@pytest.mark.asyncio
+async def test_update_key_persists_force_include_usage_flag() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(name="openclaw-usage-update", allowed_models=None, expires_at=None)
+    )
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            force_include_usage=True,
+            force_include_usage_set=True,
+        ),
+    )
+
+    assert updated.force_include_usage is True
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.force_include_usage is True
+
+
+@pytest.mark.asyncio
+async def test_update_key_ignores_null_force_include_usage_patch_value() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="openclaw-usage-null-update",
+            allowed_models=None,
+            force_include_usage=True,
+            expires_at=None,
+        )
+    )
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            force_include_usage=None,
+            force_include_usage_set=True,
+        ),
+    )
+
+    assert updated.force_include_usage is True
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.force_include_usage is True
 
 
 @pytest.mark.asyncio

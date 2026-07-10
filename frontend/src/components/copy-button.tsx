@@ -16,12 +16,9 @@ export function CopyButton({ value, label = "Copy", iconOnly = false }: CopyButt
 
   const handleCopy = async (event: MouseEvent<HTMLButtonElement>) => {
     const trigger = event.currentTarget;
-    const dialogContainer = trigger.closest("[role='dialog']");
 
     try {
-      const copiedToClipboard = await copyToClipboard(value, {
-        container: dialogContainer instanceof HTMLElement ? dialogContainer : undefined,
-      });
+      const copiedToClipboard = await copyToClipboard(value, { fallbackTarget: trigger });
       if (copiedToClipboard) {
         setCopied(true);
         toast.success("Copied to clipboard");

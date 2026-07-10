@@ -58,7 +58,7 @@ class _AuthManager:
         self._calls = calls
         self._failures = failures or {}
 
-    async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+    async def ensure_fresh(self, account: Account, *, force: bool = False, background: bool = False) -> Account:
         assert force is True
         self._calls.append(account.id)
         failure = self._failures.get(account.id)
@@ -376,7 +376,7 @@ async def test_auth_guardian_waits_for_refresh_before_cancelled_candidate_exits(
     repo_exited = False
 
     class _DelayedAuthManager:
-        async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+        async def ensure_fresh(self, account: Account, *, force: bool = False, background: bool = False) -> Account:
             nonlocal completed
             assert force is True
             assert account.id == "stale-active"

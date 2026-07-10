@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Mapping, Protocol, cast
 
 from app.core import usage as usage_core
+from app.core.auth.reauth_telemetry import REAUTH_SOURCE_USAGE_REFRESH, record_account_status_transition
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import (
     PERMANENT_FAILURE_CODES,
@@ -481,7 +482,7 @@ class UsageUpdater:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             try:
-                account = await self._auth_manager.ensure_fresh(account, force=True)
+                account = await self._auth_manager.ensure_fresh(account, force=True, background=True)
             except RefreshError:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
@@ -678,6 +679,12 @@ class UsageUpdater:
         account.deactivation_reason = reason
         mark_account_routing_unavailable(account.id)
         get_account_selection_cache().invalidate()
+        record_account_status_transition(
+            account,
+            status=status,
+            error_code=exc.code or f"http_{exc.status_code}",
+            source=REAUTH_SOURCE_USAGE_REFRESH,
+        )
 
     async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> bool:
         next_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
@@ -1121,10 +1128,10 @@ def _reset_at(reset_at: int | None, reset_after_seconds: int | None, now_epoch: 
     return now_epoch + max(0, int(reset_after_seconds))
 
 
-# The usage endpoint can return 403 for accounts that are still otherwise usable
+# The usage endpoint can return 403/404 for accounts that are still otherwise usable
 # for proxy traffic, so treat it as a refresh failure instead of a permanent
 # account-level deactivation signal.
-_DEACTIVATING_USAGE_STATUS_CODES = {402, 404}
+_DEACTIVATING_USAGE_STATUS_CODES = {402}
 _DEACTIVATING_USAGE_MESSAGE_HINTS = (
     "your openai account has been deactivated",
     "account has been deactivated",
@@ -1151,7 +1158,7 @@ async def _resolve_upstream_route_for_account(account: Account, *, operation: st
 
 
 def _mark_usage_refresh_auth_cooldown(account_id: str, status_code: int) -> None:
-    if status_code not in {401, 403}:
+    if status_code not in {401, 403, 404}:
         return
     cooldown_seconds = max(0.0, float(get_settings().usage_refresh_auth_failure_cooldown_seconds))
     if cooldown_seconds <= 0:

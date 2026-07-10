@@ -54,6 +54,7 @@ def _build_service(
 ) -> AccountsService:
     repo = AsyncMock()
     repo.get_by_id.return_value = account
+    repo.update_status_if_current.return_value = True
 
     usage_repo = AsyncMock()
     primary_entry = _make_usage_row(primary_pct) if primary_pct is not None else None
@@ -96,6 +97,60 @@ async def test_probe_account_rejects_deactivated_account():
     service = _build_service(account=account)
     with pytest.raises(AccountNotProbableError):
         await service.probe_account(_ACCOUNT_ID)
+
+
+@pytest.mark.asyncio
+async def test_probe_account_recovers_usage_404_deactivated_account(monkeypatch):
+    account = _make_account(status=AccountStatus.DEACTIVATED)
+    account.deactivation_reason = "Usage API error: HTTP 404 - None"
+    service = _build_service(account=account, primary_pct=40.0, secondary_pct=30.0)
+
+    async def _fake_probe(**kwargs):
+        return 200
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    result = await service.probe_account(_ACCOUNT_ID)
+
+    assert result is not None
+    assert result.probe_status_code == 200
+    assert result.account_status_before == "deactivated"
+    assert result.account_status_after == "active"
+    assert account.status == AccountStatus.ACTIVE
+    assert account.deactivation_reason is None
+    cast(AsyncMock, service._repo.update_status_if_current).assert_awaited_once_with(
+        _ACCOUNT_ID,
+        AccountStatus.ACTIVE,
+        None,
+        None,
+        blocked_at=None,
+        expected_status=AccountStatus.DEACTIVATED,
+        expected_deactivation_reason="Usage API error: HTTP 404 - None",
+        expected_reset_at=None,
+        expected_blocked_at=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_probe_account_keeps_usage_404_deactivated_account_on_failed_probe(monkeypatch):
+    account = _make_account(status=AccountStatus.DEACTIVATED)
+    account.deactivation_reason = "Usage API error: HTTP 404 - None"
+    service = _build_service(account=account, primary_pct=40.0, secondary_pct=30.0)
+
+    async def _fake_probe(**kwargs):
+        return 401
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    result = await service.probe_account(_ACCOUNT_ID)
+
+    assert result is not None
+    assert result.probe_status_code == 401
+    assert result.account_status_before == "deactivated"
+    assert result.account_status_after == "deactivated"
+    assert account.status == AccountStatus.DEACTIVATED
+    assert account.deactivation_reason == "Usage API error: HTTP 404 - None"
+    cast(AsyncMock, service._repo.update_status_if_current).assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -202,6 +257,10 @@ async def test_probe_account_never_logs_access_token(monkeypatch, caplog):
     caplog.set_level("DEBUG")
     await service.probe_account(_ACCOUNT_ID)
     joined_log_output = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Account force probe started" in joined_log_output
+    assert "Account force probe upstream result" in joined_log_output
+    assert "Account force probe completed" in joined_log_output
+    assert "probe_status_code=200" in joined_log_output
     assert _PROBE_TOKEN_PLAINTEXT not in joined_log_output
 
 
