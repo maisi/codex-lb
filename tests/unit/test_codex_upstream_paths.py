@@ -444,18 +444,49 @@ async def test_stream_responses_uses_codex_client_when_route_is_resolved(route: 
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_forwards_complete_codex_identity_for_non_native_request(
+    route: ResolvedUpstreamRoute,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _CodexClient(_StreamResponse())
+    payload = ResponsesRequest(model="gpt-5.6-luna", instructions="Reply.", input="hello", stream=True)
+    monkeypatch.setattr(proxy_module.get_codex_version_cache(), "cached_version_or_default", lambda: "0.144.1")
+
+    _ = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "pi/0.80.6", "originator": "pi", "version": "0.80.6"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=cast(Any, client),
+        )
+    ]
+
+    headers = client.calls[0]["headers"]
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.144.1"
+    assert headers["User-Agent"].startswith("codex_cli_rs/0.144.1")
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_websocket_transport_uses_codex_client_when_route_is_resolved(
     route: ResolvedUpstreamRoute,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _WsCodexClient()
     trace = UpstreamProxyRouteTrace()
     payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+    monkeypatch.setattr(proxy_module.get_codex_version_cache(), "cached_version_or_default", lambda: "0.144.1")
 
     events = [
         event
         async for event in stream_responses(
             payload,
-            {"user-agent": "codex"},
+            {"user-agent": "pi/0.80.6", "originator": "pi", "version": "0.80.6"},
             "access",
             "chatgpt_account",
             session=cast(Any, object()),
@@ -471,6 +502,10 @@ async def test_stream_responses_websocket_transport_uses_codex_client_when_route
     assert client.calls[0]["url"].startswith("wss://")
     assert client.calls[0]["route"] is route
     assert '"type":"response.create"' in str(client.websocket.sent[0])
+    headers = client.calls[0]["headers"]
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.144.1"
+    assert headers["User-Agent"].startswith("codex_cli_rs/0.144.1")
     assert trace.endpoint_id == "ep_1"
 
 

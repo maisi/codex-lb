@@ -27,6 +27,7 @@ def test_non_native_sdk_http_request_is_rewritten_to_codex_cli_fingerprint():
         "x-openai-client-id": "abc",
         "x-openai-client-user-agent": "OpenAI/Python 2.24.0",
         "originator": "sdk",
+        "version": "2.24.0",
     }
     with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
         headers = _build_upstream_headers(inbound, "tok", "acct-123")
@@ -38,8 +39,8 @@ def test_non_native_sdk_http_request_is_rewritten_to_codex_cli_fingerprint():
     assert "x-openai-client-arch" not in lowered
     assert "x-openai-client-id" not in lowered
     assert "x-openai-client-user-agent" not in lowered
-    # No originator header is added; inbound SDK originator is stripped.
-    assert "originator" not in lowered
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.142.0"
 
 
 def test_non_native_request_uses_pascalcase_account_header():
@@ -66,9 +67,13 @@ def test_non_native_request_version_falls_back_to_settings_default():
 
 def test_native_codex_http_request_is_left_unchanged():
     native_ua = "codex_exec/0.142.1 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.142.1)"
-    headers = _build_upstream_headers({"User-Agent": native_ua}, "tok", "acct-1")
+    headers = _build_upstream_headers(
+        {"User-Agent": native_ua, "originator": "codex_exec", "version": "0.142.1"}, "tok", "acct-1"
+    )
 
     assert headers["User-Agent"] == native_ua
+    assert headers["originator"] == "codex_exec"
+    assert headers["version"] == "0.142.1"
     # Native requests keep the existing lowercase account header.
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
@@ -141,6 +146,7 @@ def test_websocket_non_native_sdk_request_is_normalized():
         "x-openai-client-version": "2.24.0",
         "x-codex-turn-state": "abc",
         "originator": "sdk",
+        "version": "2.24.0",
     }
     with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
         headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
@@ -148,7 +154,8 @@ def test_websocket_non_native_sdk_request_is_normalized():
     assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
     lowered = _lower_keys(headers)
     assert "x-openai-client-version" not in lowered
-    assert "originator" not in lowered
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.142.0"
     # Non-native uses the PascalCase account header, mirroring the HTTP builder.
     assert headers["ChatGPT-Account-Id"] == "acct-1"
     assert "chatgpt-account-id" not in headers
@@ -162,9 +169,16 @@ def test_websocket_native_codex_request_is_left_unchanged():
     from app.core.clients.proxy import _build_upstream_websocket_headers
 
     native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
-    inbound = {"User-Agent": native_ua, "x-codex-turn-state": "abc"}
+    inbound = {
+        "User-Agent": native_ua,
+        "originator": "codex_cli_rs",
+        "version": "0.142.0",
+        "x-codex-turn-state": "abc",
+    }
     headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
     assert headers["User-Agent"] == native_ua
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.142.0"
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
     assert headers["x-codex-turn-state"] == "abc"
