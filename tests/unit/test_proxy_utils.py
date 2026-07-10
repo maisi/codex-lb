@@ -72,6 +72,10 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 pytestmark = pytest.mark.unit
 
 
+def test_compact_wire_budget_rejection_is_account_neutral() -> None:
+    assert proxy_service._is_account_neutral_error_code("responses_compact_input_too_large") is True
+
+
 def test_websocket_archive_request_context_clears_unmatched_frame_request_id():
     token = set_request_id("req_previous_response")
     try:
@@ -6891,6 +6895,69 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_rejects_image_inlining_that_exceeds_wire_budget(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        upstream_compact_timeout_seconds = 12.0
+        image_inline_fetch_enabled = True
+        log_upstream_request_payload = False
+
+    async def fake_inline(payload_dict, session, connect_timeout):
+        del payload_dict, session, connect_timeout
+        return {
+            "model": "gpt-5.1",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64," + "A" * 500_000,
+                        }
+                    ],
+                }
+            ],
+            "parallel_tool_calls": False,
+        }
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_inline_input_image_urls", fake_inline)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact this image",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "https://example.com/image.png"}],
+                }
+            ],
+        }
+    )
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "unexpected"}}
+        )
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.payload["error"]["code"] == "responses_compact_input_too_large"
+    assert exc_info.value.payload["error"]["param"] == "input"
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -12769,6 +12836,129 @@ async def test_prepare_websocket_response_create_request_fills_interrupted_pendi
     assert prepared.request_state.input_item_count == 4
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("No tool output found for function call call_abc.", True),
+        ("No tool output found for custom tool call call_abc.", True),
+        ("No tool output found for apply patch call call_abc.", True),
+        ("No tool output found for web search call ws_abc.", False),
+        ("Previous response with id 'resp_abc' not found.", False),
+    ],
+)
+def test_is_missing_tool_output_error_matches_tool_call_variants(message: str, expected: bool) -> None:
+    assert (
+        proxy_service._is_missing_tool_output_error(
+            code="invalid_request_error",
+            param="input",
+            message=message,
+        )
+        is expected
+    )
+
+
+def test_is_missing_tool_output_error_requires_input_param() -> None:
+    assert (
+        proxy_service._is_missing_tool_output_error(
+            code="invalid_request_error",
+            param="previous_response_id",
+            message="No tool output found for custom tool call call_abc.",
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_fills_interrupted_custom_tool_outputs(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_interrupted_custom_tools",
+        name="ws-interrupted-custom-tools",
+        key_prefix="sk-ws-custom-tools",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_response_id="resp_pending_custom_tool_calls",
+        last_pending_function_call_ids=["call_missing_custom", "call_missing_patch"],
+        last_pending_tool_call_types={
+            "call_missing_custom": "custom_tool_call",
+            "call_missing_patch": "apply_patch_call",
+        },
+    )
+    interrupted_input: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>",
+                }
+            ],
+        },
+    ]
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_pending_custom_tool_calls",
+                "input": interrupted_input,
+            },
+        ),
+        headers={"session_id": "turn_ws_interrupted_custom_tools"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_pending_custom_tool_calls"
+    interrupted_tool_output = (
+        "Tool call was not executed because the previous turn was interrupted before tool output was available."
+    )
+    assert upstream_payload["input"][:2] == [
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_missing_custom",
+            "output": interrupted_tool_output,
+        },
+        {
+            "type": "apply_patch_call_output",
+            "call_id": "call_missing_patch",
+            "output": interrupted_tool_output,
+            "status": "failed",
+        },
+    ]
+    assert upstream_payload["input"][2:] == interrupted_input
+    assert prepared.request_state.input_item_count == 3
+
+
 @pytest.mark.asyncio
 async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -12958,7 +13148,10 @@ def test_record_websocket_continuity_completion_keeps_anchor_fields_in_sync():
         response_id="resp_new_without_fingerprint",
     )
 
-    assert continuity_state.last_completed_response_id is None
+    # The completed response id is recorded even without a usable input
+    # fingerprint, but the stale count/fingerprint pair from the previous
+    # turn must not survive attached to the new response id.
+    assert continuity_state.last_completed_response_id == "resp_new_without_fingerprint"
     assert continuity_state.last_completed_input_count == 0
     assert continuity_state.last_completed_input_prefix_fingerprint is None
 
@@ -12982,6 +13175,52 @@ def test_record_websocket_continuity_completion_keeps_anchor_fields_in_sync():
     assert continuity_state.last_completed_response_id == "resp_new"
     assert continuity_state.last_completed_input_count == 3
     assert continuity_state.last_completed_input_prefix_fingerprint == "new-fingerprint"
+
+
+def test_record_websocket_continuity_completion_keeps_pending_tool_calls_for_string_input():
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=2,
+        last_completed_response_id="resp_old",
+        last_completed_input_prefix_fingerprint="old-fingerprint",
+    )
+    string_input_state = proxy_service._WebSocketRequestState(
+        request_id="ws_string_input_continuity",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=0,
+        input_full_fingerprint=None,
+    )
+    string_input_state.pending_function_call_ids = ["call_custom_shell"]
+    string_input_state.pending_tool_call_types = {"call_custom_shell": "custom_tool_call"}
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=string_input_state,
+        response_id="resp_string_input",
+    )
+
+    # A valid string-input Responses turn must still record the completed
+    # response id and its pending tool-call metadata so an anchored follow-up
+    # can receive synthetic interrupted outputs; only the prefix-anchoring
+    # count/fingerprint pair is cleared.
+    assert continuity_state.last_completed_response_id == "resp_string_input"
+    assert continuity_state.last_completed_input_count == 0
+    assert continuity_state.last_completed_input_prefix_fingerprint is None
+    assert continuity_state.last_pending_function_call_ids == ["call_custom_shell"]
+    assert continuity_state.last_pending_tool_call_types == {"call_custom_shell": "custom_tool_call"}
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=string_input_state,
+        response_id=None,
+    )
+
+    assert continuity_state.last_completed_response_id is None
+    assert continuity_state.last_pending_function_call_ids == []
+    assert continuity_state.last_pending_tool_call_types == {}
 
 
 @pytest.mark.asyncio
