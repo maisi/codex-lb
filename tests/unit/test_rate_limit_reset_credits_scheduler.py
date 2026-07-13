@@ -99,6 +99,35 @@ async def test_refresh_skips_paused_reauth_and_deactivated_accounts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_refresh_skips_borrowed_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Borrowed accounts are owned by a peer and vended lazily on the live path;
+    # a background reset-credits fetch would use their stale token to no effect.
+    store = RateLimitResetCreditsStore()
+    fetched: list[str] = []
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        fetched.append(access_token)
+        return _response()
+
+    class _Settings:
+        account_token_vending_remote_accounts = {"acc_borrowed@example.com": "https://peer.example"}
+        account_token_vending_authority_base_url = None
+
+    monkeypatch.setattr(scheduler_module, "get_settings", lambda: _Settings())
+
+    accounts = [_make_account("acc_borrowed"), _make_account("acc_owned")]
+    await refresh_reset_credits_for_accounts(
+        accounts=accounts,
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+    )
+
+    assert fetched == ["token-for-acc_owned"]
+    assert store.get("acc_borrowed") is None
+
+
+@pytest.mark.asyncio
 async def test_refresh_skips_account_without_chatgpt_account_id() -> None:
     store = RateLimitResetCreditsStore()
     stale = RateLimitResetCreditsSnapshot(available_count=4)

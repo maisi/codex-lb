@@ -418,3 +418,74 @@ async def test_refresh_once_closes_account_read_session_before_fetch_models(
 
     scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
     await scheduler._refresh_once()
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_skips_borrowed_accounts_for_model_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A borrowed account (owned by a peer, vended lazily on the live path) must
+    # not be used for a background model fetch: its stale token would fail. An
+    # owned account of the same plan provides the model list instead.
+    borrowed = _account("borrowed")
+    borrowed.access_token_encrypted = b"borrowed-token"
+    owned = _account("owned")
+    owned.access_token_encrypted = b"owned-token"
+
+    class _Leader:
+        async def try_acquire(self) -> bool:
+            return True
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @contextlib.asynccontextmanager
+    async def _background_session():
+        yield _Session()
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self) -> list[Account]:
+            return [borrowed, owned]
+
+    class _Registry:
+        async def update(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def get_snapshot(self) -> SimpleNamespace:
+            return SimpleNamespace(models={"gpt-5.4": object()})
+
+    fetched_tokens: list[str] = []
+
+    async def _fetch_models_for_plan(access_token: str, account_id: str | None, **kwargs: Any) -> list[UpstreamModel]:
+        fetched_tokens.append(access_token)
+        return [_model("gpt-5.4")]
+
+    class _Settings:
+        account_token_vending_remote_accounts = {"borrowed@example.test": "https://peer.example"}
+        account_token_vending_authority_base_url = None
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", _fetch_models_for_plan)
+    monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: _Registry())
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_account_selection_cache",
+        lambda: SimpleNamespace(invalidate=lambda: None),
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "TokenEncryptor",
+        lambda: SimpleNamespace(decrypt=lambda value: value.decode()),
+    )
+    monkeypatch.setattr(scheduler_module, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
+    monkeypatch.setattr(scheduler_module, "get_settings", lambda: _Settings())
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
+    await scheduler._refresh_once()
+
+    assert fetched_tokens == ["owned-token"]

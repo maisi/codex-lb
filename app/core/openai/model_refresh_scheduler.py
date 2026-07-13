@@ -23,6 +23,7 @@ from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.token_vending import vend_authority_for_account
 from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
@@ -99,11 +100,21 @@ class ModelRefreshScheduler:
             per_account_results: dict[str, tuple[str, list[UpstreamModel]]] = {}
             active_account_plans: dict[str, str] = {}
 
+            settings = get_settings()
             for plan_type, candidates in grouped.items():
                 for account in candidates:
                     active_account_plans[account.id] = plan_type
+                # Borrowed accounts are vended lazily on the live path only; a
+                # background model fetch would use their stale token and fail.
+                # Keep them in active_account_plans (routing) but never fetch with
+                # them — an owned account provides the plan's model list.
+                fetch_candidates = [
+                    candidate for candidate in candidates if vend_authority_for_account(candidate, settings) is None
+                ]
+                if not fetch_candidates:
+                    continue
                 result = await _fetch_with_failover(
-                    candidates,
+                    fetch_candidates,
                     encryptor,
                 )
                 if result is not None:

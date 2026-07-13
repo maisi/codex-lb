@@ -18,6 +18,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.token_vending import vend_authority_for_account
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
@@ -97,8 +98,13 @@ async def refresh_reset_credits_for_accounts(
     (i.e. it simply skips overwriting the cache) so account-status derivation
     stays owned by usage refresh. One account failing must not abort the loop.
     """
+    settings = get_settings()
     for account in accounts:
         if account.status in _RESET_CREDITS_SKIP_STATUSES:
+            continue
+        if vend_authority_for_account(account, settings) is not None:
+            # Borrowed: owned by a peer, vended lazily on the live path only. A
+            # background fetch would use a stale vended token to no effect.
             continue
         if not account.chatgpt_account_id:
             continue
