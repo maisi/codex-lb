@@ -31,6 +31,7 @@ from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.repository import AccountsRepository as SessionAccountsRepository
+from app.modules.accounts.token_vending import vend_authority_for_account
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
@@ -236,6 +237,19 @@ def _usage_refresh_singleflight_key(
     return ("owned-session", account_id) if own_singleflight_session else account_id
 
 
+def _account_is_borrowed(account: Account) -> bool:
+    """True when this account's OAuth tokens are owned by a peer instance.
+
+    A borrowed account is vended a short-lived access token lazily, only on the
+    live request path. Background usage refresh must therefore leave it untouched:
+    fetching usage here would use the last (now-expired) vended access token,
+    return 401 ``token_expired``, and wrongly drive the account to
+    ``REAUTH_REQUIRED`` even though its refresh token — owned by the peer — is
+    perfectly healthy. See app.modules.accounts.token_vending.
+    """
+    return vend_authority_for_account(account, get_settings()) is not None
+
+
 class UsageUpdater:
     def __init__(
         self,
@@ -271,6 +285,11 @@ class UsageUpdater:
         _prune_usage_refresh_auth_cooldowns()
         for account in accounts:
             if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+                continue
+            if _account_is_borrowed(account):
+                # Borrowed: owned by a peer, vended lazily on the live path only.
+                # A background usage fetch would use a stale vended token and
+                # wrongly mark the account REAUTH_REQUIRED. Leave it untouched.
                 continue
             if _is_usage_refresh_in_cooldown(account.id):
                 continue
@@ -434,6 +453,8 @@ class UsageUpdater:
             if account is None:
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            if _account_is_borrowed(account):
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             return await UsageUpdater(
                 usage_repo,
@@ -658,6 +679,20 @@ class UsageUpdater:
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:
+            return
+        if _account_is_borrowed(account):
+            # A follower must never drive a borrowed account to REAUTH_REQUIRED/
+            # DEACTIVATED from a usage-fetch failure: the refresh token is owned by
+            # the peer, so a rejected access token is a transient follower condition,
+            # not an account-level auth failure. Background passes already skip
+            # borrowed accounts; this is the belt-and-suspenders net for any other
+            # caller (e.g. a live force_refresh whose vended token raced expiry).
+            logger.info(
+                "Skipping usage-error deactivation for borrowed account account_id=%s status=%s request_id=%s",
+                account.id,
+                exc.status_code,
+                get_request_id(),
+            )
             return
         reason = f"Usage API error: HTTP {exc.status_code} - {exc.message}"
         status = (

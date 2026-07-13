@@ -100,3 +100,10 @@ Background/maintenance passes (auth guardian, usage refresh, model refresh, limi
 - **WHEN** a background scheduler processes a borrowed account
 - **THEN** it does not vend the account and does not contact the owner
 - **AND** the account is vended only when a live request selects it
+
+#### Scenario: background usage refresh never re-auths a borrowed account
+
+- **GIVEN** a borrowed account whose last vended access token has expired
+- **WHEN** background usage refresh or limit warm-up processes it
+- **THEN** it skips the account rather than calling upstream with the stale access token
+- **AND** even if an upstream call returns 401/token_expired for a borrowed account, the follower MUST NOT mark it `REAUTH_REQUIRED` (the refresh token is owned by the peer, so the failure is transient, not an account-level auth failure)

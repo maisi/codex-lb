@@ -11,6 +11,7 @@ from typing import AsyncContextManager, Callable, Protocol
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import UpstreamProxyRouteTrace, override_stream_timeouts, stream_responses
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIError, ResponseUsage
@@ -23,6 +24,7 @@ from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.token_vending import vend_authority_for_account
 from app.modules.usage.mappers import usage_history_to_window_row
 
 logger = logging.getLogger(__name__)
@@ -636,7 +638,12 @@ def _selected_windows(value: str) -> tuple[str, ...]:
 
 
 def _account_is_safe_candidate(account: Account) -> bool:
-    return account.status == AccountStatus.ACTIVE
+    if account.status != AccountStatus.ACTIVE:
+        return False
+    # Borrowed accounts are owned by a peer and vended lazily on the live request
+    # path; a background warm-up send here would use a stale vended access token
+    # and never reach upstream. Leave them untouched (matches usage-refresh).
+    return vend_authority_for_account(account, get_settings()) is None
 
 
 def _in_cooldown(attempt: AccountLimitWarmup | None, *, cooldown_seconds: int) -> bool:

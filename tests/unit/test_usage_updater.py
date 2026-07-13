@@ -625,6 +625,68 @@ async def test_deactivate_for_client_error_records_status_transition(monkeypatch
     ]
 
 
+class _BorrowSettings:
+    usage_refresh_enabled = True
+    usage_refresh_interval_seconds = 0
+    usage_refresh_auth_failure_cooldown_seconds = 0
+
+    def __init__(self, borrowed_email: str) -> None:
+        self.account_token_vending_remote_accounts = {borrowed_email: "https://peer.example"}
+        self.account_token_vending_authority_base_url = None
+
+
+@pytest.mark.asyncio
+async def test_deactivate_for_client_error_skips_borrowed_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A follower must NOT drive a borrowed account to REAUTH_REQUIRED from a
+    # usage-fetch 401: the refresh token is owned by the peer, so a rejected
+    # (stale) vended access token is a transient follower condition.
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_borrowed_deact", "chatgpt_borrowed_deact", email="borrowed@example.com")
+    accounts_repo.accounts_by_id[account.id] = account
+
+    monkeypatch.setattr(usage_updater_module, "get_settings", lambda: _BorrowSettings("borrowed@example.com"))
+    calls: list[str] = []
+    monkeypatch.setattr(
+        usage_updater_module,
+        "record_account_status_transition",
+        lambda acc, *, status, error_code, source: calls.append(acc.id),
+    )
+
+    await updater._deactivate_for_client_error(account, UsageFetchError(401, "expired", "token_expired"))
+
+    assert calls == []
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_skips_borrowed_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Background usage refresh must leave borrowed accounts untouched: no upstream
+    # fetch with the stale vended token, no status change.
+    account = _make_account("acc_borrowed_bg", "chatgpt_borrowed_bg", email="borrowed-bg@example.com")
+
+    monkeypatch.setattr(usage_updater_module, "get_settings", lambda: _BorrowSettings("borrowed-bg@example.com"))
+    fetch_calls: list[dict[str, object]] = []
+
+    async def _fetch_usage(**kwargs: object) -> UsagePayload:
+        fetch_calls.append(kwargs)
+        return UsagePayload(plan_type="plus")
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
+
+    accounts_repo = StubAccountsRepository()
+    accounts_repo.accounts_by_id[account.id] = account
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+
+    refreshed = await updater.refresh_accounts([account], {})
+
+    assert refreshed is False
+    assert fetch_calls == []
+    assert account.status == AccountStatus.ACTIVE
+    assert accounts_repo.status_updates == []
+
+
 @pytest.mark.asyncio
 async def test_usage_updater_passes_resolved_route_to_fetch_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     account = _make_account("acc_route", "chatgpt_acc_route")
