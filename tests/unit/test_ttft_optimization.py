@@ -74,6 +74,7 @@ def _make_proxy_settings() -> object:
         sticky_reallocation_budget_threshold_pct=95.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
+        proxy_account_stream_recovery_reserve=1,
         proxy_response_create_limit=64,
         proxy_compact_response_create_limit=16,
     )
@@ -182,6 +183,7 @@ async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch) -> No
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
 
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
     assert len(chunks) == 2
@@ -220,6 +222,7 @@ async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(mon
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
 
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-control"})]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
     assert len(chunks) == 3

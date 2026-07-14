@@ -22,6 +22,7 @@ os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
+os.environ["CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS"] = "0"
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
@@ -82,6 +83,20 @@ def _disable_rate_limit_reset_credits_scheduler_startup(monkeypatch):
     monkeypatch.setattr(main_module, "build_rate_limit_reset_credits_scheduler", lambda: _NoopScheduler())
 
 
+@pytest.fixture(autouse=True)
+def _disable_account_usage_rollup_scheduler_startup(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "build_account_usage_rollup_scheduler", lambda: _NoopScheduler())
+
+
+@pytest.fixture(autouse=True)
+def _disable_data_retention_scheduler_startup(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "build_data_retention_scheduler", lambda: _NoopScheduler())
+
+
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def dispose_engine():
     yield
@@ -96,9 +111,24 @@ async def db_setup(_reset_db_state):
 
 @pytest_asyncio.fixture
 async def async_client(app_instance):
+    async def _drain_proxy_persistence(response) -> None:
+        # Request-log writes and API-key settlements are detached from the
+        # response path in production; tests assert on their effects right
+        # after a response, so flush them per request to keep the historical
+        # synchronous semantics inside the suite. The detach contract itself
+        # is pinned by dedicated tests that bypass this hook.
+        del response
+        service = getattr(app_instance.state, "proxy_service", None)
+        if service is not None and hasattr(service, "drain_persistence_tasks"):
+            await service.drain_persistence_tasks(timeout_seconds=5)
+
     async with app_instance.router.lifespan_context(app_instance):
         transport = ASGITransport(app=app_instance)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+            event_hooks={"response": [_drain_proxy_persistence]},
+        ) as client:
             yield client
 
 
@@ -118,8 +148,12 @@ def _reset_model_registry():
 
     registry = get_model_registry()
     registry._snapshot = None
+    registry._metadata_models = None
+    registry._applied_content_hash = None
     yield
     registry._snapshot = None
+    registry._metadata_models = None
+    registry._applied_content_hash = None
 
 
 @pytest.fixture(autouse=True)
@@ -153,6 +187,12 @@ def _reset_global_state() -> None:
 
         get_account_selection_cache().invalidate()
         clear_all_account_routing_unavailable()
+    except Exception:
+        pass
+    try:
+        from app.core.cache.invalidation import set_cache_invalidation_poller
+
+        set_cache_invalidation_poller(None)
     except Exception:
         pass
     try:

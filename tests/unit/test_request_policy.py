@@ -57,6 +57,38 @@ def test_gpt5_cursor_aliases_target_canonical_models(
     assert request.service_tier == expected_service_tier
 
 
+def test_fast_mode_prohibition_keeps_harness_model_and_reasoning_but_omits_priority() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol-xhigh-fast",
+            "instructions": "",
+            "input": [],
+        }
+    )
+
+    apply_api_key_enforcement(request, None, prohibit_fast_mode=True)
+
+    assert request.model == "gpt-5.6-sol"
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "high"
+    assert request.service_tier is None
+
+
+def test_fast_mode_prohibition_keeps_explicit_service_tier() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol-xhigh-fast",
+            "instructions": "",
+            "input": [],
+            "service_tier": "flex",
+        }
+    )
+
+    apply_api_key_enforcement(request, None, prohibit_fast_mode=True)
+
+    assert request.service_tier == "flex"
+
+
 def test_minimal_reasoning_alias_uses_upstream_safe_fallback() -> None:
     request = ResponsesRequest.model_validate(
         {
@@ -135,7 +167,7 @@ def test_enforced_non_lite_model_rejects_responses_lite_payload() -> None:
     registry = cast(
         ModelRegistry,
         SimpleNamespace(
-            get_models_with_fallback=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
+            get_models_for_metadata=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
         ),
     )
 
@@ -171,7 +203,7 @@ def test_alias_equivalent_enforced_non_lite_model_rejects_responses_lite_payload
     registry = cast(
         ModelRegistry,
         SimpleNamespace(
-            get_models_with_fallback=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
+            get_models_for_metadata=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
         ),
     )
 

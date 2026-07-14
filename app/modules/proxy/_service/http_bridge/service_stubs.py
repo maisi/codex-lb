@@ -45,6 +45,13 @@ def _service_global(name: str) -> Any:
     return getattr(_service_module(), name)
 
 
+def _response_create_compatibility_metadata_headers() -> tuple[str, ...]:
+    return cast(
+        tuple[str, ...],
+        _service_global("_RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS"),
+    )
+
+
 def _service_global_or(name: str, fallback: T) -> T:
     service_module = sys.modules.get("app.modules.proxy.service")
     if service_module is None:
@@ -296,7 +303,12 @@ def _headers_with_turn_state(*args: Any, **kwargs: Any) -> Any:
 
 
 def _websocket_safe_headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None) -> dict[str, str]:
-    return cast(dict[str, str], _headers_with_turn_state(filter_inbound_websocket_headers(dict(headers)), turn_state))
+    filtered = {
+        key: value
+        for key, value in filter_inbound_websocket_headers(dict(headers)).items()
+        if key.lower() not in _response_create_compatibility_metadata_headers()
+    }
+    return cast(dict[str, str], _headers_with_turn_state(filtered, turn_state))
 
 
 def _headers_with_authorization(*args: Any, **kwargs: Any) -> Any:
@@ -353,6 +365,10 @@ def _prepare_websocket_request_state_for_visible_output_replay(*args: Any, **kwa
 
 def _prepare_websocket_request_state_for_auth_replay(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_prepare_websocket_request_state_for_auth_replay")(*args, **kwargs)
+
+
+def _websocket_auth_request_can_switch_account(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_websocket_auth_request_can_switch_account")(*args, **kwargs)
 
 
 def _classify_upstream_close(*args: Any, **kwargs: Any) -> Any:
@@ -425,6 +441,10 @@ def _pop_terminal_websocket_request_state(*args: Any, **kwargs: Any) -> Any:
 
 def _pop_matching_websocket_request_states(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_pop_matching_websocket_request_states")(*args, **kwargs)
+
+
+def _prepare_websocket_request_state_for_account_switch(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_prepare_websocket_request_state_for_account_switch")(*args, **kwargs)
 
 
 def _matching_websocket_request_states_for_previous_response_error(*args: Any, **kwargs: Any) -> Any:

@@ -41,7 +41,7 @@ from app.core.errors import (
 from app.core.errors import (
     response_failed_event,
 )
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.parsing import parse_sse_event_payload
 from app.core.openai.requests import (
     ResponsesRequest,
 )
@@ -409,13 +409,13 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease
-from app.modules.proxy.tool_call_dedupe import (
-    mark_duplicate_tool_call_downstream_event,
-    rewrite_parallel_tool_call_sse_line,
-)
+from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountLease
+from app.modules.proxy.tool_call_dedupe import mark_duplicate_tool_call_downstream_event
 from app.modules.proxy.tool_call_dedupe import (
     response_id_from_payload as tool_call_response_id_from_payload,
+)
+from app.modules.proxy.tool_call_dedupe import (
+    rewrite_parallel_tool_call_sse_line as _rewrite_tool_call_line,
 )
 from app.modules.proxy.work_admission import AdmissionLease
 
@@ -480,6 +480,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         suppress_text_done_events: bool,
         upstream_stream_transport: str | None,
         request_transport: str,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
         client_ip: str | None = None,
@@ -529,49 +530,35 @@ class _StreamingMixin(_StreamingRetryMixin):
                     stop_event=api_key_reservation_heartbeat_stop,
                 )
             )
-
         try:
             route = await proxy._resolve_upstream_route_for_account(account, operation="responses")
             account_response_create_lease = await proxy._acquire_account_response_create_lease_or_overload(
                 account_id=account.id,
                 request_id=request_id,
                 surface="stream",
+                concurrency_caps=concurrency_caps or _facade().effective_account_concurrency_caps(),
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
+            stream_optional_kwargs: dict[str, object] = {
+                "route": route,
+                "allow_direct_egress": route is None,
+                "route_trace": route_trace,
+                "codex_installation_id": account.codex_installation_id,
+                "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
+                "codex_lb_account_id": account.id,
+            }
             if upstream_stream_transport is not None:
-                stream = _facade()._call_stream_with_supported_optional_kwargs(
-                    _facade().core_stream_responses,
-                    payload,
-                    headers,
-                    access_token,
-                    account_id,
-                    optional_kwargs={
-                        "route": route,
-                        "allow_direct_egress": route is None,
-                        "route_trace": route_trace,
-                        "codex_installation_id": account.codex_installation_id,
-                        "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
-                        "upstream_stream_transport_override": upstream_stream_transport,
-                    },
-                    raise_for_status=True,
-                )
-            else:
-                stream = _facade()._call_stream_with_supported_optional_kwargs(
-                    _facade().core_stream_responses,
-                    payload,
-                    headers,
-                    access_token,
-                    account_id,
-                    optional_kwargs={
-                        "route": route,
-                        "allow_direct_egress": route is None,
-                        "route_trace": route_trace,
-                        "codex_installation_id": account.codex_installation_id,
-                        "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
-                    },
-                    raise_for_status=True,
-                )
-            iterator = stream.__aiter__()
+                stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport
+            stream = _facade()._call_stream_with_supported_optional_kwargs(
+                _facade().core_stream_responses,
+                payload,
+                headers,
+                access_token,
+                account_id,
+                optional_kwargs=stream_optional_kwargs,
+                raise_for_status=True,
+            )
+            iterator = _facade()._stream_iterator_after_capacity_admission(stream)
             try:
                 first = await iterator.__anext__()
             except StopAsyncIteration:
@@ -616,7 +603,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None
             first_payload = parse_sse_data_json(first)
-            event = parse_sse_event(first)
+            event = parse_sse_event_payload(first_payload)
             event_type = _event_type_from_payload(event, first_payload)
             terminal_event_seen = event_type in {
                 "response.completed",
@@ -756,7 +743,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 suppress_text_done_events=suppress_text_done_events,
                 saw_text_delta=saw_text_delta,
             ):
-                first, first_payload, event, event_type = rewrite_parallel_tool_call_sse_line(first, first_payload)
+                first, first_payload, event, event_type = _rewrite_tool_call_line(first, first_payload, event=event)
                 if mark_duplicate_tool_call_downstream_event(
                     first_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
@@ -775,10 +762,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                     yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
-
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
-                event = parse_sse_event(line)
+                event = parse_sse_event_payload(event_payload)
                 event_type = _event_type_from_payload(event, event_payload)
                 if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
                     terminal_event_seen = True
@@ -812,7 +798,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
                     service_tier = event_service_tier
-                line, event_payload, event, event_type = rewrite_parallel_tool_call_sse_line(line, event_payload)
+                line, event_payload, event, event_type = _rewrite_tool_call_line(line, event_payload, event=event)
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     saw_text_delta = True
                 if _facade()._should_suppress_text_done_event(

@@ -233,6 +233,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_prewarm_canary_bucket as _http_bridge_prewarm_canary_bucket,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_request_budget_seconds as _http_bridge_request_budget_seconds,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -369,6 +372,9 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS as _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS,
+)
+from app.modules.proxy._service.response_create import (
+    _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS as _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS,
 )
 from app.modules.proxy._service.response_create import (
     _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE as _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE,
@@ -533,6 +539,9 @@ from app.modules.proxy._service.streaming.helpers import (
     _should_retry_transient_stream_error as _should_retry_transient_stream_error,
 )
 from app.modules.proxy._service.streaming.helpers import (
+    _stream_iterator_after_capacity_admission as _stream_iterator_after_capacity_admission,
+)
+from app.modules.proxy._service.streaming.helpers import (
     _stream_request_budget_seconds as _stream_request_budget_seconds,
 )
 from app.modules.proxy._service.streaming.helpers import (
@@ -644,6 +653,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_matching_websocket_request_states,  # noqa: F401
     _pop_replayable_precreated_websocket_request_state,  # noqa: F401
     _pop_terminal_websocket_request_state,  # noqa: F401
+    _prepare_websocket_request_state_for_account_switch,  # noqa: F401
     _prepare_websocket_request_state_for_auth_replay,  # noqa: F401
     _prepare_websocket_request_state_for_visible_output_replay,  # noqa: F401
     _record_websocket_continuity_completion,  # noqa: F401
@@ -717,7 +727,14 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, AccountLeaseKind, AccountSelection, LoadBalancer
+from app.modules.proxy.load_balancer import (
+    AccountConcurrencyCaps,
+    AccountLease,
+    AccountLeaseKind,
+    AccountSelection,
+    LoadBalancer,
+    effective_account_concurrency_caps,
+)
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.ring_membership import (
     RingMembershipService,
@@ -1269,13 +1286,26 @@ class ProxyService(
         surface: str = "websocket",
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
+        if bridge_session is not None:
+            # Bridged requests retry gate acquisition within the bridge
+            # request budget; a final attempt must not run past it, so each
+            # acquisition wait is clamped to the remaining budget. Retry
+            # states carry the original deadline because their started_at
+            # is reset when they are re-prepared.
+            deadline = request_state.bridge_request_deadline
+            if deadline is None:
+                deadline = request_state.started_at + _http_bridge_request_budget_seconds(get_settings())
+            remaining_budget = deadline - time.monotonic()
+            timeout_seconds = max(0.0, min(timeout_seconds, remaining_budget))
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = time.monotonic()
         if account_id is not None:
+            settings = await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=account_id,
                 request_id=request_state.request_id,
                 surface=surface,
+                concurrency_caps=effective_account_concurrency_caps(settings),
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
@@ -1421,6 +1451,7 @@ class ProxyService(
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
+            concurrency_caps=effective_account_concurrency_caps(settings),
         )
         if selection.account is None:
             return None
@@ -1768,6 +1799,16 @@ class ProxyService(
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                concurrency_caps = effective_account_concurrency_caps(settings)
+                stream_reserve_slots = (
+                    (
+                        get_settings().proxy_account_stream_recovery_reserve
+                        if getattr(settings, "proxy_account_stream_recovery_reserve", None) is None
+                        else settings.proxy_account_stream_recovery_reserve
+                    )
+                    if lease_kind == "stream" and request_stage != "reattach"
+                    else 0
+                )
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
@@ -1835,7 +1876,9 @@ class ProxyService(
                         secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
                         lease_kind=lease_kind,
                         estimated_lease_tokens=estimated_lease_tokens,
+                        stream_reserve_slots=stream_reserve_slots,
                         traffic_class=effective_traffic_class,
+                        concurrency_caps=concurrency_caps,
                     )
                     if preferred_selection.account is not None:
                         logger.info(
@@ -1878,7 +1921,9 @@ class ProxyService(
                     secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
                     lease_kind=lease_kind,
                     estimated_lease_tokens=estimated_lease_tokens,
+                    stream_reserve_slots=stream_reserve_slots,
                     traffic_class=effective_traffic_class,
+                    concurrency_caps=concurrency_caps,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(
@@ -1919,10 +1964,12 @@ class ProxyService(
         account_id: str,
         request_id: str,
         surface: str,
+        concurrency_caps: AccountConcurrencyCaps,
     ) -> AccountLease:
         lease = await self._load_balancer.acquire_account_lease(
             account_id,
             kind="response_create",
+            concurrency_caps=concurrency_caps,
         )
         if lease is not None:
             return lease
@@ -1980,6 +2027,16 @@ class ProxyService(
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,
+            concurrency_caps=effective_account_concurrency_caps(settings),
+            stream_reserve_slots=(
+                (
+                    get_settings().proxy_account_stream_recovery_reserve
+                    if getattr(settings, "proxy_account_stream_recovery_reserve", None) is None
+                    else settings.proxy_account_stream_recovery_reserve
+                )
+                if lease_kind == "stream"
+                else 0
+            ),
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:

@@ -156,6 +156,7 @@ def _websocket_settings(**overrides):
         "log_proxy_request_shape_raw_cache_key": False,
         "proxy_token_refresh_limit": 32,
         "proxy_upstream_websocket_connect_limit": 64,
+        "proxy_account_stream_recovery_reserve": 1,
         "proxy_response_create_limit": 64,
         "proxy_compact_response_create_limit": 16,
     }
@@ -611,6 +612,17 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
             "text",
             text=json.dumps(
                 {
+                    "type": "response.output_text.delta",
+                    "response_id": "resp_ws_1",
+                    "delta": "hello",
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
                     "type": "response.completed",
                     "response": {
                         "id": "resp_ws_1",
@@ -697,7 +709,9 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         "instructions": "",
         "client_metadata": {
             "x-codex-installation-id": "client-installation",
-            "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+            "x-codex-turn-metadata": (
+                '{"installation_id":"client-installation","turn_id":"turn_123","sandbox":"workspace-write"}'
+            ),
             "ws_request_header_x_openai_internal_codex_responses_lite": "stale",
         },
         "service_tier": "fast",
@@ -725,13 +739,16 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
             websocket.send_text(json.dumps(request_payload))
             first = json.loads(websocket.receive_text())
             second = json.loads(websocket.receive_text())
+            third = json.loads(websocket.receive_text())
 
     assert first["type"] == "response.created"
-    assert second["type"] == "response.completed"
+    assert second["type"] == "response.output_text.delta"
+    assert third["type"] == "response.completed"
     seen_headers = cast(dict[str, str], seen["headers"])
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"
-    assert seen_headers["x-codex-turn-state"] == cast(str, seen["sticky_key"])
+    assert seen_headers["x-codex-turn-state"] != cast(str, seen["sticky_key"])
+    assert seen["sticky_key"] == "thread-ws-1"
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["prefer_earlier_reset"] is False
     assert seen["routing_strategy"] == "usage_weighted"
@@ -749,10 +766,11 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
                     custom_tool_output,
                     {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
                 ],
-                "tools": [],
                 "reasoning": {"effort": "high"},
                 "client_metadata": {
-                    "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+                    "x-codex-turn-metadata": (
+                        '{"installation_id":"account-installation","turn_id":"turn_123","sandbox":"workspace-write"}'
+                    ),
                     "ws_request_header_x_openai_internal_codex_responses_lite": "true",
                 },
                 "service_tier": "priority",
@@ -775,6 +793,154 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["status"] == "success"
     assert log["input_tokens"] == 3
     assert log["output_tokens"] == 5
+    latency_first_upstream_event_ms = log["latency_first_upstream_event_ms"]
+    latency_response_created_ms = log["latency_response_created_ms"]
+    latency_first_token_ms = log["latency_first_token_ms"]
+    assert isinstance(latency_first_upstream_event_ms, int)
+    assert isinstance(latency_response_created_ms, int)
+    assert isinstance(latency_first_token_ms, int)
+    assert latency_first_upstream_event_ms <= latency_response_created_ms <= latency_first_token_ms
+
+
+def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_instance, monkeypatch):
+    # Regression for issue #1184: client-sent top-level tools must reach the
+    # upstream ``response.create`` frame byte-identical — array order, object
+    # key order, unknown keys, and array-value order all preserved. The
+    # fixture mirrors the gpt-5.6 ``multi_agent_version: v2`` reserved
+    # collaboration namespace tool (codex-rs rust-v0.144.1): ``strict: false``,
+    # a non-standard ``encrypted`` marker, non-alphabetical ``required`` order,
+    # and leading whitespace in the description.
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_ws_tools_bytes", "object": "response", "status": "in_progress"},
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_tools_bytes",
+                        "object": "response",
+                        "status": "completed",
+                        "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
+        del authorization, request
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        return SimpleNamespace(id="acct_ws_tools_bytes", codex_installation_id="account-installation"), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    client_tools = [
+        {
+            "type": "namespace",
+            "name": "collaboration",
+            "description": "Tools for spawning and managing sub-agents.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "spawn_agent",
+                    "strict": False,
+                    "description": "\n        \n        Spawn a sub-agent for the given task.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "encrypted": True},
+                            "task_name": {"type": "string"},
+                        },
+                        "required": ["task_name", "message"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+        },
+        {
+            "type": "function",
+            "name": "zeta_tool",
+            "parameters": {"required": [], "type": "object", "properties": {}},
+            "description": "later",
+        },
+    ]
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.6",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": client_tools,
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            first = json.loads(websocket.receive_text())
+            second = json.loads(websocket.receive_text())
+
+    assert first["type"] == "response.created"
+    assert second["type"] == "response.completed"
+    assert len(fake_upstream.sent_text) == 1
+    frame = fake_upstream.sent_text[0]
+    expected_tools_bytes = '"tools":' + json.dumps(client_tools, ensure_ascii=True, separators=(",", ":"))
+    assert expected_tools_bytes in frame
 
 
 def test_backend_responses_websocket_lite_marker_requires_previous_response_linkage(app_instance, monkeypatch):
@@ -1754,31 +1920,35 @@ def test_backend_responses_websocket_preserves_image_generation_tool_advertiseme
 
 
 def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app_instance, monkeypatch):
-    upstream_messages = [
-        _FakeUpstreamMessage(
-            "text",
-            text=json.dumps(
-                {"type": "response.created", "response": {"id": "resp_turn_state", "status": "in_progress"}},
-                separators=(",", ":"),
+    def upstream_messages(response_id: str) -> list[_FakeUpstreamMessage]:
+        return [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
             ),
-        ),
-        _FakeUpstreamMessage(
-            "text",
-            text=json.dumps(
-                {
-                    "type": "response.completed",
-                    "response": {
-                        "id": "resp_turn_state",
-                        "status": "completed",
-                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
                     },
-                },
-                separators=(",", ":"),
+                    separators=(",", ":"),
+                ),
             ),
-        ),
-    ]
-    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
-    seen: dict[str, object] = {}
+        ]
+
+    first_upstream = _FakeUpstreamWebSocket(upstream_messages("resp_turn_state_first"))
+    second_upstream = _FakeUpstreamWebSocket(upstream_messages("resp_turn_state_second"))
+    upstreams = deque([first_upstream, second_upstream])
+    selections: list[dict[str, object]] = []
 
     class _FakeSettingsCache:
         async def get(self):
@@ -1821,21 +1991,21 @@ def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app
             client_send_lock,
             websocket,
         )
-        seen["headers"] = dict(headers)
-        seen["sticky_key"] = sticky_key
-        seen["sticky_kind"] = sticky_kind
-        return SimpleNamespace(id="acct_turn_state"), fake_upstream
+        selections.append({"headers": dict(headers), "sticky_key": sticky_key, "sticky_kind": sticky_kind})
+        return SimpleNamespace(id="acct_turn_state"), upstreams.popleft()
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
 
+    first_input = {"role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+    second_input = {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
     request_payload = {
         "type": "response.create",
         "model": "gpt-5.4",
         "instructions": "",
-        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "input": [first_input],
         "stream": True,
     }
 
@@ -1848,15 +2018,281 @@ def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app
             extra_headers = {key.decode(): value.decode() for key, value in raw_extra_headers}
             turn_state = extra_headers["x-codex-turn-state"]
             websocket.send_text(json.dumps(request_payload))
-            completed = json.loads(websocket.receive_text())
-            assert completed["type"] == "response.created"
-            _ = json.loads(websocket.receive_text())
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
 
-    seen_headers = cast(dict[str, str], seen["headers"])
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={"Authorization": "Bearer external-token", "x-codex-turn-state": turn_state},
+        ) as websocket:
+            websocket.send_text(json.dumps({**request_payload, "input": [first_input, second_input]}))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
     assert turn_state
-    assert seen_headers["x-codex-turn-state"] == turn_state
-    assert seen["sticky_key"] == turn_state
-    assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
+    assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == [
+        turn_state,
+        turn_state,
+    ]
+    assert selections[1]["sticky_key"] == turn_state
+    assert selections[1]["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
+    second_payload = json.loads(second_upstream.sent_text[0])
+    assert second_payload["previous_response_id"] == "resp_turn_state_first"
+    assert second_payload["input"] == [second_input]
+
+
+def test_backend_responses_websocket_echoed_generated_turn_state_reuses_continuity_anchor(
+    app_instance,
+    monkeypatch,
+):
+    def upstream_messages(response_id: str) -> list[_FakeUpstreamMessage]:
+        return [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+
+    first_upstream = _FakeUpstreamWebSocket(upstream_messages("resp_generated_anchor"))
+    second_upstream = _FakeUpstreamWebSocket(upstream_messages("resp_generated_followup"))
+    upstreams = deque([first_upstream, second_upstream])
+    selections: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
+        assert authorization == "Bearer external-token"
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        selections.append({"headers": dict(headers), "key": sticky_key, "kind": sticky_kind})
+        return SimpleNamespace(id=f"acct_generated_echo_{len(selections)}"), upstreams.popleft()
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    first_input = {"role": "user", "content": [{"type": "input_text", "text": "first"}]}
+    second_input = {"role": "user", "content": [{"type": "input_text", "text": "second"}]}
+    first_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [first_input],
+        "stream": True,
+    }
+    echoed_full_resend_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [first_input, second_input],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={"Authorization": "Bearer external-token"},
+        ) as websocket:
+            raw_extra_headers = cast(list[tuple[bytes, bytes]], websocket.extra_headers)
+            extra_headers = {key.decode(): value.decode() for key, value in raw_extra_headers}
+            turn_state = extra_headers["x-codex-turn-state"]
+            websocket.send_text(json.dumps(first_payload))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={
+                "Authorization": "Bearer external-token",
+                "x-codex-turn-state": turn_state,
+            },
+        ) as websocket:
+            raw_extra_headers = cast(list[tuple[bytes, bytes]], websocket.extra_headers)
+            extra_headers = {key.decode(): value.decode() for key, value in raw_extra_headers}
+            assert extra_headers["x-codex-turn-state"] == turn_state
+            websocket.send_text(json.dumps(echoed_full_resend_payload))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+    first_upstream_payload = json.loads(first_upstream.sent_text[0])
+    second_upstream_payload = json.loads(second_upstream.sent_text[0])
+    assert "previous_response_id" not in first_upstream_payload
+    assert second_upstream_payload["previous_response_id"] == "resp_generated_anchor"
+    assert second_upstream_payload["input"] == [second_input]
+    assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == [
+        turn_state,
+        turn_state,
+    ]
+
+
+def test_backend_responses_websocket_reconnect_keeps_session_affinity_with_fresh_generated_turn_states(
+    app_instance,
+    monkeypatch,
+):
+    def upstream_messages(response_id: str) -> list[_FakeUpstreamMessage]:
+        return [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+
+    upstreams = deque(
+        [
+            _FakeUpstreamWebSocket(upstream_messages("resp_reconnect_one")),
+            _FakeUpstreamWebSocket(upstream_messages("resp_reconnect_two")),
+        ]
+    )
+    selections: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
+        assert authorization == "Bearer external-token"
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        selections.append({"headers": dict(headers), "key": sticky_key, "kind": sticky_kind})
+        return SimpleNamespace(id=f"acct_reconnect_{len(selections)}"), upstreams.popleft()
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "reconnect"}]}],
+        "stream": True,
+    }
+    turn_states: list[str] = []
+
+    with TestClient(app_instance) as client:
+        for _ in range(2):
+            with client.websocket_connect(
+                "/backend-api/codex/responses",
+                headers={"Authorization": "Bearer external-token", "session_id": "session-reconnect"},
+            ) as websocket:
+                raw_extra_headers = cast(list[tuple[bytes, bytes]], websocket.extra_headers)
+                extra_headers = {key.decode(): value.decode() for key, value in raw_extra_headers}
+                turn_states.append(extra_headers["x-codex-turn-state"])
+                websocket.send_text(json.dumps(request_payload))
+                assert json.loads(websocket.receive_text())["type"] == "response.created"
+                assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+    assert turn_states[0] != turn_states[1]
+    assert [selection["key"] for selection in selections] == ["session-reconnect", "session-reconnect"]
+    assert [selection["kind"] for selection in selections] == [
+        proxy_module.StickySessionKind.CODEX_SESSION,
+        proxy_module.StickySessionKind.CODEX_SESSION,
+    ]
+    assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == turn_states
 
 
 def test_backend_responses_websocket_echoes_existing_turn_state_header(app_instance, monkeypatch):
@@ -1944,7 +2380,7 @@ def test_backend_responses_websocket_echoes_existing_turn_state_header(app_insta
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         "stream": True,
     }
-    existing_turn_state = "turn_state_existing_123"
+    existing_turn_state = "turn_0123456789abcdef0123456789abcdef"
 
     with TestClient(app_instance) as client:
         with client.websocket_connect(
@@ -1952,6 +2388,7 @@ def test_backend_responses_websocket_echoes_existing_turn_state_header(app_insta
             headers={
                 "Authorization": "Bearer external-token",
                 "x-codex-turn-state": existing_turn_state,
+                "session_id": "broader-session-id",
             },
         ) as websocket:
             raw_extra_headers = cast(list[tuple[bytes, bytes]], websocket.extra_headers)
@@ -2087,9 +2524,6 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/v1/responses") as websocket:
-            raw_extra_headers = cast(list[tuple[bytes, bytes]], websocket.extra_headers)
-            extra_headers = {key.decode(): value.decode() for key, value in raw_extra_headers}
-            turn_state = extra_headers["x-codex-turn-state"]
             websocket.send_text(json.dumps(first_request))
             first_events = [json.loads(websocket.receive_text()) for _ in range(2)]
 
@@ -2099,8 +2533,8 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
     assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
     assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
     assert len(connect_calls) == 1
-    assert connect_calls[0]["sticky_key"] == turn_state
-    assert connect_calls[0]["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
+    assert connect_calls[0]["sticky_key"] == "thread_a"
+    assert connect_calls[0]["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
     assert connect_calls[0]["model"] == "gpt-5.4"
     _assert_upstream_payloads(
         first_upstream.sent_text,
@@ -2109,7 +2543,6 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "prompt_cache_key": "thread_a",
@@ -2119,7 +2552,6 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": "gpt-5.5",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "prompt_cache_key": "thread_b",
@@ -2380,8 +2812,8 @@ def test_v1_responses_websocket_accepts_and_reuses_generated_turn_state(app_inst
     seen_headers = cast(dict[str, str], seen["headers"])
     assert turn_state
     assert seen_headers["x-codex-turn-state"] == turn_state
-    assert seen["sticky_key"] == turn_state
-    assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
+    assert seen["sticky_key"] != turn_state
+    assert seen["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
 
 
 def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instance, monkeypatch):
@@ -2471,19 +2903,16 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/v1/responses") as websocket:
-            raw_extra_headers = cast(list[tuple[bytes, bytes]], websocket.extra_headers)
-            extra_headers = {key.decode(): value.decode() for key, value in raw_extra_headers}
-            turn_state = extra_headers["x-codex-turn-state"]
             websocket.send_text(json.dumps(request_payload))
             first = json.loads(websocket.receive_text())
             second = json.loads(websocket.receive_text())
 
     assert first["type"] == "response.created"
     assert second["type"] == "response.completed"
-    assert seen["sticky_key"] == turn_state
-    assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
+    assert seen["sticky_key"] == "thread_alias"
+    assert seen["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
     assert seen["reallocate_sticky"] is False
-    assert seen["sticky_max_age_seconds"] is None
+    assert seen["sticky_max_age_seconds"] == 300
     assert seen["prefer_earlier_reset_window"] == "secondary"
     assert seen["model"] == "gpt-5.4"
     _assert_upstream_payloads(
@@ -2637,7 +3066,6 @@ def test_backend_responses_websocket_forwards_previous_response_id(app_instance,
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "previous_response_id": "resp_prev_123",
@@ -2822,7 +3250,6 @@ def test_backend_responses_websocket_injects_interrupted_custom_tool_output_on_f
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [first_user_message],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "type": "response.create",
@@ -2838,7 +3265,6 @@ def test_backend_responses_websocket_injects_interrupted_custom_tool_output_on_f
                     },
                     interrupted_user_message,
                 ],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "previous_response_id": "resp_ws_custom_interrupt",
@@ -3050,7 +3476,6 @@ def test_backend_responses_websocket_injects_interrupted_custom_tool_output_afte
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": expected_first_upstream_input,
-                "tools": [],
                 "store": False,
                 "include": [],
                 "type": "response.create",
@@ -3066,7 +3491,6 @@ def test_backend_responses_websocket_injects_interrupted_custom_tool_output_afte
                     },
                     interrupted_user_message,
                 ],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "previous_response_id": first_response_id,
@@ -3271,7 +3695,6 @@ def test_v1_responses_websocket_forwards_previous_response_id(app_instance, monk
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "previous_response_id": "resp_prev_v1_123",
@@ -5682,6 +6105,190 @@ def test_backend_responses_websocket_matches_previous_response_error_to_anchor_w
     assert first_upstream.closed is True
 
 
+def test_backend_responses_websocket_same_owner_followup_skips_selector_revalidation(
+    app_instance,
+    monkeypatch,
+):
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_prev_anchor", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_prev_anchor", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_followup", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_followup", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+        ],
+    )
+    connect_count = 0
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        nonlocal connect_count
+        connect_count += 1
+        return SimpleNamespace(id="acct_ws_same_owner"), first_upstream
+
+    async def fake_resolve_previous_response_owner(
+        self,
+        *,
+        previous_response_id,
+        api_key,
+        session_id=None,
+        surface,
+    ):
+        del self, api_key, session_id, surface
+        assert previous_response_id == "resp_ws_prev_anchor"
+        return "acct_ws_same_owner"
+
+    async def fail_revalidate(
+        self,
+        current_account,
+        *,
+        request_state,
+        api_key,
+    ):
+        del self, current_account, request_state, api_key
+        raise AssertionError("same-owner followup should not hit selector revalidation")
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_revalidate_open_websocket_account", fail_revalidate)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps({"type": "response.create", "model": "gpt-5.4", "input": "anchor"}))
+            created_1 = json.loads(websocket.receive_text())
+            completed_1 = json.loads(websocket.receive_text())
+
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "continue",
+                        "previous_response_id": "resp_ws_prev_anchor",
+                        "stream": True,
+                    }
+                )
+            )
+            created_2 = json.loads(websocket.receive_text())
+            completed_2 = json.loads(websocket.receive_text())
+
+    assert created_1["response"]["id"] == "resp_ws_prev_anchor"
+    assert completed_1["response"]["id"] == "resp_ws_prev_anchor"
+    assert created_2["response"]["id"] == "resp_ws_followup"
+    assert completed_2["response"]["id"] == "resp_ws_followup"
+    assert connect_count == 1
+    _assert_upstream_payloads(
+        first_upstream.sent_text,
+        [
+            {
+                "model": "gpt-5.4",
+                "instructions": "",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "anchor"}]}],
+                "store": False,
+                "include": [],
+                "type": "response.create",
+            },
+            {
+                "model": "gpt-5.4",
+                "instructions": "",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+                "previous_response_id": "resp_ws_prev_anchor",
+                "store": False,
+                "include": [],
+                "type": "response.create",
+            },
+        ],
+    )
+
+
 def test_backend_responses_websocket_masks_anonymous_previous_response_not_found_for_same_anchor_followups_and_recovers(
     app_instance,
     monkeypatch,
@@ -6316,7 +6923,7 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
             error_event = json.loads(websocket.receive_text())
 
     assert error_event["type"] == "error"
-    assert error_event["status"] == 413
+    assert error_event["status"] == 400
     assert error_event["error"]["code"] == "payload_too_large"
     assert error_event["error"]["type"] == "invalid_request_error"
     assert error_event["error"]["param"] == "input"
@@ -6964,7 +7571,6 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
                 "model": "gpt-5.1",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "type": "response.create",
@@ -6978,7 +7584,6 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
                 "model": "gpt-5.2",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "type": "response.create",
@@ -7711,15 +8316,22 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
 
 
 def test_backend_responses_websocket_emits_response_failed_before_close_on_upstream_eof(app_instance, monkeypatch):
-    def upstream_created_then_eof(response_id: str) -> _FakeUpstreamWebSocket:
+    def upstream_created_then_eof(
+        response_id: str,
+        *,
+        sequence_number: int | None = None,
+    ) -> _FakeUpstreamWebSocket:
+        created_payload: dict[str, object] = {
+            "type": "response.created",
+            "response": {"id": response_id, "status": "in_progress"},
+        }
+        if sequence_number is not None:
+            created_payload["sequence_number"] = sequence_number
         return _FakeUpstreamWebSocket(
             [
                 _FakeUpstreamMessage(
                     "text",
-                    text=json.dumps(
-                        {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
-                        separators=(",", ":"),
-                    ),
+                    text=json.dumps(created_payload, separators=(",", ":")),
                 ),
                 _FakeUpstreamMessage("close", close_code=1011),
             ]
@@ -7727,7 +8339,7 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
 
     upstreams = [
         upstream_created_then_eof("resp_ws_eof"),
-        upstream_created_then_eof("resp_ws_eof_retry"),
+        upstream_created_then_eof("resp_ws_eof_retry", sequence_number=1),
     ]
     log_calls: list[dict[str, object]] = []
 
@@ -7807,5 +8419,111 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
     assert "close_code=1011" in failed_event["response"]["error"]["message"]
     assert len(log_calls) == 1
     assert log_calls[0]["request_id"] == "resp_ws_eof_retry"
+    assert log_calls[0]["status"] == "error"
+    assert log_calls[0]["error_code"] == "stream_incomplete"
+
+
+def test_backend_responses_websocket_closes_before_replaying_exposed_sequence(
+    app_instance,
+    monkeypatch,
+):
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "sequence_number": 5,
+                        "response": {"id": "resp_ws_sequenced_first", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage("close", close_code=1000),
+        ]
+    )
+    replay_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "sequence_number": 0,
+                        "response": {"id": "resp_ws_sequenced_replay", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.output_text.delta",
+                        "sequence_number": 1,
+                        "response_id": "resp_ws_sequenced_replay",
+                        "item_id": "msg_replayed",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": "replayed output",
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    upstreams = [first_upstream, replay_upstream]
+    connect_calls = 0
+    log_calls: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        nonlocal connect_calls
+        del self, headers, kwargs
+        connect_calls += 1
+        return SimpleNamespace(id="acct_ws_sequenced_close"), upstreams.pop(0)
+
+    async def fake_write_request_log(self, **kwargs):
+        del self
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            created_event = json.loads(websocket.receive_text())
+            with pytest.raises(WebSocketDisconnect) as disconnect:
+                websocket.receive_text()
+
+    assert created_event["type"] == "response.created"
+    assert created_event["sequence_number"] == 5
+    assert disconnect.value.code == 1011
+    assert connect_calls == 1
+    assert upstreams == [replay_upstream]
+    assert len(log_calls) == 1
+    assert log_calls[0]["request_id"] == "resp_ws_sequenced_first"
     assert log_calls[0]["status"] == "error"
     assert log_calls[0]["error_code"] == "stream_incomplete"

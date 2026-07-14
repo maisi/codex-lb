@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -168,6 +169,28 @@ class GhError(RuntimeError):
     """A GitHub CLI call failed."""
 
 
+_RATE_LIMIT_MARKER = "API rate limit exceeded"
+_fallback_token_active = False
+
+
+def _activate_fallback_token() -> bool:
+    """Switch gh calls to GH_FALLBACK_TOKEN once after a rate-limit failure.
+
+    The primary token is typically a user PAT whose quota is shared with
+    other consumers; github.token carries a separate per-repository quota,
+    so a single runtime switch keeps the sync alive through PAT exhaustion.
+    """
+    global _fallback_token_active
+    if _fallback_token_active:
+        return False
+    fallback = os.environ.get("GH_FALLBACK_TOKEN", "").strip()
+    if not fallback or fallback == os.environ.get("GH_TOKEN", ""):
+        return False
+    os.environ["GH_TOKEN"] = fallback
+    _fallback_token_active = True
+    return True
+
+
 @dataclass(frozen=True)
 class SyncDecision:
     repo: str
@@ -207,6 +230,12 @@ def run_gh(args: list[str], *, input_json: Any | None = None, timeout_seconds: i
 
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip()
+        if _RATE_LIMIT_MARKER in detail and _activate_fallback_token():
+            print(
+                "warning: active token rate-limited; retrying with GH_FALLBACK_TOKEN",
+                file=sys.stderr,
+            )
+            return run_gh(args, input_json=input_json, timeout_seconds=timeout_seconds)
         raise GhError(f"{' '.join(command)}: {detail}")
 
     text = proc.stdout.strip()
@@ -787,7 +816,7 @@ def authoritative_ci_workflow_run_id(
 def github_actions_workflow_run_recency_key(item: dict[str, Any]) -> tuple[str, tuple[str, str], int]:
     run_id = github_actions_workflow_run_id(item)
     return (
-        str(item.get("_github_actions_run_created_at") or ""),
+        str(item.get("_github_actions_run_started_at") or item.get("_github_actions_run_created_at") or ""),
         check_run_recency_key(item),
         int(run_id) if isinstance(run_id, str) and run_id.isdigit() else 0,
     )
@@ -816,10 +845,12 @@ def annotate_github_actions_workflow_ids(repo: str, check_runs: list[dict[str, A
             continue
         workflow_id = workflow_run.get("workflow_id") if isinstance(workflow_run, dict) else None
         if isinstance(workflow_id, (int, str)):
-            run_created_at = workflow_run.get("created_at") or workflow_run.get("run_started_at")
+            # GitHub preserves ``created_at`` when an existing run id is rerun,
+            # while ``run_started_at`` advances to the current attempt.
+            run_started_at = workflow_run.get("run_started_at") or workflow_run.get("created_at")
             workflow_metadata_by_run[run_id] = (
                 str(workflow_id),
-                str(run_created_at) if isinstance(run_created_at, str) else None,
+                str(run_started_at) if isinstance(run_started_at, str) else None,
             )
 
     annotated: list[dict[str, Any]] = []
@@ -829,10 +860,10 @@ def annotate_github_actions_workflow_ids(repo: str, check_runs: list[dict[str, A
         if metadata is None:
             annotated.append(item)
             continue
-        workflow_id, run_created_at = metadata
+        workflow_id, run_started_at = metadata
         annotated_item = {**item, "_github_actions_workflow_id": workflow_id}
-        if run_created_at is not None:
-            annotated_item["_github_actions_run_created_at"] = run_created_at
+        if run_started_at is not None:
+            annotated_item["_github_actions_run_started_at"] = run_started_at
         annotated.append(annotated_item)
     return annotated
 
