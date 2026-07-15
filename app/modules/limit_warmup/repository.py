@@ -54,11 +54,16 @@ class LimitWarmupRepository:
         account_id: str,
         window: str,
         reset_at: int,
+        transition_key: str,
         model: str,
         attempted_at: datetime,
         status: str = "pending",
     ) -> AccountLimitWarmup | None:
-        existing = await self._existing_attempt(account_id=account_id, window=window, reset_at=reset_at)
+        existing = await self._existing_attempt(
+            account_id=account_id,
+            window=window,
+            transition_key=transition_key,
+        )
         if existing is not None:
             return None
 
@@ -66,6 +71,7 @@ class LimitWarmupRepository:
             account_id=account_id,
             window=window,
             reset_at=reset_at,
+            transition_key=transition_key,
             status=status,
             model=model,
             attempted_at=attempted_at,
@@ -111,13 +117,19 @@ class LimitWarmupRepository:
             await self._session.refresh(row)
         return row
 
-    async def _existing_attempt(self, *, account_id: str, window: str, reset_at: int) -> AccountLimitWarmup | None:
+    async def _existing_attempt(
+        self,
+        *,
+        account_id: str,
+        window: str,
+        transition_key: str,
+    ) -> AccountLimitWarmup | None:
         stmt = (
             select(AccountLimitWarmup)
             .where(
                 AccountLimitWarmup.account_id == account_id,
                 AccountLimitWarmup.window == window,
-                AccountLimitWarmup.reset_at == reset_at,
+                AccountLimitWarmup.transition_key == transition_key,
             )
             .limit(1)
         )
