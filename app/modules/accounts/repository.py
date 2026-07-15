@@ -454,10 +454,10 @@ class AccountsRepository:
 
     async def _reconcile_limit_warmups(self, canonical_account_id: str, duplicate_ids: list[str]) -> None:
         existing_keys = {
-            (window, reset_at)
-            for window, reset_at in (
+            (window, transition_key)
+            for window, transition_key in (
                 await self._session.execute(
-                    select(AccountLimitWarmup.window, AccountLimitWarmup.reset_at).where(
+                    select(AccountLimitWarmup.window, AccountLimitWarmup.transition_key).where(
                         AccountLimitWarmup.account_id == canonical_account_id
                     )
                 )
@@ -473,7 +473,7 @@ class AccountsRepository:
             .all()
         )
         for warmup in duplicate_warmups:
-            key = (warmup.window, warmup.reset_at)
+            key = (warmup.window, warmup.transition_key)
             if key in existing_keys:
                 await self._session.delete(warmup)
             else:

@@ -38,12 +38,14 @@ def _account(
 def _usage(
     account_id: str,
     *,
+    usage_id: int | None = None,
     used_percent: float,
     reset_at: int,
     window: str = "primary",
     recorded_at: datetime | None = None,
 ) -> UsageHistory:
     return UsageHistory(
+        id=usage_id if usage_id is not None else reset_at,
         account_id=account_id,
         used_percent=used_percent,
         reset_at=reset_at,
@@ -89,17 +91,22 @@ class FakeWarmupRepo:
         account_id: str,
         window: str,
         reset_at: int,
+        transition_key: str,
         model: str,
         attempted_at,
         status: str = "pending",
     ) -> AccountLimitWarmup | None:
-        if any(row.account_id == account_id and row.window == window and row.reset_at == reset_at for row in self.rows):
+        if any(
+            row.account_id == account_id and row.window == window and row.transition_key == transition_key
+            for row in self.rows
+        ):
             return None
         row = AccountLimitWarmup(
             id=self.next_id,
             account_id=account_id,
             window=window,
             reset_at=reset_at,
+            transition_key=transition_key,
             status=status,
             model=model,
             attempted_at=attempted_at,
@@ -1239,6 +1246,7 @@ async def test_recent_attempt_cooldown_blocks_new_reset() -> None:
             account_id=account.id,
             window="primary",
             reset_at=1000,
+            transition_key="legacy-reset:1000",
             status="failed",
             model="gpt-5.1-codex-mini",
             attempted_at=utcnow() - timedelta(minutes=10),
@@ -1258,3 +1266,91 @@ async def test_recent_attempt_cooldown_blocks_new_reset() -> None:
 
     assert sender.calls == []
     assert len(repo.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_unplanned_weekly_reset_with_earlier_deadline_sends_warmup() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="secondary"),
+        before_primary={},
+        before_secondary={
+            account.id: _usage(
+                account.id,
+                usage_id=10,
+                used_percent=100,
+                reset_at=2_000,
+                window="secondary",
+            )
+        },
+        after_primary={},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                usage_id=11,
+                used_percent=0,
+                reset_at=1_500,
+                window="secondary",
+            )
+        },
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.reset_at, row.transition_key) for row in repo.rows] == [(1_500, "usage-history:11")]
+
+
+@pytest.mark.asyncio
+async def test_unplanned_weekly_reset_with_same_deadline_is_distinct_transition() -> None:
+    repo = FakeWarmupRepo()
+    account = _account()
+    repo.rows.append(
+        AccountLimitWarmup(
+            id=1,
+            account_id=account.id,
+            window="secondary",
+            reset_at=2_000,
+            transition_key="usage-history:10",
+            status="succeeded",
+            model="gpt-5.1-codex-mini",
+            attempted_at=utcnow() - timedelta(hours=2),
+        )
+    )
+    repo.next_id = 2
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="secondary"),
+        before_primary={},
+        before_secondary={
+            account.id: _usage(
+                account.id,
+                usage_id=20,
+                used_percent=100,
+                reset_at=2_000,
+                window="secondary",
+            )
+        },
+        after_primary={},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                usage_id=21,
+                used_percent=0,
+                reset_at=2_000,
+                window="secondary",
+            )
+        },
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.reset_at, row.transition_key) for row in repo.rows] == [
+        (2_000, "usage-history:10"),
+        (2_000, "usage-history:21"),
+    ]

@@ -78,6 +78,7 @@ class LimitWarmupAttemptsRepository(Protocol):
         account_id: str,
         window: str,
         reset_at: int,
+        transition_key: str,
         model: str,
         attempted_at,
         status: str = "pending",
@@ -384,6 +385,7 @@ class LimitWarmupService:
                         account_id=account.id,
                         window=candidate.window,
                         reset_at=candidate.reset_at,
+                        transition_key=candidate.transition_key,
                         model="auto",
                         attempted_at=utcnow(),
                     )
@@ -402,6 +404,7 @@ class LimitWarmupService:
                     account_id=account.id,
                     window=candidate.window,
                     reset_at=candidate.reset_at,
+                    transition_key=candidate.transition_key,
                     model=model,
                     attempted_at=utcnow(),
                 )
@@ -626,6 +629,7 @@ class LimitWarmupService:
 class _WarmupCandidate:
     reset_at: int
     window: str
+    transition_key: str
 
 
 def _selected_windows(value: str) -> tuple[str, ...]:
@@ -686,9 +690,11 @@ def _build_candidate(
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None
-    if after.reset_at <= before.reset_at:
+    if before.recorded_at is None or after.recorded_at is None or after.recorded_at <= before.recorded_at:
         return None
-    return _WarmupCandidate(reset_at=after.reset_at, window=window)
+    if after.id is None:
+        return None
+    return _WarmupCandidate(reset_at=after.reset_at, window=window, transition_key=f"usage-history:{after.id}")
 
 
 def _build_staggered_idle_candidate(
@@ -726,7 +732,11 @@ def _build_staggered_idle_candidate(
         cycle_end=due.cycle_end,
     ):
         return None
-    return _WarmupCandidate(reset_at=after.reset_at, window=_IDLE_PRIMARY_WINDOW)
+    return _WarmupCandidate(
+        reset_at=after.reset_at,
+        window=_IDLE_PRIMARY_WINDOW,
+        transition_key=f"reset:{after.reset_at}",
+    )
 
 
 @dataclass(frozen=True, slots=True)
