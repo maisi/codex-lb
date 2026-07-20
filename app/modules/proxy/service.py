@@ -70,9 +70,7 @@ from app.core.errors import (
     OpenAIErrorEnvelope,
     ResponseFailedEvent,
     is_previous_response_not_found_error,
-    is_previous_response_not_found_message,
     openai_error,
-    previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
     response_failed_event,
 )
@@ -288,6 +286,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_turn_state_alias_key as _http_bridge_turn_state_alias_key,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_error_status_from_payload as _http_error_status_from_payload,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _HTTPBridgeRuntimeConfig as _HTTPBridgeRuntimeConfig,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -295,6 +296,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _is_missing_durable_bridge_table_error as _is_missing_durable_bridge_table_error,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _is_previous_response_not_found_message as _is_previous_response_not_found_message,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event as _log_http_bridge_event,
@@ -312,7 +316,13 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _normalized_http_bridge_instance_ring as _normalized_http_bridge_instance_ring,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _openai_error_envelope_from_response_failed_payload as _openai_error_envelope_from_response_failed_payload,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _preferred_http_bridge_reconnect_turn_state as _preferred_http_bridge_reconnect_turn_state,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _previous_response_id_from_not_found_message as _previous_response_id_from_not_found_message,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_drain_recovery_allowed as _record_bridge_drain_recovery_allowed,
@@ -2093,66 +2103,6 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
 
 def _is_local_account_cap_code(code: str | None) -> bool:
     return code in {"account_response_create_cap", "account_stream_cap"}
-
-
-def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
-    if not isinstance(payload, dict):
-        return None
-    for status_field in ("status", "status_code"):
-        status = payload.get(status_field)
-        if isinstance(status, int) and not isinstance(status, bool):
-            return status
-    return None
-
-
-def _openai_error_envelope_from_response_failed_payload(
-    payload: dict[str, JsonValue] | None,
-) -> OpenAIErrorEnvelope:
-    default_envelope = openai_error("upstream_error", "Upstream error")
-    if not isinstance(payload, dict):
-        return default_envelope
-    response_payload = payload.get("response")
-    if not isinstance(response_payload, dict):
-        return default_envelope
-    error_payload = response_payload.get("error")
-    if not isinstance(error_payload, dict):
-        return default_envelope
-
-    message_value = error_payload.get("message")
-    if isinstance(message_value, str) and message_value.strip():
-        message = message_value.strip()
-    else:
-        message = "Upstream error"
-
-    code_value = error_payload.get("code")
-    code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else "upstream_error"
-
-    type_value = error_payload.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else "server_error"
-
-    envelope = openai_error(code, message, error_type)
-    param_value = error_payload.get("param")
-    if isinstance(param_value, str) and param_value.strip():
-        envelope["error"]["param"] = param_value.strip()
-    error_detail = envelope["error"]
-    plan_type = error_payload.get("plan_type")
-    if plan_type is not None:
-        error_detail["plan_type"] = str(plan_type)
-    resets_at = error_payload.get("resets_at")
-    if isinstance(resets_at, int | float):
-        error_detail["resets_at"] = resets_at
-    resets_in = error_payload.get("resets_in_seconds")
-    if isinstance(resets_in, int | float):
-        error_detail["resets_in_seconds"] = resets_in
-    return envelope
-
-
-def _is_previous_response_not_found_message(message: str | None) -> bool:
-    return is_previous_response_not_found_message(message)
-
-
-def _previous_response_id_from_not_found_message(message: str | None) -> str | None:
-    return previous_response_id_from_not_found_message(message)
 
 
 def _message_mentions_previous_response_id(message: str | None, previous_response_id: str | None) -> bool:

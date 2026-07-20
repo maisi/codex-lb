@@ -8,7 +8,7 @@ import time
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Iterable, Literal
+from typing import TYPE_CHECKING, Iterable
 from uuid import uuid4
 
 from app.core import usage as usage_core
@@ -17,8 +17,6 @@ from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
-    QUOTA_EXCEEDED_COOLDOWN_SECONDS,
-    RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     ROUTING_POLICY_BURN_FIRST,
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
@@ -29,11 +27,9 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
-    evaluate_health_tier,
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
-    plausible_rate_limit_reset_at,
     select_account,
 )
 from app.core.balancer.types import UpstreamError
@@ -53,10 +49,31 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
-from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_state import (
+    _ADDITIONAL_QUOTA_ROUTING_POLICIES,
+    AccountLease,
+    AccountLeaseKind,
+    AccountStateDependencies,
+    RuntimeState,
+)
+from app.modules.proxy.account_state import (
+    background_recovery_state_from_account as _reconstruct_background_recovery_state,
+)
+from app.modules.proxy.account_state import (
+    extract_credit_status as _reconstruct_credit_status,
+)
+from app.modules.proxy.account_state import (
+    normalize_account_routing_policy as _normalize_account_routing_policy,
+)
+from app.modules.proxy.account_state import (
+    select_long_window_entry as _select_long_window_entry,
+)
+from app.modules.proxy.account_state import (
+    state_from_account as _reconstruct_account_state,
+)
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.cap_partitioning import (
@@ -71,20 +88,12 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_quota_definition,
     get_additional_quota_routing_policy,
 )
-from app.modules.usage.mappers import usage_history_to_window_row
 
 if TYPE_CHECKING:
     from app.modules.accounts.repository import AccountsRepository
     from app.modules.proxy.sticky_repository import StickySessionsRepository
 
 logger = logging.getLogger(__name__)
-
-# Rows written by the same upstream fetch land within milliseconds of each
-# other; a sibling row only proves a *later* fetch (one that no longer
-# reported the stale window) when it is newer by more than this margin.
-_SIBLING_FETCH_MARGIN_SECONDS = 5.0
-
-_UsageWindowEntry = UsageHistory | AdditionalUsageHistory
 
 _MAX_SELECTION_ATTEMPTS = 4
 
@@ -106,41 +115,9 @@ ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 ADDITIONAL_QUOTA_EXHAUSTED = "quota_exhausted"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
 _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus", "edu"})
-_ROUTING_POLICY_NORMAL = "normal"
-_ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
-_ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
 OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
 _AMBIGUOUS_CONVERSATION_OWNER_MESSAGE = "Conversation owner cannot be determined from the eligible account pool"
-
-AccountLeaseKind = Literal["response_create", "stream"]
-
-
-@dataclass
-class RuntimeState:
-    reset_at: float | None = None
-    cooldown_until: float | None = None
-    last_error_at: float | None = None
-    last_selected_at: float | None = None
-    error_count: int = 0
-    version: int = 0
-    blocked_at: float | None = None
-    health_tier: int = 0
-    drain_entered_at: float | None = None
-    probe_success_streak: int = 0
-    inflight_response_creates: int = 0
-    inflight_streams: int = 0
-    leased_tokens: float = 0.0
-    leases: dict[str, "AccountLease"] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AccountLease:
-    lease_id: str
-    account_id: str
-    kind: AccountLeaseKind
-    acquired_at: float
-    estimated_tokens: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +332,69 @@ class LoadBalancer:
                 self._release_account_lease_locked(lease, reason="stale")
 
     async def select_account(
+        self,
+        sticky_key: str | None = None,
+        *,
+        sticky_kind: StickySessionKind | None = None,
+        reallocate_sticky: bool = False,
+        sticky_source: _CodexSessionSource | None = None,
+        legacy_sticky_key: str | None = None,
+        spill_bare_session_on_account_cap: bool = False,
+        require_unambiguous_account: bool = False,
+        sticky_max_age_seconds: int | None = None,
+        prefer_earlier_reset_accounts: bool = False,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
+        routing_strategy: RoutingStrategy = "capacity_weighted",
+        relative_availability_power: float = 2.0,
+        relative_availability_top_k: int = 5,
+        model: str | None = None,
+        service_tier: str | None = None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+        required_account_id: str | None = None,
+        exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
+        budget_threshold_pct: float = 95.0,
+        secondary_budget_threshold_pct: float = 100.0,
+        routing_costs_by_account_id: RoutingCostsByAccount | None = None,
+        lease_kind: AccountLeaseKind | None = None,
+        estimated_lease_tokens: float = 0.0,
+        stream_reserve_slots: int = 0,
+        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
+    ) -> AccountSelection:
+        return await self._select_account(
+            sticky_key,
+            sticky_kind=sticky_kind,
+            reallocate_sticky=reallocate_sticky,
+            sticky_source=sticky_source,
+            legacy_sticky_key=legacy_sticky_key,
+            spill_bare_session_on_account_cap=spill_bare_session_on_account_cap,
+            require_unambiguous_account=require_unambiguous_account,
+            sticky_max_age_seconds=sticky_max_age_seconds,
+            prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            model=model,
+            service_tier=service_tier,
+            additional_limit_name=additional_limit_name,
+            account_ids=account_ids,
+            required_account_id=required_account_id,
+            exclude_account_ids=exclude_account_ids,
+            require_security_work_authorized=require_security_work_authorized,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            routing_costs_by_account_id=routing_costs_by_account_id,
+            lease_kind=lease_kind,
+            estimated_lease_tokens=estimated_lease_tokens,
+            stream_reserve_slots=stream_reserve_slots,
+            traffic_class=traffic_class,
+            concurrency_caps=concurrency_caps,
+        )
+
+    async def _select_account(
         self,
         sticky_key: str | None = None,
         *,
@@ -2225,12 +2265,6 @@ def _record_account_cap_rejection(kind: AccountLeaseKind | None) -> None:
         account_cap_rejections_total.labels(kind=kind).inc()
 
 
-def _normalize_account_routing_policy(value: str | None) -> str:
-    if value in _ACCOUNT_ROUTING_POLICIES:
-        return value
-    return _ROUTING_POLICY_NORMAL
-
-
 async def _load_dashboard_additional_quota_routing_overrides() -> dict[str, str]:
     dashboard_settings = await get_settings_cache().get()
     return _parse_additional_quota_routing_policies(dashboard_settings.additional_quota_routing_policies_json)
@@ -2277,6 +2311,21 @@ def _parse_additional_quota_routing_policies(raw_policies: str) -> dict[str, str
     return policies
 
 
+def _account_state_dependencies() -> AccountStateDependencies:
+    return AccountStateDependencies(
+        time=time.time,
+        utcnow=utcnow,
+        settings=get_settings(),
+        usage_refresh_interval_seconds=_usage_refresh_interval_seconds(),
+    )
+
+
+def _extract_credit_status(
+    *entries: UsageHistory | AdditionalUsageHistory | None,
+) -> tuple[bool | None, bool | None, float | None]:
+    return _reconstruct_credit_status(*entries)
+
+
 def _state_from_account(
     *,
     account: Account,
@@ -2284,359 +2333,12 @@ def _state_from_account(
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
     runtime: RuntimeState,
 ) -> AccountState:
-    routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
-    primary_used = primary_entry.used_percent if primary_entry else None
-    primary_reset = primary_entry.reset_at if primary_entry else None
-    primary_window_minutes = primary_entry.window_minutes if primary_entry else None
-    effective_secondary_entry = secondary_entry
-    if (
-        effective_secondary_entry is not None
-        and effective_secondary_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
-    ):
-        effective_secondary_entry = None
-    primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
-    secondary_row = usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None
-    # Weekly-only accounts may not emit a dedicated secondary row; treat the
-    # weekly primary row as quota-window input for balancer decisions. When
-    # both rows exist, prefer the newer weekly snapshot.
-    if primary_row is not None and usage_core.should_use_weekly_primary(primary_row, secondary_row):
-        effective_secondary_entry = primary_entry
-        primary_used = None
-        primary_reset = None
-        primary_window_minutes = None
-
-    secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
-    secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
-    credits_has, credits_unlimited, credits_balance = _extract_credit_status(
-        primary_entry,
-        effective_secondary_entry,
-        secondary_entry,
-    )
-
-    # If the usage window has reset (reset_at is in the past), the last
-    # recorded sample describes an expired window at ANY used percentage:
-    # upstream may have stopped reporting the window entirely (e.g. the
-    # temporary 5h-limit removal), in which case the row is never rewritten
-    # and a frozen sub-100% sample would otherwise hold drain tiers and
-    # budget pressure forever. Zero the derived locals — not the stored
-    # rows — so the account is not incorrectly blocked or deprioritised
-    # while waiting for the next usage refresh. Expired samples map to 0.0
-    # rather than None because usage-derived status recovery only evaluates
-    # non-None percentages.
-    now = time.time()
-    now_epoch = int(now)
-    if primary_used is not None and primary_reset is not None and primary_reset <= now_epoch:
-        primary_used = 0.0
-        primary_reset = None
-    # A strictly newer long-window row proves a later fetch no longer
-    # reported the short window: drop the stale duration — whether or not
-    # the stale row's reset has elapsed — so phase planning stops treating
-    # the account as having a short phase window.
-    if (
-        primary_window_minutes is not None
-        and primary_entry is not None
-        and effective_secondary_entry is not None
-        and effective_secondary_entry is not primary_entry
-        and (effective_secondary_entry.recorded_at - primary_entry.recorded_at).total_seconds()
-        > _SIBLING_FETCH_MARGIN_SECONDS
-    ):
-        primary_window_minutes = None
-    if secondary_used is not None and secondary_reset is not None and secondary_reset <= now_epoch:
-        secondary_used = 0.0
-        secondary_reset = None
-
-    ignore_zero_capacity_primary_runtime_reset = False
-    status_seed = account.status
-    long_window_quota_available = (
-        effective_secondary_entry is not None
-        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
-        and effective_secondary_entry.used_percent is not None
-        and float(effective_secondary_entry.used_percent) < 100.0
-    )
-    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
-
-    # An account marked RATE_LIMITED by an actual 429 always carries a
-    # blocked_at marker (stale window-derived RATE_LIMITED rows do not).
-    # Evaluate the persisted cooldown against the ORIGINAL persisted
-    # status/blocked_at/reset_at, before the zero-primary-capacity ACTIVE
-    # rewrite below, so that rewrite cannot erase rate-limit cooldown
-    # semantics: fresh monthly/long-window quota is recovery evidence for
-    # stale window data, not for an upstream 429 whose cooldown is running.
-    rate_limited_cooldown_deadline: float | None = None
-    if account.status == AccountStatus.RATE_LIMITED and effective_blocked_at is not None:
-        persisted_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
-            effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
-        )
-        if now < persisted_deadline:
-            rate_limited_cooldown_deadline = persisted_deadline
-        if (
-            rate_limited_cooldown_deadline is not None
-            and runtime.cooldown_until is not None
-            and runtime.cooldown_until <= now
-            and runtime.blocked_at is not None
-            and runtime.blocked_at >= effective_blocked_at
-        ):
-            # The marking replica keeps its existing early-recovery gate: fresh
-            # post-block usage evidence lifts the hold locally; peers (with no
-            # runtime knowledge of the 429) wait for the persisted deadline.
-            # The runtime block marker must be at least as recent as the
-            # persisted block: leftover runtime state from an earlier 429 does
-            # not prove this replica observed the current one.
-            early_freshness_entry = _rate_limited_freshness_entry(
-                account=account,
-                primary_entry=primary_entry,
-                long_window_entry=effective_secondary_entry,
-            )
-            if early_freshness_entry is not None and early_freshness_entry.recorded_at is not None:
-                recorded_epoch = early_freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
-                if recorded_epoch > effective_blocked_at:
-                    rate_limited_cooldown_deadline = None
-
-    if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and (
-        account.status != AccountStatus.RATE_LIMITED
-        or (
-            rate_limited_cooldown_deadline is None
-            and (
-                (
-                    primary_window_minutes is not None
-                    and not usage_core.is_primary_window_minutes(primary_window_minutes)
-                    and long_window_quota_available
-                )
-                or (primary_entry is None and long_window_quota_available)
-            )
-        )
-    ):
-        primary_used = None
-        primary_reset = None
-        primary_window_minutes = None
-        ignore_zero_capacity_primary_runtime_reset = account.status == AccountStatus.RATE_LIMITED
-        if account.status == AccountStatus.RATE_LIMITED:
-            status_seed = AccountStatus.ACTIVE
-
-    # Use account.reset_at from DB as the authoritative source for runtime reset
-    # and to survive process restarts.
-    persisted_reset_at = float(account.reset_at) if account.reset_at is not None else None
-    runtime_reset_at = runtime.reset_at
-    # Validate only future RATE_LIMITED hints. Elapsed deadlines must still
-    # reach apply_usage_quota's ordinary expiry transition, and QUOTA_EXCEEDED
-    # deadlines have separate recovery semantics.
-    if account.status == AccountStatus.RATE_LIMITED:
-        if persisted_reset_at is not None and persisted_reset_at > now:
-            persisted_reset_at = plausible_rate_limit_reset_at(persisted_reset_at, now=now)
-        if runtime_reset_at is not None and runtime_reset_at > now:
-            runtime_reset_at = plausible_rate_limit_reset_at(runtime_reset_at, now=now)
-    rejected_persisted_rate_limit_reset = (
-        account.status == AccountStatus.RATE_LIMITED
-        and account.reset_at is not None
-        and persisted_reset_at is None
-        and account.reset_at > now
-    )
-    db_reset_at = None if ignore_zero_capacity_primary_runtime_reset else persisted_reset_at
-    if status_seed in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED) or runtime.blocked_at is not None:
-        effective_runtime_reset = db_reset_at or runtime_reset_at
-    else:
-        effective_runtime_reset = None
-
-    # Defense-in-depth for RATE_LIMITED rows persisted without a reset_at
-    # deadline (written before cooldown persistence, or by an older replica):
-    # hold the account out of rotation for a minimum floor window after
-    # blocked_at instead of letting a replica with no runtime knowledge of
-    # the 429 flip it straight back to ACTIVE. Once the floor elapses,
-    # recovery proceeds through the normal CAS-guarded persistence path.
-    if (
-        status_seed == AccountStatus.RATE_LIMITED
-        and effective_runtime_reset is None
-        and effective_blocked_at is not None
-    ):
-        floor_deadline = effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
-        if now < floor_deadline:
-            effective_runtime_reset = floor_deadline
-
-    if (
-        account.status == AccountStatus.QUOTA_EXCEEDED
-        and effective_runtime_reset is not None
-        and effective_runtime_reset > time.time()
-        and effective_blocked_at is None
-        and effective_secondary_entry is not None
-        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
-        and effective_secondary_entry.used_percent is not None
-        and float(effective_secondary_entry.used_percent) < 100.0
-        and effective_secondary_entry.reset_at is not None
-        and float(effective_secondary_entry.reset_at) > effective_runtime_reset
-    ):
-        effective_runtime_reset = None
-
-    # Clear the runtime reset guard only when a post-block refresh has been
-    # observed and the debounce period is over.
-    #
-    # QUOTA_EXCEEDED uses a persisted blocked_at marker so recovery survives
-    # process restarts. RATE_LIMITED keeps the narrower runtime-only gate: only
-    # the replica that observed the 429 (and therefore holds the runtime
-    # cooldown) may recover the account early on fresh post-block usage
-    # evidence; peers wait for the persisted reset_at deadline to elapse. The
-    # runtime block marker must be at least as recent as the effective block:
-    # leftover runtime state from an earlier 429 does not prove this replica
-    # observed the current one.
-    cooldown_ready = False
-    if account.status == AccountStatus.QUOTA_EXCEEDED:
-        cooldown_ready = (
-            effective_blocked_at is not None and time.time() >= effective_blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
-        )
-    elif (
-        runtime.cooldown_until is not None
-        and runtime.cooldown_until <= time.time()
-        and runtime.blocked_at is not None
-        and effective_blocked_at is not None
-        and runtime.blocked_at >= effective_blocked_at
-    ):
-        cooldown_ready = True
-
-    if cooldown_ready and effective_blocked_at is not None:
-        if account.status == AccountStatus.QUOTA_EXCEEDED:
-            freshness_entry = effective_secondary_entry
-        elif account.status == AccountStatus.RATE_LIMITED:
-            freshness_entry = _rate_limited_freshness_entry(
-                account=account,
-                primary_entry=primary_entry,
-                long_window_entry=effective_secondary_entry,
-            )
-        else:
-            freshness_entry = None
-        if freshness_entry and freshness_entry.recorded_at is not None:
-            recorded_epoch = freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
-            if recorded_epoch > effective_blocked_at:
-                effective_runtime_reset = None
-
-    rejected_reset_recovery_evidence = False
-    if rejected_persisted_rate_limit_reset:
-        rejected_reset_freshness_entry = _rate_limited_freshness_entry(
-            account=account,
-            primary_entry=primary_entry,
-            long_window_entry=effective_secondary_entry,
-        )
-        # One healthy window must not conceal exhaustion in another applicable
-        # window; at least one window must also have supplied actual evidence.
-        all_quota_windows_available = (
-            (primary_used is None or float(primary_used) < 100.0)
-            and (secondary_used is None or float(secondary_used) < 100.0)
-            and (primary_used is not None or secondary_used is not None)
-        )
-        rejected_reset_recovery_evidence = all_quota_windows_available and _usage_entry_is_recent_available(
-            rejected_reset_freshness_entry
-        )
-        if effective_blocked_at is not None:
-            # A sample predating the 429 cannot disprove the persisted block.
-            rejected_reset_recovery_evidence = (
-                rejected_reset_recovery_evidence
-                and now >= effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
-                and _usage_entry_recorded_after_block(rejected_reset_freshness_entry, effective_blocked_at)
-            )
-
-    # A resetless rate limit whose runtime cooldown was lost (e.g. a restart
-    # after a 429 without reset metadata) has no deadline to expire and no
-    # post-block evidence trail; a long-window sample alone must not clear
-    # it. Evidence-gated clearing above always starts from a persisted or
-    # runtime reset, so this only matches the truly resetless case.
-    resetless_rate_limit_without_evidence = (
-        status_seed == AccountStatus.RATE_LIMITED and account.reset_at is None and runtime.reset_at is None
-    )
-
-    status, used_percent, reset_at = apply_usage_quota(
-        status=status_seed,
-        primary_used=primary_used,
-        primary_reset=primary_reset,
-        primary_window_minutes=primary_window_minutes,
-        runtime_reset=effective_runtime_reset,
-        secondary_used=secondary_used,
-        secondary_reset=secondary_reset,
-        credits_has=credits_has,
-        credits_unlimited=credits_unlimited,
-        credits_balance=credits_balance,
-        infer_status_from_usage=False,
-    )
-    if resetless_rate_limit_without_evidence and primary_used is None and status == AccountStatus.ACTIVE:
-        status = AccountStatus.RATE_LIMITED
-    if rejected_persisted_rate_limit_reset and not rejected_reset_recovery_evidence:
-        status = AccountStatus.RATE_LIMITED
-        reset_at = float(account.reset_at)
-
-    if status == AccountStatus.QUOTA_EXCEEDED:
-        next_blocked_at = effective_blocked_at
-    elif status == AccountStatus.RATE_LIMITED and account.status != AccountStatus.QUOTA_EXCEEDED:
-        next_blocked_at = effective_blocked_at
-    else:
-        next_blocked_at = None
-
-    settings = get_settings()
-    if getattr(settings, "soft_drain_enabled", True):
-        new_tier = evaluate_health_tier(
-            AccountState(
-                account_id=account.id,
-                status=status,
-                used_percent=used_percent,
-                secondary_used_percent=secondary_used,
-                last_error_at=runtime.last_error_at,
-                error_count=runtime.error_count,
-                health_tier=runtime.health_tier,
-                routing_policy=routing_policy,
-            ),
-            now=time.time(),
-            drain_entered_at=runtime.drain_entered_at,
-            probe_success_streak=runtime.probe_success_streak,
-            # Drain/probe thresholds are the fixed constants in
-            # ``app/core/balancer/logic.py`` (evaluate_health_tier defaults).
-        )
-        if new_tier == HEALTH_TIER_DRAINING and runtime.health_tier != HEALTH_TIER_DRAINING:
-            runtime.drain_entered_at = time.time()
-            runtime.probe_success_streak = 0
-        if new_tier == HEALTH_TIER_HEALTHY:
-            runtime.drain_entered_at = None
-            runtime.probe_success_streak = 0
-        runtime.health_tier = new_tier
-    else:
-        new_tier = HEALTH_TIER_HEALTHY
-        runtime.drain_entered_at = None
-        runtime.probe_success_streak = 0
-        runtime.health_tier = HEALTH_TIER_HEALTHY
-
-    inflight_pressure_pct = (runtime.inflight_response_creates + runtime.inflight_streams) * getattr(
-        settings, "proxy_account_inflight_penalty_pct", 2.5
-    )
-    leased_token_pressure_pct = 0.0
-    long_window_key = "secondary"
-    if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
-        long_window_key = "monthly"
-    capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
-    if capacity_credits > 0.0 and runtime.leased_tokens > 0:
-        lease_token_weight = getattr(settings, "proxy_account_lease_token_weight", 1.0)
-        leased_token_pressure_pct = runtime.leased_tokens * lease_token_weight / capacity_credits * 100.0
-    pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
-    effective_used_percent = None if used_percent is None else min(100.0, used_percent + pressure_pct)
-    effective_secondary_used_percent = None if secondary_used is None else min(100.0, secondary_used + pressure_pct)
-
-    return AccountState(
-        account_id=account.id,
-        status=status,
-        used_percent=effective_used_percent,
-        reset_at=reset_at,
-        primary_reset_at=primary_reset,
-        primary_window_minutes=primary_window_minutes,
-        blocked_at=next_blocked_at,
-        cooldown_until=runtime.cooldown_until,
-        secondary_used_percent=effective_secondary_used_percent,
-        secondary_reset_at=secondary_reset,
-        last_error_at=runtime.last_error_at,
-        last_selected_at=runtime.last_selected_at,
-        error_count=runtime.error_count,
-        deactivation_reason=account.deactivation_reason,
-        plan_type=account.plan_type,
-        capacity_credits=capacity_credits,
-        health_tier=new_tier,
-        inflight_response_creates=runtime.inflight_response_creates,
-        inflight_streams=runtime.inflight_streams,
-        leased_tokens=runtime.leased_tokens,
-        routing_policy=routing_policy,
+    return _reconstruct_account_state(
+        account=account,
+        primary_entry=primary_entry,
+        secondary_entry=secondary_entry,
+        runtime=runtime,
+        dependencies=_account_state_dependencies(),
     )
 
 
@@ -2646,161 +2348,12 @@ def background_recovery_state_from_account(
     primary_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
 ) -> AccountState:
-    """Evaluate recovery for a persisted blocked account without live runtime state.
-
-    The usage refresh scheduler only needs to know whether a persisted blocked
-    account can safely return to `active`. Seed a throwaway runtime snapshot
-    from the persisted block marker so fresh post-block usage rows can clear a
-    stale reset guard even when the original balancer process is gone.
-    """
-
-    runtime = RuntimeState()
-    blocked_at = float(account.blocked_at) if account.blocked_at is not None else None
-    now = time.time()
-    reset_at = float(account.reset_at) if account.reset_at is not None else None
-    valid_reset_at = plausible_rate_limit_reset_at(reset_at, now=now)
-
-    if blocked_at is not None:
-        runtime.blocked_at = blocked_at
-
-    if account.status == AccountStatus.RATE_LIMITED and blocked_at is not None:
-        if valid_reset_at is not None:
-            runtime.cooldown_until = valid_reset_at
-    state = _state_from_account(
+    return _reconstruct_background_recovery_state(
         account=account,
         primary_entry=primary_entry,
         secondary_entry=secondary_entry,
-        runtime=runtime,
+        dependencies=_account_state_dependencies(),
     )
-    if account.status == AccountStatus.RATE_LIMITED:
-        freshness_entry = _rate_limited_freshness_entry(
-            account=account,
-            primary_entry=primary_entry,
-            long_window_entry=secondary_entry,
-        )
-        # Keep elapsed resets intact until _state_from_account evaluates the
-        # selector's normal expiry path; only freshness gates the final repair.
-        if blocked_at is not None and reset_at is not None and reset_at <= now:
-            minimum_floor_deadline = blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
-            # An early explicit reset does not let scheduler reconciliation
-            # bypass the persisted post-429 minimum floor.
-            if now < minimum_floor_deadline or not _usage_entry_recorded_after_block(freshness_entry, blocked_at):
-                return replace(
-                    state,
-                    status=AccountStatus.RATE_LIMITED,
-                    reset_at=reset_at,
-                    blocked_at=blocked_at,
-                    cooldown_until=max(reset_at, minimum_floor_deadline),
-                )
-        elif blocked_at is None and reset_at is not None and reset_at <= now:
-            if not _usage_entry_is_recent_available(freshness_entry):
-                return replace(
-                    state,
-                    status=AccountStatus.RATE_LIMITED,
-                    reset_at=reset_at,
-                    blocked_at=None,
-                    cooldown_until=None,
-                )
-        if reset_at is None:
-            return replace(
-                state,
-                status=AccountStatus.RATE_LIMITED,
-                reset_at=None,
-                blocked_at=blocked_at,
-                cooldown_until=None,
-            )
-    return state
-
-
-def _select_long_window_entry(
-    *,
-    account: Account,
-    monthly_entry: UsageHistory | None,
-    secondary_entry: UsageHistory | AdditionalUsageHistory | None,
-) -> UsageHistory | AdditionalUsageHistory | None:
-    if monthly_entry is not None and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
-        return monthly_entry
-    return secondary_entry
-
-
-def _rate_limited_freshness_entry(
-    *,
-    account: Account,
-    primary_entry: _UsageWindowEntry | None,
-    long_window_entry: _UsageWindowEntry | None,
-) -> _UsageWindowEntry | None:
-    if (
-        long_window_entry is not None
-        and long_window_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
-    ):
-        return long_window_entry
-    if primary_entry is None:
-        return long_window_entry
-    if long_window_entry is None:
-        return primary_entry
-    # A post-block refresh that no longer reports the short primary window
-    # writes only long-window rows, so a strictly newer long-window row is
-    # the recovery evidence — but only once the last primary sample's own
-    # reset deadline has provably elapsed, and only when that long window
-    # still has capacity. An exhausted long-window row must not clear the
-    # block: recovery would route traffic to an account whose long quota is
-    # still at 100%. While the primary sample still claims an active window,
-    # or omits reset metadata entirely, its freshness keeps gating recovery.
-    primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= time.time()
-    long_window_available = long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
-    if primary_window_expired and long_window_available and long_window_entry.recorded_at > primary_entry.recorded_at:
-        return long_window_entry
-    return primary_entry
-
-
-def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:
-    return (
-        entry is not None
-        and _usage_entry_is_recent_enough(entry.recorded_at)
-        and entry.used_percent is not None
-        and float(entry.used_percent) < 100.0
-    )
-
-
-def _usage_entry_recorded_after_block(entry: _UsageWindowEntry | None, blocked_at: float) -> bool:
-    if entry is None or entry.recorded_at is None:
-        return False
-    recorded_at = entry.recorded_at
-    if recorded_at.tzinfo is None:
-        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
-    return recorded_at.timestamp() > blocked_at
-
-
-def _extract_credit_status(
-    *entries: _UsageWindowEntry | None,
-) -> tuple[bool | None, bool | None, float | None]:
-    credit_entries: list[UsageHistory] = [
-        entry
-        for entry in entries
-        if isinstance(entry, UsageHistory)
-        and not (entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None)
-    ]
-    if not credit_entries:
-        return None, None, None
-    entry = max(
-        credit_entries,
-        key=lambda item: item.recorded_at if item.recorded_at is not None else datetime.min,
-    )
-    if entry is not None:
-        return entry.credits_has, entry.credits_unlimited, entry.credits_balance
-    return None, None, None
-
-
-def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
-    if recorded_at is None:
-        return False
-    current_time = utcnow()
-    if current_time.tzinfo is None:
-        current_time = current_time.replace(tzinfo=timezone.utc)
-    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
-    recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
-    return recorded_time >= current_time - timedelta(seconds=interval_seconds)
 
 
 def _usage_refresh_interval_seconds() -> int:
