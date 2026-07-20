@@ -543,10 +543,11 @@ async def test_refresh_once_closes_account_read_session_before_fetch_models(
 
 
 @pytest.mark.asyncio
-async def test_refresh_once_skips_borrowed_accounts_for_model_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A borrowed account (owned by a peer, vended lazily on the live path) must
-    # not be used for a background model fetch: its stale token would fail. An
-    # owned account of the same plan provides the model list instead.
+async def test_refresh_once_fetches_borrowed_accounts_for_model_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Model discovery is the one background pass that MUST fetch for a borrowed
+    # account: without its plan's model catalog the account is unroutable. So a
+    # borrowed account is included in the fetch (vended via ensure_fresh), unlike
+    # usage/limit-warmup/reset-credits refresh which skip borrowed accounts.
     borrowed = _account("borrowed")
     borrowed.access_token_encrypted = b"borrowed-token"
     owned = _account("owned")
@@ -610,7 +611,8 @@ async def test_refresh_once_skips_borrowed_accounts_for_model_fetch(monkeypatch:
     scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
     await scheduler._refresh_once()
 
-    assert fetched_tokens == ["owned-token"]
+    # Both the borrowed and the owned account are fetched (borrowed no longer skipped).
+    assert sorted(fetched_tokens) == ["borrowed-token", "owned-token"]
 
 
 @pytest.mark.asyncio

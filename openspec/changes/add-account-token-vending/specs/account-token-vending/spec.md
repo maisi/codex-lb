@@ -91,19 +91,26 @@ Configured vending URLs (`account_token_vending_authority_base_url` and every va
 - **THEN** configuration validation accepts it
 - **AND** an `http://` URL to a public address is rejected at startup
 
-### Requirement: Borrowed accounts are vended lazily, only on the live request path
+### Requirement: Borrowed accounts are vended lazily; per-account maintenance passes leave them untouched
 
-Background/maintenance passes (auth guardian, usage refresh, model refresh, limit warm-up) MUST NOT vend a borrowed account; they leave it untouched so no request reaches the owner (e.g. an on-demand SSH tunnel to the owner stays idle). A borrowed account is vended only when the live proxy request path selects it.
+Per-account maintenance passes (auth guardian, usage refresh, limit warm-up, reset-credits refresh) MUST NOT vend a borrowed account; they leave it untouched because the owner performs that account's maintenance. The EXCEPTION is model-registry refresh: it MUST be able to fetch a borrowed account's plan model catalog — vending a fresh access token when needed — because without that catalog the load balancer cannot match the account to any model, so it is never selected even while `ACTIVE`. Aside from model refresh and the live proxy request path, a borrowed account's token is not vended by background work.
 
-#### Scenario: background pass does not reach the owner for a borrowed account
+#### Scenario: per-account maintenance pass does not reach the owner for a borrowed account
 
-- **WHEN** a background scheduler processes a borrowed account
+- **WHEN** a per-account maintenance pass (auth guardian, usage refresh, limit warm-up, or reset-credits refresh) processes a borrowed account
 - **THEN** it does not vend the account and does not contact the owner
-- **AND** the account is vended only when a live request selects it
+- **AND** the account's token is vended only by model-registry refresh or when a live request selects it
 
-#### Scenario: background usage refresh never re-auths a borrowed account
+#### Scenario: maintenance pass never re-auths a borrowed account
 
 - **GIVEN** a borrowed account whose last vended access token has expired
-- **WHEN** any background scheduler processes it (usage refresh, limit warm-up, reset-credits refresh, or model refresh)
+- **WHEN** a per-account maintenance pass (usage refresh, limit warm-up, reset-credits refresh) processes it
 - **THEN** it skips the account rather than calling upstream with the stale access token
 - **AND** even if an upstream call returns 401/token_expired for a borrowed account, the follower MUST NOT mark it `REAUTH_REQUIRED` (the refresh token is owned by the peer, so the failure is transient, not an account-level auth failure)
+
+#### Scenario: model refresh vends a borrowed account so it stays routable
+
+- **GIVEN** a borrowed account that is the only `ACTIVE` account of its plan on the follower
+- **WHEN** the model-registry refresh runs
+- **THEN** it vends a fresh access token for that account and fetches its plan's model catalog
+- **AND** the plan's models are registered so the load balancer can select the borrowed account for live requests

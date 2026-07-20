@@ -30,7 +30,6 @@ from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.accounts.token_vending import vend_authority_for_account
 from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
@@ -125,21 +124,18 @@ class ModelRefreshScheduler:
             per_account_results: dict[str, tuple[str, list[UpstreamModel]]] = {}
             active_account_plans: dict[str, str] = {}
 
-            settings = get_settings()
             for plan_type, candidates in grouped.items():
                 for account in candidates:
                     active_account_plans[account.id] = plan_type
-                # Borrowed accounts are vended lazily on the live path only; a
-                # background model fetch would use their stale token and fail.
-                # Keep them in active_account_plans (routing) but never fetch with
-                # them — an owned account provides the plan's model list.
-                fetch_candidates = [
-                    candidate for candidate in candidates if vend_authority_for_account(candidate, settings) is None
-                ]
-                if not fetch_candidates:
-                    continue
+                # Model discovery is the ONE background pass that must fetch for a
+                # borrowed account: without its plan's model catalog the borrowed
+                # account is unroutable — the load balancer cannot match it to any
+                # model, so it is never selected even while ACTIVE. _fetch_with_failover
+                # vends borrowed accounts (a fresh token) for this fetch, unlike
+                # usage / limit-warmup / reset-credits refresh which leave a borrowed
+                # account untouched (the owner handles its per-account maintenance).
                 result = await _fetch_with_failover(
-                    fetch_candidates,
+                    candidates,
                     encryptor,
                 )
                 if result is not None:
@@ -261,11 +257,13 @@ async def _fetch_with_failover(
 
     for account in candidates:
         try:
+            # background=False so a borrowed account is VENDED (a fresh token)
+            # for model discovery; for an owned account this flag is a no-op.
             account = await _ensure_fresh_with_transport_recovery(
                 auth_manager,
                 account,
                 transport_recovery=transport_recovery,
-                background=True,
+                background=False,
             )
             models = await _fetch_models_with_transport_recovery(
                 account,
@@ -282,7 +280,7 @@ async def _fetch_with_failover(
                         account,
                         force=True,
                         transport_recovery=transport_recovery,
-                        background=True,
+                        background=False,
                     )
                     models = await _fetch_models_with_transport_recovery(
                         account,
