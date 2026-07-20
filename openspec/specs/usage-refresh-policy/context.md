@@ -59,13 +59,35 @@ stays `RATE_LIMITED` or `QUOTA_EXCEEDED` until upstream catches up.
 Reset-confirmed limit warm-up compares the usage sample from before a refresh
 with the sample written after that refresh. The pre-refresh sample must be at
 or above the configured exhausted threshold, the post-refresh sample must be
-below `100`, and `reset_at` must move forward.
+below `100`, and the available sample must be newer than the exhausted sample.
 
 The exhausted threshold defaults to `99.0` because some upstream usage payloads
 plateau at 99 percent for windows that are practically exhausted. This avoids
 missing reset-confirmed warm-ups for those accounts while keeping the reset
 confirmation requirement intact. Operators who want the historical strict
 behavior can set the threshold to `100.0`.
+
+## Unplanned Reset Detection
+
+Reset-confirmed warm-up follows observed quota movement rather than predicting
+the upstream schedule. A selected window is eligible when a newly persisted
+usage row moves from the configured exhausted threshold to available quota,
+even if the upstream `reset_at` deadline is unchanged or earlier than the
+previous deadline.
+
+Each observed transition is deduplicated by the newly available usage-history
+row while the real upstream deadline remains attached to the warm-up attempt.
+This distinction matters when an operator or upstream system replenishes a
+weekly limit without moving its scheduled deadline: the new replenishment can
+warm independently of an attempt made at the scheduled start of the same
+deadline.
+
+For example, an account can report `100%` used with a Friday deadline, receive
+an unplanned replenishment on Wednesday, and then report `0%` used with the
+same Friday deadline. The Wednesday usage row confirms a new transition and
+receives its own warm-up identity. An older available row does not qualify;
+the available sample must be newer than the exhausted sample. Opt-in, account
+safety, availability threshold, cooldown, and bounded concurrency still apply.
 
 ## Operational Notes
 

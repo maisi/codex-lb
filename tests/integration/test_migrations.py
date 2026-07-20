@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from alembic import command
 from anyio import to_thread
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -29,6 +30,7 @@ except ImportError:
 
 from app.db.migrate import (
     LEGACY_MIGRATION_ORDER,
+    _build_alembic_config,
     check_schema_drift,
     inspect_migration_state,
     run_startup_migrations,
@@ -1157,5 +1159,114 @@ async def test_dashboard_retention_settings_migration_upgrade_and_downgrade(tmp_
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == _HEAD_REVISION
         assert set(column_names) <= await _dashboard_columns(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_warmup_transition_migration_backfills_legacy_attempts(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'warmup-transition-migration.sqlite'}"
+    previous_revision = "20260710_000000_merge_fork_and_ttft_observability_heads"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, previous_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO accounts (
+                        id, codex_installation_id, email, plan_type, access_token_encrypted,
+                        refresh_token_encrypted, id_token_encrypted, last_refresh, status
+                    ) VALUES (
+                        'acc_warmup_legacy', '00000000-0000-0000-0000-000000000001',
+                        'warmup-legacy@example.com', 'plus',
+                        :access_token, :refresh_token, :id_token,
+                        '2026-07-14 00:00:00', 'active'
+                    )
+                    """
+                ),
+                {
+                    "access_token": b"access",
+                    "refresh_token": b"refresh",
+                    "id_token": b"id",
+                },
+            )
+            await session.commit()
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO account_limit_warmups (
+                        account_id, window, reset_at, status, model, attempted_at
+                    ) VALUES (
+                        'acc_warmup_legacy', 'secondary', 2000, 'succeeded',
+                        'gpt-5.1', '2026-07-14 00:00:00'
+                    )
+                    """
+                )
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            transition_key = (
+                await session.execute(text("SELECT transition_key FROM account_limit_warmups"))
+            ).scalar_one()
+            assert transition_key == "legacy-reset:2000"
+
+            columns = (await session.execute(text("PRAGMA table_info(account_limit_warmups)"))).fetchall()
+            transition_column = next(row for row in columns if str(row[1]) == "transition_key")
+            assert bool(transition_column[3]) is True
+
+            unique_indexes = [
+                row
+                for row in (await session.execute(text("PRAGMA index_list(account_limit_warmups)"))).fetchall()
+                if bool(row[2])
+            ]
+            unique_column_sets = []
+            for index_row in unique_indexes:
+                escaped_name = str(index_row[1]).replace('"', '""')
+                index_columns = (await session.execute(text(f'PRAGMA index_info("{escaped_name}")'))).fetchall()
+                unique_column_sets.append([str(row[2]) for row in index_columns])
+            assert ["account_id", "window", "transition_key"] in unique_column_sets
+            assert ["account_id", "window", "reset_at"] not in unique_column_sets
+
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO account_limit_warmups (
+                        account_id, window, reset_at, transition_key, status, model, attempted_at
+                    ) VALUES (
+                        'acc_warmup_legacy', 'secondary', 2000, 'usage-history:99',
+                        'succeeded', 'gpt-5.1', '2026-07-15 00:00:00'
+                    )
+                    """
+                )
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), previous_revision))
+
+        async with session_factory() as session:
+            downgraded_columns = (await session.execute(text("PRAGMA table_info(account_limit_warmups)"))).fetchall()
+            assert "transition_key" not in {str(row[1]) for row in downgraded_columns}
+            remaining_attempts = (
+                await session.execute(text("SELECT COUNT(*) FROM account_limit_warmups"))
+            ).scalar_one()
+            assert remaining_attempts == 1
+            downgraded_indexes = [
+                row
+                for row in (await session.execute(text("PRAGMA index_list(account_limit_warmups)"))).fetchall()
+                if bool(row[2])
+            ]
+            downgraded_unique_columns = []
+            for index_row in downgraded_indexes:
+                escaped_name = str(index_row[1]).replace('"', '""')
+                index_columns = (await session.execute(text(f'PRAGMA index_info("{escaped_name}")'))).fetchall()
+                downgraded_unique_columns.append([str(row[2]) for row in index_columns])
+            assert ["account_id", "window", "reset_at"] in downgraded_unique_columns
     finally:
         await engine.dispose()

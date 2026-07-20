@@ -431,6 +431,7 @@ class AccountLimitWarmup(Base):
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     window: Mapped[str] = mapped_column(String, nullable=False)
     reset_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    transition_key: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     attempted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -454,8 +455,8 @@ class AccountLimitWarmup(Base):
         UniqueConstraint(
             "account_id",
             "window",
-            "reset_at",
-            name="uq_account_limit_warmups_account_window_reset",
+            "transition_key",
+            name="uq_account_limit_warmups_account_window_transition",
         ),
     )
 

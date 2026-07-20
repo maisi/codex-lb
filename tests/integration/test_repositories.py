@@ -32,6 +32,7 @@ from app.modules.accounts.repository import (
     _slot_lock_key,
     _slot_lock_keys,
 )
+from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope, durable_bridge_hash
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -972,6 +973,7 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_ro
                 account_id=canonical.id,
                 window="primary",
                 reset_at=123,
+                transition_key="usage-history:123",
                 status="completed",
                 model="gpt-5.1",
                 attempted_at=utcnow() - timedelta(minutes=5),
@@ -982,6 +984,7 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_ro
                 account_id=duplicate_row.id,
                 window="primary",
                 reset_at=123,
+                transition_key="usage-history:123",
                 status="pending",
                 model="gpt-5.1",
                 attempted_at=utcnow(),
@@ -1290,3 +1293,54 @@ async def test_request_logs_repository_normalizes_whitespace_only_useragent_fiel
         assert stored.useragent is None
         assert stored.useragent_group is None
         assert stored.client_ip is None
+
+
+@pytest.mark.asyncio
+async def test_limit_warmup_repository_deduplicates_transitions_not_reset_deadlines(db_setup):
+    account = _make_account("acc_warmup_transition", "warmup-transition@example.com")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        repo = LimitWarmupRepository(session)
+        first = await repo.try_create_attempt(
+            account_id=account.id,
+            window="secondary",
+            reset_at=2_000,
+            transition_key="usage-history:10",
+            model="gpt-5.1",
+            attempted_at=utcnow() - timedelta(minutes=2),
+        )
+        duplicate = await repo.try_create_attempt(
+            account_id=account.id,
+            window="secondary",
+            reset_at=2_000,
+            transition_key="usage-history:10",
+            model="gpt-5.1",
+            attempted_at=utcnow() - timedelta(minutes=1),
+        )
+        unplanned = await repo.try_create_attempt(
+            account_id=account.id,
+            window="secondary",
+            reset_at=2_000,
+            transition_key="usage-history:11",
+            model="gpt-5.1",
+            attempted_at=utcnow(),
+        )
+
+        assert first is not None
+        assert duplicate is None
+        assert unplanned is not None
+        rows = (
+            (
+                await session.execute(
+                    select(AccountLimitWarmup)
+                    .where(AccountLimitWarmup.account_id == account.id)
+                    .order_by(AccountLimitWarmup.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [(row.reset_at, row.transition_key) for row in rows] == [
+            (2_000, "usage-history:10"),
+            (2_000, "usage-history:11"),
+        ]

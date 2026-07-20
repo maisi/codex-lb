@@ -344,13 +344,20 @@ This credit-aware interpretation MUST be shared by proxy account selection and a
 
 ### Requirement: Reset-confirmed limit warm-up
 
-The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window has moved from an exhausted sample to a newly available reset window.
+The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window has moved from an exhausted sample to a newly available reset window. Reset confirmation SHALL be based on the observed usage transition and SHALL NOT require the new reset deadline to be later than the exhausted sample's deadline.
 
-#### Scenario: Warm-up is skipped unless reset is confirmed
+#### Scenario: Warm-up follows a scheduled reset
 - **GIVEN** limit warm-up is enabled globally and for an account
 - **AND** the account's previous usage sample for a selected window was exhausted
-- **WHEN** background usage refresh records a newer sample for that window with `used_percent < 100` and a later `reset_at`
-- **THEN** the system sends at most one warm-up request for that account/window/reset tuple
+- **WHEN** background usage refresh records a newer available sample for that window with a later `reset_at`
+- **THEN** the system sends at most one warm-up request for that observed transition
+
+#### Scenario: Warm-up follows an unplanned reset
+- **GIVEN** limit warm-up is enabled globally and for an account
+- **AND** the account's previous usage sample for a selected window was exhausted
+- **WHEN** background usage refresh records a newer available sample whose `reset_at` is unchanged or earlier
+- **THEN** the system sends at most one warm-up request for that observed transition
+- **AND** a prior attempt for a different transition with the same account, window, and `reset_at` MUST NOT suppress the new attempt
 
 #### Scenario: Warm-up is not triggered by upstream reset_at timestamp jitter
 - **GIVEN** limit warm-up is enabled globally and for an account
@@ -375,9 +382,9 @@ The system SHALL support an optional limit warm-up mechanism that is disabled by
 - **THEN** limit warm-up MUST NOT send traffic for that account
 
 #### Scenario: Warm-up attempts are durable and deduplicated
-- **WHEN** multiple refresh workers observe the same account/window/reset candidate
-- **THEN** the database permits at most one persisted attempt for that tuple
-- **AND** later refresh cycles skip that tuple after a prior attempt exists
+- **WHEN** multiple refresh workers observe the same exhausted-to-available transition
+- **THEN** the database permits at most one persisted attempt for that account/window/transition tuple
+- **AND** later refresh cycles skip that transition after a prior attempt exists
 
 #### Scenario: Staggered idle warm-up pre-starts rolling primary windows
 - **GIVEN** limit warm-up and staggered idle warm-up are enabled globally
@@ -1247,11 +1254,11 @@ local writes but MUST NOT be the mechanism that guarantees dedup.
   window
 - **AND** the losing worker receives no attempt and sends no warm-up probe
 
-#### Scenario: Exact-tuple duplicates remain constrained
+#### Scenario: Exact-transition duplicates remain constrained
 
 - **GIVEN** a warm-up attempt already persists for an account, window, and
-  `reset_at` tuple
-- **WHEN** another worker inserts the identical tuple despite the atomic guard
+  transition key
+- **WHEN** another worker inserts the identical transition despite the atomic guard
 - **THEN** the unique constraint rejects the duplicate
 - **AND** the worker treats the rejection as a dedup skip rather than an error
 
@@ -1271,4 +1278,3 @@ On the HTTP bridge / forwarded compact path the caller passes an `api_key_reserv
 - **GIVEN** a compact-responses request whose inner `_call_compact` budget check finds the request budget exhausted and raises the budget-exhausted `upstream_request_timeout` error
 - **WHEN** the enclosing retry-loop `except ProxyResponseError` handler settles the reservation on the `upstream_request_timeout` branch before raising
 - **THEN** no additional settle is performed at the inner terminal, so the reservation is settled exactly once
-

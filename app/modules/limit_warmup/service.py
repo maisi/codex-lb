@@ -85,6 +85,7 @@ class LimitWarmupAttemptsRepository(Protocol):
         account_id: str,
         window: str,
         reset_at: int,
+        transition_key: str,
         model: str,
         attempted_at,
         status: str = "pending",
@@ -394,6 +395,7 @@ class LimitWarmupService:
                         account_id=account.id,
                         window=candidate.window,
                         reset_at=candidate.reset_at,
+                        transition_key=candidate.transition_key,
                         model="auto",
                         attempted_at=utcnow(),
                         reset_at_tolerance_seconds=_attempt_reset_at_tolerance(candidate),
@@ -413,6 +415,7 @@ class LimitWarmupService:
                     account_id=account.id,
                     window=candidate.window,
                     reset_at=candidate.reset_at,
+                    transition_key=candidate.transition_key,
                     model=model,
                     attempted_at=utcnow(),
                     reset_at_tolerance_seconds=_attempt_reset_at_tolerance(candidate),
@@ -638,6 +641,7 @@ class LimitWarmupService:
 class _WarmupCandidate:
     reset_at: int
     window: str
+    transition_key: str
 
 
 def _selected_windows(value: str) -> tuple[str, ...]:
@@ -698,12 +702,16 @@ def _build_candidate(
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None
-    # Require a meaningful reset_at forward jump (not just upstream timestamp jitter).
-    # Upstream can report reset_at values that fluctuate by ~1 second between
-    # refresh cycles; only treat a jump of at least 60 seconds as a real reset.
-    if after.reset_at - before.reset_at < _RESET_CONFIRMED_MIN_JUMP_SECONDS:
+    if before.recorded_at is None or after.recorded_at is None or after.recorded_at <= before.recorded_at:
         return None
-    return _WarmupCandidate(reset_at=after.reset_at, window=window)
+    # Reject small forward deadline jitter, but allow an unchanged or earlier
+    # deadline when a newer usage sample confirms an unplanned replenishment.
+    reset_at_delta = after.reset_at - before.reset_at
+    if 0 < reset_at_delta < _RESET_CONFIRMED_MIN_JUMP_SECONDS:
+        return None
+    if after.id is None:
+        return None
+    return _WarmupCandidate(reset_at=after.reset_at, window=window, transition_key=f"usage-history:{after.id}")
 
 
 def _build_staggered_idle_candidate(
@@ -747,7 +755,11 @@ def _build_staggered_idle_candidate(
         window_seconds=window_seconds,
     ):
         return None
-    return _WarmupCandidate(reset_at=after.reset_at, window=_IDLE_PRIMARY_WINDOW)
+    return _WarmupCandidate(
+        reset_at=after.reset_at,
+        window=_IDLE_PRIMARY_WINDOW,
+        transition_key=f"reset:{after.reset_at}",
+    )
 
 
 @dataclass(frozen=True, slots=True)

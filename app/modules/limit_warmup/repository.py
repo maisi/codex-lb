@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, insert, literal, select, text, update
+from sqlalchemy import func, insert, literal, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,6 +58,7 @@ class LimitWarmupRepository:
         account_id: str,
         window: str,
         reset_at: int,
+        transition_key: str,
         model: str,
         attempted_at: datetime,
         status: str = "pending",
@@ -73,27 +74,34 @@ class LimitWarmupRepository:
         # PostgreSQL a single INSERT .. SELECT is not self-sufficient under READ
         # COMMITTED, so an advisory transaction lock keyed on (account, window)
         # serializes concurrent attempts first.
-        duplicate_in_tolerance_window = (
+        duplicate_predicate = AccountLimitWarmup.transition_key == transition_key
+        if tolerance > 0:
+            duplicate_predicate = or_(
+                duplicate_predicate,
+                AccountLimitWarmup.reset_at.between(reset_at - tolerance, reset_at + tolerance),
+            )
+        duplicate_attempt = (
             select(AccountLimitWarmup.id)
             .where(
                 AccountLimitWarmup.account_id == account_id,
                 AccountLimitWarmup.window == window,
-                AccountLimitWarmup.reset_at.between(reset_at - tolerance, reset_at + tolerance),
+                duplicate_predicate,
             )
             .exists()
         )
         insert_stmt = (
             insert(AccountLimitWarmup)
             .from_select(
-                ["account_id", "window", "reset_at", "status", "model", "attempted_at"],
+                ["account_id", "window", "reset_at", "transition_key", "status", "model", "attempted_at"],
                 select(
                     literal(account_id, type_=table.c.account_id.type),
                     literal(window, type_=table.c.window.type),
                     literal(reset_at, type_=table.c.reset_at.type),
+                    literal(transition_key, type_=table.c.transition_key.type),
                     literal(status, type_=table.c.status.type),
                     literal(model, type_=table.c.model.type),
                     literal(attempted_at, type_=table.c.attempted_at.type),
-                ).where(~duplicate_in_tolerance_window),
+                ).where(~duplicate_attempt),
             )
             .returning(AccountLimitWarmup.id)
         )
@@ -107,9 +115,8 @@ class LimitWarmupRepository:
                 inserted_id = await self._session.scalar(insert_stmt)
                 await self._session.commit()
         except IntegrityError:
-            # Backstop: the exact-tuple unique constraint
-            # uq_account_limit_warmups_account_window_reset still catches any
-            # duplicate the guard could not see.
+            # Backstop: the transition-key constraint catches any exact
+            # duplicate the atomic guard could not see.
             await self._session.rollback()
             return None
         if inserted_id is None:

@@ -60,11 +60,17 @@ The database schema SHALL preserve historical `request_logs` rows when their par
 
 ### Requirement: Limit warm-up persistence
 
-The database SHALL persist global warm-up settings, per-account opt-in, warm-up attempt history, and request-log source metadata. Global warm-up settings SHALL include a non-null exhausted-threshold percent used by reset-confirmed limit warm-up candidate selection.
+The database SHALL persist global warm-up settings, per-account opt-in, warm-up attempt history, request-log source metadata, a durable identity for each observed warm-up transition, and a non-null exhausted-threshold percent used by reset-confirmed limit warm-up candidate selection.
 
-#### Scenario: Warm-up attempt is unique per reset
-- **WHEN** an attempt is stored for an account, window, and reset timestamp
-- **THEN** the database enforces uniqueness for that account/window/reset tuple
+#### Scenario: Warm-up attempt is unique per transition
+- **WHEN** an attempt is stored for an account, window, and observed transition
+- **THEN** the database enforces uniqueness for that account/window/transition tuple
+- **AND** the attempt separately retains the upstream reset timestamp
+
+#### Scenario: Existing warm-up attempts are migrated
+- **WHEN** an existing database is migrated to transition-based warm-up identity
+- **THEN** every existing warm-up attempt receives a non-null legacy transition identity
+- **AND** existing attempt history remains visible without being replayed
 
 #### Scenario: Existing installs remain disabled
 - **WHEN** an existing database is migrated
