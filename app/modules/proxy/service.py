@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import re
 import time
 from collections.abc import Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast
 
 import aiohttp
@@ -16,6 +14,7 @@ import anyio
 from app.core.auth import token_expiry_epoch_ms
 from app.core.auth.refresh import (
     RefreshError,
+    is_transient_refresh_contention,
     pop_token_refresh_timeout_override,
     push_token_refresh_timeout_override,
 )
@@ -85,6 +84,10 @@ from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
+)
+from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_CODE
+from app.core.resilience.network_recovery import (
+    ProcessNetworkRecovery as ProcessNetworkRecovery,
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
@@ -170,6 +173,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _has_http_bridge_response_output_marker as _has_http_bridge_response_output_marker,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_admission_timeout_seconds,
+    _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_allow_durable_takeover as _http_bridge_allow_durable_takeover,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -230,7 +237,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_error_envelope as _http_bridge_previous_response_error_envelope,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_prewarm_canary_bucket as _http_bridge_prewarm_canary_bucket,
+    _http_bridge_prewarm_enabled as _http_bridge_prewarm_enabled,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_budget_seconds as _http_bridge_request_budget_seconds,
@@ -266,9 +273,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_local_bootstrap_rebind as _http_bridge_should_attempt_local_bootstrap_rebind,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401
-)
-from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_soft_affinity_reroute as _http_bridge_should_attempt_soft_affinity_reroute,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -282,6 +286,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_turn_state_alias_key as _http_bridge_turn_state_alias_key,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTPBridgeRuntimeConfig as _HTTPBridgeRuntimeConfig,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _is_http_bridge_previous_response_output_item as _is_http_bridge_previous_response_output_item,
@@ -363,6 +370,9 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.rate_limit import (
     _RateLimitMixin,
+)
+from app.modules.proxy._service.refresh import (
+    ensure_fresh_with_budget as _recover_fresh_account,
 )
 from app.modules.proxy._service.request_log import (
     _RequestLogMixin,
@@ -518,9 +528,6 @@ from app.modules.proxy._service.streaming.helpers import (
     _push_stream_attempt_timeout_overrides as _push_stream_attempt_timeout_overrides,
 )
 from app.modules.proxy._service.streaming.helpers import (
-    _refresh_upstream_proxy_fail_closed_reason as _refresh_upstream_proxy_fail_closed_reason,
-)
-from app.modules.proxy._service.streaming.helpers import (
     _resolve_upstream_stream_transport as _resolve_upstream_stream_transport,
 )
 from app.modules.proxy._service.streaming.helpers import (
@@ -559,12 +566,15 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _ApiKeyReservationTouchState,  # noqa: F401
+    _call_with_supported_optional_kwargs,
     _clear_websocket_request_error_overrides,  # noqa: F401
     _DownstreamWebSocketActivity,  # noqa: F401
     _event_type_from_payload,  # noqa: F401
     _FilePinEntry,
+    _finalize_ttft_reasoning_deltas,  # noqa: F401
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _is_ttft_event,  # noqa: F401
     _PreparedWebSocketRequest,  # noqa: F401
     _record_response_event,  # noqa: F401
     _record_websocket_route_metadata,  # noqa: F401
@@ -573,8 +583,11 @@ from app.modules.proxy._service.support import (
     _RetryableStreamError,  # noqa: F401
     _stream_settlement_error_payload,  # noqa: F401
     _StreamSettlement,  # noqa: F401
+    _supported_optional_kwargs,  # noqa: F401
     _TerminalStreamError,  # noqa: F401
     _TransientStreamError,  # noqa: F401
+    _ttft_event_visible_at,  # noqa: F401
+    _TTFTReasoningDeltaState,  # noqa: F401
     _wait_for_websocket_continuity_gap,  # noqa: F401
     _websocket_full_replay_should_wait_for_continuity,  # noqa: F401
     _websocket_request_can_replay_before_visible_output,  # noqa: F401
@@ -586,16 +599,19 @@ from app.modules.proxy._service.support import (
     _WebSocketUpstreamControl,  # noqa: F401
 )
 from app.modules.proxy._service.support import (
-    _call_with_supported_optional_kwargs as _support_call_with_supported_optional_kwargs,
-)
-from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
 )
 from app.modules.proxy._service.support import (
-    _supported_optional_kwargs as _support_supported_optional_kwargs,
+    _websocket_route_log_kwargs as _websocket_route_log_kwargs,
 )
 from app.modules.proxy._service.support import (
-    _websocket_route_log_kwargs as _websocket_route_log_kwargs,
+    failover_after_previsible_refresh_error as failover_after_previsible_refresh_error,
+)
+from app.modules.proxy._service.support import (
+    is_claim_contention_unpenalized as is_claim_contention_unpenalized,
+)
+from app.modules.proxy._service.support import (
+    raise_proxy_unavailable_for_claim_contention as raise_proxy_unavailable_for_claim_contention,
 )
 from app.modules.proxy._service.transcribe import (
     _TranscribeMixin,
@@ -696,6 +712,7 @@ from app.modules.proxy._service.websocket.helpers import (
 )
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
+    _CodexSessionSource,
     _sticky_key_for_codex_control_request,
     _sticky_key_from_session_header,  # noqa: F401
 )
@@ -817,7 +834,9 @@ _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
 )
 _TRANSIENT_RETRY_CODES = frozenset(
     {
+        "overloaded_error",
         "server_error",
+        "server_is_overloaded",
         "stream_incomplete",
         "stream_idle_timeout",
         "upstream_request_timeout",
@@ -853,6 +872,8 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
         "insufficient_quota",
         "usage_not_included",
         "quota_exceeded",
+        "overloaded_error",
+        "server_is_overloaded",
     }
 )
 _WEBSOCKET_AUTH_FAILURE_CODES = frozenset({"invalid_api_key", "invalid_authentication", "token_invalidated"})
@@ -887,17 +908,6 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _HTTPBridgeRuntimeConfig:
-    enabled: bool
-    idle_ttl_seconds: float
-    codex_idle_ttl_seconds: float
-    max_sessions: int
-    queue_limit: int
-    prompt_cache_idle_ttl_seconds: float
-    gateway_safe_mode: bool
 
 
 def _estimated_lease_tokens_from_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> float:
@@ -1017,10 +1027,7 @@ class ProxyService(
                 request_id=request_id,
                 kind=request_kind,
                 api_key=api_key,
-                sticky_key=affinity.key,
-                sticky_kind=affinity.kind,
-                reallocate_sticky=affinity.reallocate_sticky,
-                sticky_max_age_seconds=affinity.max_age_seconds,
+                affinity_policy=affinity,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=routing_strategy,
@@ -1091,9 +1098,11 @@ class ProxyService(
                     request_id=request_id,
                     kind=request_kind,
                     api_key=api_key,
-                    sticky_key=affinity.key,
+                    sticky_key=affinity.selection_key,
                     sticky_kind=affinity.kind,
                     reallocate_sticky=affinity.reallocate_sticky,
+                    sticky_source=affinity.codex_session_source,
+                    legacy_sticky_key=affinity.legacy_selection_key,
                     sticky_max_age_seconds=affinity.max_age_seconds,
                     prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
@@ -1181,10 +1190,7 @@ class ProxyService(
                                     request_id=request_id,
                                     kind=request_kind,
                                     api_key=api_key,
-                                    sticky_key=affinity.key,
-                                    sticky_kind=affinity.kind,
-                                    reallocate_sticky=affinity.reallocate_sticky,
-                                    sticky_max_age_seconds=affinity.max_age_seconds,
+                                    affinity_policy=affinity,
                                     prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                                     prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                                     routing_strategy=routing_strategy,
@@ -1287,16 +1293,7 @@ class ProxyService(
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
         if bridge_session is not None:
-            # Bridged requests retry gate acquisition within the bridge
-            # request budget; a final attempt must not run past it, so each
-            # acquisition wait is clamped to the remaining budget. Retry
-            # states carry the original deadline because their started_at
-            # is reset when they are re-prepared.
-            deadline = request_state.bridge_request_deadline
-            if deadline is None:
-                deadline = request_state.started_at + _http_bridge_request_budget_seconds(get_settings())
-            remaining_budget = deadline - time.monotonic()
-            timeout_seconds = max(0.0, min(timeout_seconds, remaining_budget))
+            timeout_seconds = _http_bridge_admission_timeout_seconds(request_state, timeout_seconds, get_settings())
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = time.monotonic()
         if account_id is not None:
@@ -1335,14 +1332,16 @@ class ProxyService(
                         300.0,
                     )
                 )
+                # Leading telemetry records latency without assigning a response
+                # or releasing this gate; only response-created proves progress.
                 should_retire_stuck_session = any(
                     state.transport == _REQUEST_TRANSPORT_HTTP
                     and not state.skip_request_log
                     and state.response_create_gate_acquired
                     and state.awaiting_response_created
                     and not state.downstream_visible
-                    and state.latency_first_upstream_event_ms is None
                     and state.latency_response_created_ms is None
+                    and state.response_event_count == 0
                     and max(0.0, now - state.started_at) >= threshold_seconds
                     for state in pending_states
                 )
@@ -1406,18 +1405,24 @@ class ProxyService(
         deadline: float,
         **kwargs: object,
     ) -> AccountSelection:
-        select_account = self._select_account_with_budget
-        select_account_any = cast(Any, select_account)
-        try:
-            signature = inspect.signature(select_account)
-        except (TypeError, ValueError):
-            return await select_account_any(deadline, **kwargs)
-
-        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
-            return await select_account_any(deadline, **kwargs)
-
-        supported_kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
-        return await select_account_any(deadline, **supported_kwargs)
+        affinity_policy = kwargs.pop("affinity_policy", None)
+        if isinstance(affinity_policy, _AffinityPolicy):
+            # Expand once at the compatibility edge so transport callers cannot drift.
+            kwargs.update(
+                sticky_key=affinity_policy.selection_key,
+                sticky_kind=affinity_policy.kind,
+                reallocate_sticky=affinity_policy.reallocate_sticky,
+                sticky_source=affinity_policy.codex_session_source,
+                legacy_sticky_key=affinity_policy.legacy_selection_key,
+                spill_bare_session_on_account_cap=affinity_policy.spill_on_account_cap,
+                require_unambiguous_account=affinity_policy.require_unambiguous_account,
+                sticky_max_age_seconds=affinity_policy.max_age_seconds,
+            )
+        return await _call_with_supported_optional_kwargs(
+            self._select_account_with_budget,
+            deadline,
+            optional_kwargs=kwargs,
+        )
 
     async def _select_codex_control_account_without_budget(
         self,
@@ -1441,9 +1446,11 @@ class ProxyService(
                 return None
             scoped_account_ids = {selected_account_id}
         selection = await self._load_balancer.select_account(
-            sticky_key=affinity.key,
+            sticky_key=affinity.selection_key,
             sticky_kind=affinity.kind,
             reallocate_sticky=affinity.reallocate_sticky,
+            sticky_source=affinity.codex_session_source,
+            legacy_sticky_key=affinity.legacy_selection_key,
             sticky_max_age_seconds=affinity.max_age_seconds,
             account_ids=scoped_account_ids,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
@@ -1496,13 +1503,15 @@ class ProxyService(
         force: bool = False,
         timeout_seconds: float | None = None,
     ) -> Account:
-        try:
-            return await self._ensure_fresh(account, force=force, timeout_seconds=timeout_seconds)
-        except RefreshError as exc:
-            reason = _refresh_upstream_proxy_fail_closed_reason(exc)
-            if reason is not None:
-                raise UpstreamProxyRouteError(reason, account_id=account.id) from exc
-            raise
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        return await _recover_fresh_account(
+            self,
+            account,
+            force=force,
+            deadline=deadline,
+            remaining_budget_seconds=_remaining_budget_seconds,
+            request_id=get_request_id(),
+        )
 
     async def vend_access_token(self, request: VendTokenRequest) -> VendTokenResponse | None:
         """Authority-side: resolve the local account for a follower's vend request,
@@ -1574,64 +1583,38 @@ class ProxyService(
                     timeout_seconds=remaining_budget,
                 )
             except RefreshError as exc:
-                if exc.transport_error:
-                    message = exc.message or str(exc) or "Request to upstream timed out"
-                    logger.warning(
-                        "%s refresh transport failed request_id=%s account_id=%s",
-                        kind,
-                        request_id,
-                        current.id,
-                        exc_info=True,
-                    )
-                    if not _should_retry_transient_stream_error("upstream_unavailable", message):
-                        _raise_proxy_unavailable_for_account(message, current)
-                    if (
-                        strict_account_id is not None and current.id == strict_account_id
-                    ) or attempt >= max_account_attempts:
-                        _raise_proxy_unavailable_for_account(message, current)
-                    excluded_account_ids.add(current.id)
-                    selection = await select_next_account(excluded_account_ids)
-                    selected_account = selection.account
-                    if selected_account is None:
-                        _raise_proxy_unavailable_for_account(message, current)
-                    assert selected_account is not None
-                    await self._handle_stream_error(
-                        current,
-                        {"message": message},
-                        "upstream_unavailable",
-                    )
-                    current = selected_account
-                    force_current = False
-                    continue
-                setattr(exc, _FAILED_ACCOUNT_ATTR, current)
-                raise
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                message = str(exc) or "Request to upstream timed out"
-                logger.warning(
-                    "%s refresh/connect failed request_id=%s account_id=%s",
-                    kind,
-                    request_id,
-                    current.id,
-                    exc_info=True,
-                )
-                if not _should_retry_transient_stream_error("upstream_unavailable", message):
-                    _raise_proxy_unavailable_for_account(message, current)
-                if (
-                    strict_account_id is not None and current.id == strict_account_id
-                ) or attempt >= max_account_attempts:
-                    _raise_proxy_unavailable_for_account(message, current)
-                excluded_account_ids.add(current.id)
-                selection = await select_next_account(excluded_account_ids)
-                selected_account = selection.account
-                if selected_account is None:
-                    _raise_proxy_unavailable_for_account(message, current)
-                assert selected_account is not None
-                await self._handle_stream_error(
+                if not (is_transient_refresh_contention(exc) or exc.transport_error):
+                    # Permanent / non-transport refresh failures keep their prior
+                    # escalation: tag the failed account and propagate.
+                    setattr(exc, _FAILED_ACCOUNT_ATTR, current)
+                    raise
+                current = await failover_after_previsible_refresh_error(
+                    self,
+                    exc,
                     current,
-                    {"message": message},
-                    "upstream_unavailable",
+                    attempt=attempt,
+                    max_account_attempts=max_account_attempts,
+                    strict_account_id=strict_account_id,
+                    excluded_account_ids=excluded_account_ids,
+                    select_next_account=select_next_account,
+                    request_id=request_id,
+                    kind=kind,
                 )
-                current = selected_account
+                force_current = False
+                continue
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                current = await failover_after_previsible_refresh_error(
+                    self,
+                    exc,
+                    current,
+                    attempt=attempt,
+                    max_account_attempts=max_account_attempts,
+                    strict_account_id=strict_account_id,
+                    excluded_account_ids=excluded_account_ids,
+                    select_next_account=select_next_account,
+                    request_id=request_id,
+                    kind=kind,
+                )
                 force_current = False
 
     async def _retry_previsible_unary_call_failover(
@@ -1713,7 +1696,21 @@ class ProxyService(
             return await self._ensure_fresh_with_budget(account, force=force, timeout_seconds=timeout_seconds)
         except RefreshError as refresh_exc:
             failed_account = _refresh_error_failed_account(refresh_exc, account)
+            if is_transient_refresh_contention(refresh_exc):
+                # Transient cross-replica refresh contention (benign claim
+                # contention OR a post-exchange persist/status CAS conflict): the
+                # account is healthy. Surface a retryable, unpenalized
+                # ``upstream_unavailable`` instead of a bogus 401 ``invalid_api_key``
+                # — matching the previsible-unary/compact/streaming/WebSocket paths
+                # — so file-upload, transcription, and codex-control post-401 forced
+                # refreshes fail retryably.
+                raise_proxy_unavailable_for_claim_contention(
+                    refresh_exc.message or str(refresh_exc) or "Request to upstream timed out",
+                    failed_account,
+                )
             if refresh_exc.transport_error:
+                # Genuine OAuth transport failure (NOT claim contention): keeps its
+                # penalizable retryable ``upstream_unavailable``.
                 _raise_proxy_unavailable_for_account(
                     refresh_exc.message or str(refresh_exc) or "Request to upstream timed out",
                     failed_account,
@@ -1742,6 +1739,10 @@ class ProxyService(
         sticky_key: str | None = None,
         sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
+        sticky_source: _CodexSessionSource | None = None,
+        legacy_sticky_key: str | None = None,
+        spill_bare_session_on_account_cap: bool = False,
+        require_unambiguous_account: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
@@ -1812,6 +1813,7 @@ class ProxyService(
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
+                single_account_routing_id: str | None = None
                 if _routing_strategy(settings) == "single_account" and not required_preferred_account:
                     selected_account_id = (settings.single_account_id or "").strip()
                     if not selected_account_id:
@@ -1832,12 +1834,13 @@ class ProxyService(
                             error_message="Selected single account is outside the API key account scope",
                             error_code="single_account_scope_mismatch",
                         )
-                    scoped_account_ids = {selected_account_id}
+                    single_account_routing_id = selected_account_id
                     routing_strategy = "single_account"
                 preferred_eligible = (
                     preferred_account_id is not None
                     and preferred_account_id not in excluded_account_ids_set
                     and (scoped_account_ids is None or preferred_account_id in scoped_account_ids)
+                    and (single_account_routing_id is None or preferred_account_id == single_account_routing_id)
                 )
                 if preferred_account_id is not None and not preferred_eligible:
                     logger.warning(
@@ -1857,11 +1860,21 @@ class ProxyService(
                             error_code="preferred_account_unavailable",
                         )
                 if preferred_eligible:
+                    preferred_sticky_inputs = _AffinityPolicy.preferred_owner_sticky_inputs(
+                        sticky_key,
+                        sticky_kind,
+                        reallocate_sticky,
+                        sticky_max_age_seconds,
+                        sticky_source,
+                        legacy_sticky_key,
+                    )
                     preferred_selection = await self._load_balancer.select_account(
-                        sticky_key=sticky_key,
-                        sticky_kind=sticky_kind,
-                        reallocate_sticky=reallocate_sticky,
-                        sticky_max_age_seconds=sticky_max_age_seconds,
+                        sticky_key=preferred_sticky_inputs[0],
+                        sticky_kind=preferred_sticky_inputs[1],
+                        reallocate_sticky=preferred_sticky_inputs[2],
+                        sticky_max_age_seconds=preferred_sticky_inputs[3],
+                        sticky_source=preferred_sticky_inputs[4],
+                        legacy_sticky_key=preferred_sticky_inputs[5],
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
@@ -1870,7 +1883,9 @@ class ProxyService(
                         model=model,
                         service_tier=service_tier,
                         additional_limit_name=additional_limit_name,
-                        account_ids={preferred_account_id},
+                        account_ids=scoped_account_ids,
+                        required_account_id=preferred_account_id,
+                        require_unambiguous_account=require_unambiguous_account,
                         require_security_work_authorized=require_security_work_authorized,
                         budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
                         secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
@@ -1905,6 +1920,14 @@ class ProxyService(
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
+                    sticky_source=sticky_source,
+                    legacy_sticky_key=legacy_sticky_key,
+                    spill_bare_session_on_account_cap=_AffinityPolicy.cap_spillover_allowed(
+                        spill_bare_session_on_account_cap,
+                        preferred_account_id,
+                        request_stage,
+                    ),
+                    require_unambiguous_account=require_unambiguous_account,
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
@@ -1915,6 +1938,7 @@ class ProxyService(
                     service_tier=service_tier,
                     additional_limit_name=additional_limit_name,
                     account_ids=scoped_account_ids,
+                    required_account_id=single_account_routing_id,
                     exclude_account_ids=excluded_account_ids_set,
                     require_security_work_authorized=require_security_work_authorized,
                     budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
@@ -2040,6 +2064,10 @@ class ProxyService(
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:
+        if is_claim_contention_unpenalized(exc):
+            # Transient refresh-claim contention: the account is healthy (a peer
+            # replica merely held its refresh claim), so it must not be penalized.
+            return
         error = _parse_openai_error(exc.payload)
         code = _normalize_error_code(
             error.code if error else None,
@@ -2057,6 +2085,7 @@ class ProxyService(
 
 def _is_account_neutral_error_code(code: str | None) -> bool:
     return is_local_overload_error_code(code) or code in {
+        PROCESS_NETWORK_UNAVAILABLE_CODE,
         "proxy_unavailable",
         "responses_compact_input_too_large",
     }
@@ -2327,29 +2356,6 @@ def _routing_strategy(settings: DashboardSettings) -> RoutingStrategy:
     if value == "fill_first":
         return "fill_first"
     return "capacity_weighted"
-
-
-async def _call_with_supported_optional_kwargs(
-    func: Callable[..., Awaitable[Any]],
-    /,
-    *args: Any,
-    optional_kwargs: Mapping[str, Any],
-    **required_kwargs: Any,
-) -> Any:
-    return await _support_call_with_supported_optional_kwargs(
-        func,
-        *args,
-        optional_kwargs=optional_kwargs,
-        **required_kwargs,
-    )
-
-
-def _supported_optional_kwargs(
-    func: Callable[..., Any],
-    optional_kwargs: Mapping[str, Any],
-    required_kwargs: Mapping[str, Any],
-) -> dict[str, Any]:
-    return _support_supported_optional_kwargs(func, optional_kwargs, required_kwargs)
 
 
 def _relative_availability_power(settings: DashboardSettings) -> float:

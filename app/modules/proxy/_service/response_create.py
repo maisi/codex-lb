@@ -27,6 +27,9 @@ from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
 from app.modules.proxy._service.support import (
+    _PENDING_TOOL_CALL_ITEM_TYPES,
+    _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE,
+    _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES,
     _WebSocketRequestState,
 )
 
@@ -268,15 +271,6 @@ def _slim_response_create_payload_for_upstream(
     }
 
 
-_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
-    "function_call": "function_call_output",
-    "custom_tool_call": "custom_tool_call_output",
-    "apply_patch_call": "apply_patch_call_output",
-}
-_PENDING_TOOL_CALL_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE)
-_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.values())
-
-
 def _function_call_output_call_ids(input_items: list[JsonValue]) -> set[str]:
     call_ids: set[str] = set()
     for item in input_items:
@@ -397,14 +391,19 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
     images_slimmed = 0
 
     item_type = item_mapping.get("type")
-    if item_type == "function_call_output":
+    if isinstance(item_type, str) and item_type in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES:
         output = item_mapping.get("output")
-        output_text = output if isinstance(output, str) else None
-        if output_text is not None and _should_slim_historical_tool_output(output_text):
-            item_mapping["output"] = _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
-                bytes=len(output_text.encode("utf-8"))
-            )
-            tool_outputs_slimmed += 1
+        if isinstance(output, str):
+            if _should_slim_historical_tool_output(output):
+                item_mapping["output"] = _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
+                    bytes=len(output.encode("utf-8"))
+                )
+                tool_outputs_slimmed += 1
+        else:
+            slimmed_output, output_images_slimmed = _slim_historical_response_content(output)
+            if output_images_slimmed > 0:
+                item_mapping["output"] = slimmed_output
+                images_slimmed += output_images_slimmed
 
     content = item_mapping.get("content")
     slimmed_content, content_images_slimmed = _slim_historical_response_content(content)
@@ -412,7 +411,7 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
         item_mapping["content"] = slimmed_content
         images_slimmed += content_images_slimmed
 
-    if item_mapping.get("type") == "input_image" and _is_inline_image_reference(item_mapping.get("image_url")):
+    if item_type == "input_image" and _is_inline_image_reference(item_mapping.get("image_url")):
         return _response_create_inline_image_notice_item(), tool_outputs_slimmed, images_slimmed + 1
 
     return item_mapping, tool_outputs_slimmed, images_slimmed

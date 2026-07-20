@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -73,7 +72,6 @@ from app.core.exceptions import (
     ProxyUpstreamError,
 )
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
-from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
 from app.core.openai.chat_requests import ChatCompletionsRequest, ChatStreamOptions
 from app.core.openai.chat_responses import (
     ChatCompletion,
@@ -103,7 +101,12 @@ from app.core.openai.requests import (
     normalize_tool_type,
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
-from app.core.request_locality import resolve_request_client_host
+from app.core.request_locality import (
+    FORWARDED_CHAIN_HEADER_NAMES,
+    parse_trusted_proxy_networks,
+    resolve_connection_client_ip,
+    resolve_request_client_host,
+)
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
@@ -152,6 +155,7 @@ from app.modules.model_sources.catalog import (
 )
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
+    SourceTimings,
     SourceUsage,
     SourceUsageHolder,
     forward_chat_completion,
@@ -175,8 +179,12 @@ from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
     _bind_propagated_capacity_startup_wait,
+    _could_be_blank_html_comment_line,
+    _is_reasoning_summary_interleavable_event,
+    _reasoning_summary_delta_key,
     _reset_propagated_capacity_startup_ready,
     _reset_propagated_capacity_startup_wait,
+    _strip_blank_html_comment_lines,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -201,6 +209,7 @@ from app.modules.proxy.schemas import (
     AccountPoolUsageResponse,
     CodexModelEntry,
     CodexModelsResponse,
+    CodexTruncationPolicy,
     ConsumeRateLimitResetCreditRequest,
     ConsumeRateLimitResetCreditResponse,
     FileCreateRequest,
@@ -236,7 +245,6 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
-_REASONING_SUMMARY_BLANK_HTML_COMMENT_RE = re.compile(r"(?m)^[ \t]*<!--\s*-->[ \t]*(?:\r?\n|\Z)")
 _REASONING_SUMMARY_DELTA_TYPES = frozenset({"response.reasoning_summary_text.delta"})
 _REASONING_SUMMARY_DONE_TYPES = frozenset(
     {
@@ -363,6 +371,14 @@ class _CapacityStartupReadyEvent(asyncio.Event):
 
 
 _OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
+
+# Internal Responses host model used to invoke the built-in
+# ``image_generation`` tool on the /v1/images/* routes. It is never echoed
+# to clients (only the requested ``gpt-image-*`` value appears in public
+# responses) and is fixed (issue #1340 / PRINCIPLES.md P2): it tracks the
+# registry bootstrap catalog's stable ``gpt-5.5`` slug and changes only in
+# lockstep with catalog maintenance.
+_IMAGES_HOST_MODEL = "gpt-5.5"
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -570,6 +586,15 @@ async def codex_safety_arc(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _codex_control_proxy(request, "safety/arc", context, api_key)
+
+
+@router.post("/alpha/search")
+async def codex_alpha_search(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "alpha/search", context, api_key)
 
 
 @router.get("/agent-identities/jwks")
@@ -861,6 +886,7 @@ async def internal_bridge_responses(
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+        forwarded_file_owner_account_id=forwarded_request_context.context.file_owner_account_id,
         forwarded_client_ip=forwarded_request_context.context.client_ip,
         # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
         # output, synthesize ``response.created``) MUST be applied by the
@@ -2226,7 +2252,7 @@ async def _proxy_images_generation_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = settings.images_host_model
+    host_model = _IMAGES_HOST_MODEL
 
     try:
         validate_model_access(api_key, effective_model)
@@ -2528,7 +2554,7 @@ async def _proxy_images_edit_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = settings.images_host_model
+    host_model = _IMAGES_HOST_MODEL
 
     try:
         validate_model_access(api_key, effective_model)
@@ -3015,6 +3041,23 @@ def _is_codex_backend_catalog_model(model: UpstreamModel) -> bool:
     return model.raw.get("shell_type") == "shell_command"
 
 
+def _codex_model_truncation_policy(model: UpstreamModel) -> CodexTruncationPolicy:
+    if "truncation_policy" in model.raw:
+        try:
+            return CodexTruncationPolicy.model_validate(model.raw["truncation_policy"])
+        except ValidationError:
+            pass
+    mode = "bytes" if model.slug == "gpt-5.2" else "tokens"
+    return CodexTruncationPolicy(mode=mode, limit=10_000)
+
+
+def _codex_model_experimental_supported_tools(model: UpstreamModel) -> list[str]:
+    tools = model.raw.get("experimental_supported_tools")
+    if not is_json_list(tools):
+        return []
+    return [tool for tool in tools if isinstance(tool, str)]
+
+
 def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:
     raw = model.raw
 
@@ -3038,6 +3081,8 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         "available_in_plans",
         "prefer_websockets",
         "visibility",
+        "truncation_policy",
+        "experimental_supported_tools",
     }
     for key, value in raw.items():
         if key not in skip_keys and isinstance(value, (bool, int, float, str, type(None), list, Mapping)):
@@ -3070,6 +3115,11 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
         visibility=visibility or _model_visibility(model),
+        # Codex deserializes the complete catalog atomically. Repair legacy
+        # bootstrap/retained metadata at this final wire boundary so one hidden
+        # entry cannot invalidate otherwise-current live model metadata.
+        truncation_policy=_codex_model_truncation_policy(model),
+        experimental_supported_tools=_codex_model_experimental_supported_tools(model),
         **extra,
     )
 
@@ -3581,6 +3631,7 @@ async def _source_audio_transcription_response(
         model=model,
         status="success",
         usage=settle_usage,
+        timings=result.timings,
         cost_usd_override=cost_override,
         upstream_status_code=result.upstream_status_code,
     )
@@ -3729,6 +3780,7 @@ async def _source_responses_response(
         model=payload.model,
         status="success",
         usage=result.usage,
+        timings=result.timings,
         upstream_status_code=result.upstream_status_code,
     )
     return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
@@ -4035,6 +4087,7 @@ async def _source_chat_completion_response(
         model=model,
         status="success",
         usage=result.usage,
+        timings=result.timings,
         upstream_status_code=result.upstream_status_code,
     )
     return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
@@ -4162,6 +4215,7 @@ async def _buffered_limited_source_chat_stream_response(
         model=model,
         status="success",
         usage=usage_holder.usage,
+        timings=usage_holder.timings,
     )
 
     async def body() -> AsyncIterator[bytes]:
@@ -4237,6 +4291,7 @@ async def _source_chat_stream_with_settlement(
             model=model,
             status=status,
             usage=usage_holder.usage,
+            timings=usage_holder.timings,
             error_code=error_code,
             error_message=error_message,
             upstream_status_code=None,
@@ -4263,6 +4318,7 @@ async def _stream_responses(
     forwarded_downstream_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
+    forwarded_file_owner_account_id: str | None = None,
     forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
     prohibit_fast_mode: bool = False,
@@ -4410,6 +4466,7 @@ async def _stream_responses(
             forwarded_legacy_signature=forwarded_legacy_signature,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
@@ -4731,25 +4788,32 @@ def _compact_response_output_item(payload: CompactResponsePayload) -> dict[str, 
             if item is None:
                 continue
             item_type = item.get("type")
-            encrypted_content = item.get("encrypted_content")
             if isinstance(item_type, str) and item_type in {"compaction", "compaction_summary"}:
-                if isinstance(encrypted_content, str):
-                    return {
-                        "type": "compaction",
-                        "encrypted_content": encrypted_content,
-                    }
+                normalized_item = _normalize_compaction_output_item(item)
+                if normalized_item is not None:
+                    return normalized_item
     summary = getattr(payload, "compaction_summary", None)
     if summary is None:
         summary = extra.get("compaction_summary")
     summary_mapping = _json_mapping_from_model_or_mapping(summary)
     if summary_mapping is not None:
-        encrypted_content = summary_mapping.get("encrypted_content")
-        if isinstance(encrypted_content, str):
-            return {
-                "type": "compaction",
-                "encrypted_content": encrypted_content,
-            }
+        return _normalize_compaction_output_item(summary_mapping)
     return None
+
+
+def _normalize_compaction_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    encrypted_content = item.get("encrypted_content")
+    if not isinstance(encrypted_content, str):
+        return None
+
+    normalized: dict[str, JsonValue] = {
+        "type": "compaction",
+        "encrypted_content": encrypted_content,
+    }
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id.strip():
+        normalized["id"] = item_id
+    return normalized
 
 
 def _json_mapping_from_model_or_mapping(value: object) -> Mapping[str, JsonValue] | None:
@@ -5726,7 +5790,8 @@ async def _websocket_firewall_denial_response(websocket: WebSocket) -> JSONRespo
         websocket.headers,
         websocket.client.host if websocket.client else None,
         trust_proxy_headers=settings.firewall_trust_proxy_headers,
-        trusted_proxy_networks=_parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs),
+        trusted_proxy_networks=parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs),
+        allowed_proxy_header_names=FORWARDED_CHAIN_HEADER_NAMES,
     )
     async with get_background_session() as session:
         repository = cast(FirewallRepositoryPort, FirewallRepository(session))
@@ -5918,6 +5983,7 @@ async def _log_source_chat_completion(
     model: str,
     status: str,
     usage: SourceUsage | None = None,
+    timings: SourceTimings | None = None,
     cost_usd_override: float | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
@@ -5938,7 +6004,8 @@ async def _log_source_chat_completion(
                 cost_usd=(
                     cost_usd_override if cost_usd_override is not None else _source_usage_cost_usd(source, model, usage)
                 ),
-                latency_ms=None,
+                latency_ms=timings.latency_ms if timings is not None else None,
+                latency_first_token_ms=(timings.latency_first_token_ms if timings is not None else None),
                 status=status,
                 error_code=error_code,
                 error_message=error_message,
@@ -6879,46 +6946,6 @@ def _normalize_reasoning_output_item(item: Mapping[str, JsonValue]) -> dict[str,
     if changed:
         normalized["summary"] = normalized_summary
     return normalized
-
-
-def _strip_blank_html_comment_lines(text: str) -> str:
-    terminal_match = None
-    for match in _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.finditer(text):
-        if match.end() == len(text):
-            terminal_match = match
-    cleaned, count = _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.subn("", text)
-    if count == 0:
-        return text
-    if terminal_match is not None:
-        return cleaned.rstrip("\r\n")
-    return cleaned
-
-
-def _reasoning_summary_delta_key(payload: Mapping[str, JsonValue]) -> tuple[str | None, int | None, int | None]:
-    item_id = payload.get("item_id")
-    output_index = payload.get("output_index")
-    summary_index = payload.get("summary_index")
-    return (
-        item_id if isinstance(item_id, str) else None,
-        output_index if isinstance(output_index, int) else None,
-        summary_index if isinstance(summary_index, int) else None,
-    )
-
-
-def _could_be_blank_html_comment_line(text: str) -> bool:
-    candidate = text.rsplit("\n", 1)[-1].lstrip(" \t")
-    if not candidate:
-        return False
-    if not candidate.startswith("<!--"):
-        return "<!--".startswith(candidate)
-    remainder = candidate[4:].lstrip()
-    if not remainder.startswith("-->"):
-        return "-->".startswith(remainder)
-    return not remainder[3:].strip(" \t\r")
-
-
-def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> bool:
-    return isinstance(event_type, str) and (event_type == "response.in_progress" or event_type.startswith("codex."))
 
 
 async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:

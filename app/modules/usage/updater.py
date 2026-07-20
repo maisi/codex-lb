@@ -18,6 +18,7 @@ from app.core.balancer import (
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
     RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     account_status_for_permanent_failure,
+    plausible_rate_limit_reset_at,
 )
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -130,6 +131,7 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
 
 
@@ -491,7 +493,7 @@ class UsageUpdater:
             return False
         if (
             latest is not None
-            and (newest.recorded_at - latest.recorded_at).total_seconds() <= _SIBLING_FETCH_MARGIN_SECONDS
+            and (newest.recorded_at - latest.recorded_at).total_seconds() <= usage_core.SIBLING_FETCH_MARGIN_SECONDS
         ):
             return False
         if not _latest_usage_is_fresh(newest, now=now, interval_seconds=interval_seconds):
@@ -821,12 +823,13 @@ class UsageUpdater:
         if not self._auth_manager:
             return True
 
-        await self._auth_manager._repo.update_tokens(
+        # Identity/plan/workspace sync only. This runs against a stale in-memory
+        # ``account`` snapshot taken well before the write, so it MUST route
+        # through the metadata-only writer, which structurally cannot touch
+        # token ciphertext. Persisting token material from this snapshot would
+        # clobber a peer replica's concurrent refresh-token rotation.
+        await self._auth_manager._repo.update_account_metadata(
             account.id,
-            access_token_encrypted=account.access_token_encrypted,
-            refresh_token_encrypted=account.refresh_token_encrypted,
-            id_token_encrypted=account.id_token_encrypted,
-            last_refresh=account.last_refresh,
             plan_type=account.plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,
@@ -858,12 +861,11 @@ class UsageUpdater:
                 # ended: throttles are not always quota-based. Rows without
                 # blocked_at are stale window-derived markings and keep the
                 # fresh-usage recovery below.
-                cooldown_deadline = (
-                    float(account.reset_at)
-                    if account.reset_at
-                    else float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+                now = time.time()
+                cooldown_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
+                    float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
                 )
-                if time.time() < cooldown_deadline:
+                if now < cooldown_deadline:
                     return
             long_window = monthly or secondary
             if primary is None and monthly is None:
@@ -1180,11 +1182,6 @@ def _latest_usage_is_fresh(
             return False
     return True
 
-
-# Rows written by the same upstream fetch land within milliseconds of each
-# other; a sibling row only proves a *later* fetch (one that no longer
-# reported the stale window) when it is newer by more than this margin.
-_SIBLING_FETCH_MARGIN_SECONDS = 5.0
 
 _MAIN_USAGE_WINDOWS = ("primary", "secondary", "monthly")
 
