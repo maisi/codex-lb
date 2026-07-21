@@ -115,4 +115,8 @@ jobs:
             echo ".github/scripts/sync_codex_ok_labels.py is not available on the default branch yet; skipping bootstrap run"
             exit 0
           fi
+          if [ "$(gh pr list --repo "$REPO" --state open --limit 1 --json number --jq 'length')" -eq 0 ]; then
+            echo "$REPO: no open PRs; nothing to sync"
+            exit 0
+          fi
           python3 .github/scripts/sync_codex_ok_labels.py --repo "$REPO" --all-open --apply --tolerate-write-permission-errors --tolerate-read-errors
