@@ -17,7 +17,8 @@ from app.core.exceptions import (
     DashboardUpstreamError,
 )
 from app.core.upstream_proxy import UpstreamProxyRouteError
-from app.dependencies import AccountsContext, get_accounts_context
+from app.db.models import AccountStatus
+from app.dependencies import AccountsContext, ProxyContext, get_accounts_context, get_proxy_context
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
@@ -42,6 +43,7 @@ from app.modules.accounts.schemas import (
     AccountUsageResetConsumeRequest,
     AccountUsageResetConsumeResponse,
     AccountUsageResetCreditsResponse,
+    AccountWarmupResponse,
 )
 from app.modules.accounts.service import (
     AccountNotProbableError,
@@ -302,6 +304,49 @@ async def probe_account(
         },
     )
     return result
+
+
+@router.post("/{account_id}/warmup", response_model=AccountWarmupResponse)
+async def warmup_account(
+    request: Request,
+    account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
+    accounts_context: AccountsContext = Depends(get_accounts_context),
+    proxy_context: ProxyContext = Depends(get_proxy_context),
+) -> AccountWarmupResponse:
+    account = await accounts_context.repository.get_by_id(account_id)
+    if account is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    if account.status != AccountStatus.ACTIVE:
+        raise DashboardConflictError(
+            "Only active accounts can be warmed",
+            code="account_not_warmable",
+        )
+
+    user_agent = request.headers.get("user-agent")
+    result = await proxy_context.service.warmup_account(
+        account=account,
+        headers={"user-agent": user_agent} if user_agent else {},
+    )
+    AuditService.log_async(
+        "account_warmed",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_id": result.account_id,
+            "request_id": result.request_id,
+            "model": result.model,
+            "success": result.success,
+            "error_code": result.error_code,
+        },
+    )
+    return AccountWarmupResponse(
+        account_id=result.account_id,
+        success=result.success,
+        request_id=result.request_id,
+        model=result.model,
+        error_code=result.error_code,
+        error_message=result.error_message,
+    )
 
 
 @router.post("/{account_id}/pause", response_model=AccountPauseResponse)

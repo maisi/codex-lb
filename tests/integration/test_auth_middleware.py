@@ -116,6 +116,10 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_export.status_code == 403
     assert blocked_export.json()["error"]["code"] == "read_only_access"
 
+    blocked_warmup = await client.post("/api/accounts/missing/warmup")
+    assert blocked_warmup.status_code == 403
+    assert blocked_warmup.json()["error"]["code"] == "read_only_access"
+
     blocked_auth_export = await client.post("/api/accounts/missing/export/auth")
     assert blocked_auth_export.status_code == 403
     assert blocked_auth_export.json()["error"]["code"] == "read_only_access"

@@ -238,6 +238,15 @@ class AccountProbeResponse(DashboardModel):
     account_status_after: str
 
 
+class AccountWarmupResponse(DashboardModel):
+    account_id: str
+    success: bool
+    request_id: str
+    model: str
+    error_code: str | None = None
+    error_message: str | None = None
+
+
 class AccountUsageResetConsumeRequest(DashboardModel):
     redeem_request_id: str | None = None
 

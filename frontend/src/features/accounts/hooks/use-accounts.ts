@@ -20,6 +20,7 @@ import {
   updateAccount,
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
+  warmupAccount,
 } from "@/features/accounts/api";
 import type {
   AccountRoutingPolicy,
@@ -148,6 +149,30 @@ export function useAccountMutations() {
     },
   });
 
+  const warmupMutation = useMutation({
+    mutationFn: ({ accountId }: { accountId: string }) => warmupAccount(accountId),
+    onSuccess: (data) => {
+      if (data.success) {
+        toast.success(t("accounts.toasts.warmupSucceeded"));
+        return;
+      }
+      toast.error(
+        t("accounts.toasts.warmupFailed", {
+          message: data.errorMessage ?? data.errorCode ?? t("accounts.toasts.warmupRequestFailed"),
+        }),
+      );
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.warmupRequestFailed"));
+    },
+    onSettled: (_data, _error, variables) => {
+      void Promise.all([
+        invalidateAccountRelatedQueries(queryClient, variables.accountId),
+        queryClient.invalidateQueries({ queryKey: ["dashboard", "request-logs"] }),
+      ]);
+    },
+  });
+
   const usageResetMutation = useMutation({
     mutationFn: ({ accountId }: { accountId: string }) => {
       if (usageResetRedeemRequestRef.current?.accountId !== accountId) {
@@ -249,6 +274,7 @@ export function useAccountMutations() {
     setAliasMutation,
     deleteMutation,
     probeMutation,
+    warmupMutation,
     usageResetMutation,
     exportAuthMutation,
     limitWarmupMutation,

@@ -17,6 +17,7 @@ describe("AccountActions", () => {
         onPause={vi.fn()}
         onResume={vi.fn()}
         onProbe={vi.fn()}
+        onWarmup={vi.fn()}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
@@ -44,6 +45,7 @@ describe("AccountActions", () => {
         onPause={vi.fn()}
         onResume={vi.fn()}
         onProbe={vi.fn()}
+        onWarmup={vi.fn()}
         onDelete={vi.fn()}
         onReauth={onReauth}
         onExportAuth={vi.fn()}
@@ -77,6 +79,7 @@ describe("AccountActions", () => {
         onPause={vi.fn()}
         onResume={vi.fn()}
         onProbe={onProbe}
+        onWarmup={vi.fn()}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
@@ -93,6 +96,75 @@ describe("AccountActions", () => {
     expect(onProbe).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps warm now distinct from force probe for active accounts", async () => {
+    const user = userEvent.setup();
+    const account = createAccountSummary();
+    const onProbe = vi.fn();
+    const onWarmup = vi.fn();
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={onProbe}
+        onWarmup={onWarmup}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Warm now" }));
+
+    expect(onWarmup).toHaveBeenCalledWith(account.accountId);
+    expect(onProbe).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Force probe" })).toBeEnabled();
+  });
+
+  it.each([
+    ["paused", false, false],
+    ["deactivated", false, false],
+    ["reauth_required", false, false],
+    ["rate_limited", false, false],
+    ["active", true, false],
+    ["active", false, true],
+  ] as const)(
+    "disables warm now for status=%s readOnly=%s busy=%s",
+    async (status, readOnly, busy) => {
+      const user = userEvent.setup();
+      const onWarmup = vi.fn();
+      render(
+        <AccountActions
+          account={createAccountSummary({ status })}
+          busy={busy}
+          readOnly={readOnly}
+          onPause={vi.fn()}
+          onResume={vi.fn()}
+          onProbe={vi.fn()}
+          onWarmup={onWarmup}
+          onDelete={vi.fn()}
+          onReauth={vi.fn()}
+          onExportAuth={vi.fn()}
+          onResetCredit={vi.fn()}
+          onSecurityWorkAuthorizedChange={vi.fn()}
+          onLimitWarmupChange={vi.fn()}
+          onRoutingPolicyChange={vi.fn()}
+        />,
+      );
+
+      const button = screen.getByRole("button", { name: "Warm now" });
+      expect(button).toBeDisabled();
+      await user.click(button);
+      expect(onWarmup).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["paused", "deactivated"] as const)(
     "disables force probe for %s accounts",
     async (status) => {
@@ -107,6 +179,7 @@ describe("AccountActions", () => {
           onPause={vi.fn()}
           onResume={vi.fn()}
           onProbe={onProbe}
+          onWarmup={vi.fn()}
           onDelete={vi.fn()}
           onReauth={vi.fn()}
           onExportAuth={vi.fn()}
@@ -141,6 +214,7 @@ describe("AccountActions", () => {
         onPause={vi.fn()}
         onResume={vi.fn()}
         onProbe={onProbe}
+        onWarmup={vi.fn()}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
@@ -172,6 +246,7 @@ describe("AccountActions", () => {
         onPause={vi.fn()}
         onResume={vi.fn()}
         onProbe={onProbe}
+        onWarmup={vi.fn()}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
@@ -205,6 +280,7 @@ describe("AccountActions", () => {
         onPause={vi.fn()}
         onResume={vi.fn()}
         onProbe={vi.fn()}
+        onWarmup={vi.fn()}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
@@ -236,6 +312,7 @@ describe("AccountActions", () => {
           onPause={vi.fn()}
           onResume={vi.fn()}
           onProbe={vi.fn()}
+          onWarmup={vi.fn()}
           onDelete={vi.fn()}
           onReauth={vi.fn()}
           onExportAuth={vi.fn()}
@@ -272,6 +349,7 @@ describe("AccountActions", () => {
           onPause={vi.fn()}
           onResume={vi.fn()}
           onProbe={vi.fn()}
+          onWarmup={vi.fn()}
           onDelete={vi.fn()}
           onReauth={vi.fn()}
           onExportAuth={vi.fn()}
@@ -302,6 +380,7 @@ describe("AccountActions", () => {
         onPause={vi.fn()}
         onResume={vi.fn()}
         onProbe={vi.fn()}
+        onWarmup={vi.fn()}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}

@@ -1,6 +1,7 @@
 import {
   Activity,
   Download,
+  Flame,
   Pause,
   Play,
   RefreshCw,
@@ -34,6 +35,7 @@ export type AccountActionsProps = {
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onProbe: (accountId: string) => void;
+  onWarmup: (accountId: string) => void;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
   onExportAuth: (accountId: string) => void;
@@ -54,6 +56,7 @@ export function AccountActions({
   onPause,
   onResume,
   onProbe,
+  onWarmup,
   onDelete,
   onReauth,
   onExportAuth,
@@ -186,6 +189,18 @@ export function AccountActions({
         >
           <Activity className="h-3.5 w-3.5" />
           {t("accounts.actions.forceProbe")}
+        </Button>
+
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 gap-1.5 text-xs"
+          onClick={() => onWarmup(account.accountId)}
+          disabled={busy || readOnly || account.status !== "active"}
+        >
+          <Flame className="h-3.5 w-3.5" />
+          {t("accounts.actions.warmNow")}
         </Button>
 
         <Button

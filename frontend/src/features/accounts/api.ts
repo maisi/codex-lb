@@ -18,6 +18,7 @@ import {
   AccountTrendsResponseSchema,
   AccountProbeRequestSchema,
   AccountProbeResponseSchema,
+  AccountWarmupResponseSchema,
   ConsumeRateLimitResetCreditResponseSchema,
   ManualOauthCallbackRequestSchema,
   ManualOauthCallbackResponseSchema,
@@ -134,6 +135,13 @@ export function probeAccount(accountId: string, payload?: unknown) {
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/probe`,
     AccountProbeResponseSchema,
     validated ? { body: validated } : undefined,
+  );
+}
+
+export function warmupAccount(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/warmup`,
+    AccountWarmupResponseSchema,
   );
 }
 

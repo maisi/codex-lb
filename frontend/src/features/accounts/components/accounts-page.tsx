@@ -47,6 +47,7 @@ export function AccountsPage() {
     resumeMutation,
     setAliasMutation,
     probeMutation,
+    warmupMutation,
     usageResetMutation,
     limitWarmupMutation,
     updateMutation,
@@ -120,6 +121,7 @@ export function AccountsPage() {
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
     probeMutation.isPending ||
+    warmupMutation.isPending ||
     usageResetMutation.isPending ||
     limitWarmupMutation.isPending ||
     deleteMutation.isPending ||
@@ -135,6 +137,7 @@ export function AccountsPage() {
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
     getErrorMessageOrNull(probeMutation.error) ||
+    getErrorMessageOrNull(warmupMutation.error) ||
     getErrorMessageOrNull(usageResetMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
@@ -200,6 +203,7 @@ export function AccountsPage() {
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onProbe={(accountId) => void probeMutation.mutateAsync({ accountId })}
+            onWarmup={(accountId) => void warmupMutation.mutateAsync({ accountId })}
             onResetUsage={(accountId) => usageResetDialog.show(accountId)}
             onSetAlias={(accountId, alias) =>
               setAliasMutation.mutateAsync({ accountId, alias })

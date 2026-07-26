@@ -993,6 +993,31 @@ export const handlers = [
     });
   }),
 
+  http.post("/api/accounts/:accountId/warmup", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    if (account.status !== "active") {
+      return HttpResponse.json(
+        { error: { code: "account_not_warmable", message: "Only active accounts can be warmed" } },
+        { status: 409 },
+      );
+    }
+    return HttpResponse.json({
+      accountId,
+      success: true,
+      requestId: `warmup-${accountId}`,
+      model: "gpt-5.4-mini",
+      errorCode: null,
+      errorMessage: null,
+    });
+  }),
+
 	http.post("/api/accounts/:accountId/export/auth", ({ params }) => {
 		const accountId = String(params.accountId);
 		const account = findAccount(accountId);

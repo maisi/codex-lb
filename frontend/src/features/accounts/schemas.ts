@@ -217,6 +217,15 @@ export const AccountProbeResponseSchema = z.object({
   accountStatusAfter: z.string(),
 });
 
+export const AccountWarmupResponseSchema = z.object({
+  accountId: z.string(),
+  success: z.boolean(),
+  requestId: z.string(),
+  model: z.string(),
+  errorCode: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+});
+
 export const AccountUsageResetConsumeRequestSchema = z.object({
   redeemRequestId: z.string().trim().min(1).optional(),
 });
@@ -361,6 +370,7 @@ export type AccountUsageResetCreditsResponse = z.infer<
   typeof AccountUsageResetCreditsResponseSchema
 >;
 export type AccountProbeResponse = z.infer<typeof AccountProbeResponseSchema>;
+export type AccountWarmupResponse = z.infer<typeof AccountWarmupResponseSchema>;
 export type AccountUsageResetConsumeRequest = z.infer<
   typeof AccountUsageResetConsumeRequestSchema
 >;

@@ -87,6 +87,16 @@ class WarmupFailedAccountData:
 
 
 @dataclass(frozen=True, slots=True)
+class WarmupAccountResultData:
+    account_id: str
+    success: bool
+    request_id: str
+    model: str
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class WarmupExecutionData:
     mode: str
     total_accounts: int
@@ -113,7 +123,9 @@ class _WarmupUsageSnapshot:
 class _WarmupAccountSnapshot:
     id: str
     chatgpt_account_id: str | None
+    chatgpt_user_id: str | None
     email: str
+    workspace_id: str | None
     plan_type: str
     access_token_encrypted: bytes
     refresh_token_encrypted: bytes
@@ -137,7 +149,9 @@ def _snapshot_warmup_account(account: Account) -> _WarmupAccountSnapshot:
     return _WarmupAccountSnapshot(
         id=account.id,
         chatgpt_account_id=account.chatgpt_account_id,
+        chatgpt_user_id=account.chatgpt_user_id,
         email=account.email,
+        workspace_id=account.workspace_id,
         plan_type=account.plan_type,
         access_token_encrypted=account.access_token_encrypted,
         refresh_token_encrypted=account.refresh_token_encrypted,
@@ -154,7 +168,9 @@ def _materialize_warmup_account(account: _WarmupAccountSnapshot) -> Account:
     return Account(
         id=account.id,
         chatgpt_account_id=account.chatgpt_account_id,
+        chatgpt_user_id=account.chatgpt_user_id,
         email=account.email,
+        workspace_id=account.workspace_id,
         plan_type=account.plan_type,
         access_token_encrypted=account.access_token_encrypted,
         refresh_token_encrypted=account.refresh_token_encrypted,
@@ -168,6 +184,34 @@ def _materialize_warmup_account(account: _WarmupAccountSnapshot) -> Account:
 
 
 class _WarmupMixin:
+    async def warmup_account(
+        self,
+        *,
+        account: Account,
+        headers: Mapping[str, str],
+    ) -> WarmupAccountResultData:
+        if account.status != AccountStatus.ACTIVE:
+            raise ValueError("Targeted warmup requires an active account")
+
+        dashboard_settings = await get_settings_cache().get()
+        model = dashboard_settings.warmup_model
+        result = await self._submit_warmup_request(
+            account=_snapshot_warmup_account(account),
+            api_key=None,
+            headers=filter_inbound_headers(headers),
+            warmup_model=model,
+            prohibit_fast_mode=dashboard_settings.prohibit_fast_mode,
+            allow_pre_submit_errors_as_result=True,
+        )
+        return WarmupAccountResultData(
+            account_id=account.id,
+            success=result.success,
+            request_id=result.request_id,
+            model=model,
+            error_code=result.error_code,
+            error_message=result.error_message,
+        )
+
     async def warmup(
         self,
         *,

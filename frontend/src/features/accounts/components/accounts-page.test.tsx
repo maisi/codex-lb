@@ -125,6 +125,7 @@ describe("AccountsPage", () => {
       pauseMutation: idleMutation(),
       resumeMutation: idleMutation(),
       probeMutation: idleMutation(),
+      warmupMutation: idleMutation(),
       usageResetMutation: idleMutation(),
       deleteMutation: idleMutation(),
       exportAuthMutation: idleMutation(),
@@ -167,6 +168,7 @@ describe("AccountsPage", () => {
       pauseMutation: idleMutation(),
       resumeMutation: idleMutation(),
       probeMutation: idleMutation(),
+      warmupMutation: idleMutation(),
       usageResetMutation: idleMutation(),
       deleteMutation: idleMutation(),
       exportAuthMutation: idleMutation(),
@@ -213,6 +215,7 @@ describe("AccountsPage", () => {
       pauseMutation: idleMutation(),
       resumeMutation: idleMutation(),
       probeMutation: idleMutation(),
+      warmupMutation: idleMutation(),
       usageResetMutation: idleMutation(),
       deleteMutation: idleMutation(),
       exportAuthMutation: idleMutation(),
@@ -266,6 +269,7 @@ describe("AccountsPage", () => {
       pauseMutation: idleMutation(),
       resumeMutation: idleMutation(),
       probeMutation: idleMutation(),
+      warmupMutation: idleMutation(),
       usageResetMutation: {
         isPending: false,
         error: null,
@@ -333,6 +337,7 @@ describe("AccountsPage", () => {
         error: null,
         mutateAsync: probe,
       },
+      warmupMutation: idleMutation(),
       usageResetMutation: idleMutation(),
       deleteMutation: idleMutation(),
       exportAuthMutation: idleMutation(),
@@ -352,5 +357,77 @@ describe("AccountsPage", () => {
 
     expect(probe).toHaveBeenCalledWith({ accountId: "acc-probe" });
     expect(screen.queryByRole("alertdialog", { name: "Reset usage" })).not.toBeInTheDocument();
+  });
+
+  it("runs warm now immediately for the selected account", async () => {
+    const user = userEvent.setup();
+    const warmup = vi.fn().mockResolvedValue({
+      accountId: "acc-warmup",
+      success: true,
+      requestId: "warmup-request",
+      model: "gpt-5.4-mini",
+      errorCode: null,
+      errorMessage: null,
+    });
+    mockedUseAccounts.mockReturnValue({
+      accountsQuery: {
+        data: [account({ accountId: "acc-warmup", displayName: "Warm account" })],
+        error: null,
+        refetch: vi.fn(),
+      },
+      importMutation: idleMutation(),
+      pauseMutation: idleMutation(),
+      resumeMutation: idleMutation(),
+      probeMutation: idleMutation(),
+      warmupMutation: { isPending: false, error: null, mutateAsync: warmup },
+      usageResetMutation: idleMutation(),
+      deleteMutation: idleMutation(),
+      exportAuthMutation: idleMutation(),
+      setAliasMutation: idleMutation(),
+      limitWarmupMutation: idleMutation(),
+      routingPolicyMutation: idleMutation(),
+      updateMutation: idleMutation(),
+    } as unknown as ReturnType<typeof useAccounts>);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Warm now" }));
+
+    expect(warmup).toHaveBeenCalledWith({ accountId: "acc-warmup" });
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("prevents duplicate warmup while a mutation is pending", () => {
+    mockedUseAccounts.mockReturnValue({
+      accountsQuery: {
+        data: [account({ accountId: "acc-warmup", displayName: "Warm account" })],
+        error: null,
+        refetch: vi.fn(),
+      },
+      importMutation: idleMutation(),
+      pauseMutation: idleMutation(),
+      resumeMutation: idleMutation(),
+      probeMutation: idleMutation(),
+      warmupMutation: { isPending: true, error: null, mutateAsync: vi.fn() },
+      usageResetMutation: idleMutation(),
+      deleteMutation: idleMutation(),
+      exportAuthMutation: idleMutation(),
+      setAliasMutation: idleMutation(),
+      limitWarmupMutation: idleMutation(),
+      routingPolicyMutation: idleMutation(),
+      updateMutation: idleMutation(),
+    } as unknown as ReturnType<typeof useAccounts>);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("button", { name: "Warm now" })).toBeDisabled();
   });
 });

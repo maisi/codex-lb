@@ -2,13 +2,20 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   useAccounts,
   useAccountUsageResetCredits,
 } from "@/features/accounts/hooks/use-accounts";
 import { server } from "@/test/mocks/server";
+
+const toastMocks = vi.hoisted(() => ({
+  error: vi.fn(),
+  success: vi.fn(),
+}));
+
+vi.mock("sonner", () => ({ toast: toastMocks }));
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -28,6 +35,11 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useAccounts", () => {
+  beforeEach(() => {
+    toastMocks.error.mockClear();
+    toastMocks.success.mockClear();
+  });
+
   it("loads accounts and invalidates related queries after mutations", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
@@ -115,6 +127,74 @@ describe("useAccounts", () => {
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "usage-reset-credits"] });
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
+  });
+
+  it("warms one account and invalidates account and request-log queries", async () => {
+    const queryClient = createTestQueryClient();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    let warmedAccountId: string | null = null;
+    server.use(
+      http.post("/api/accounts/:accountId/warmup", ({ params }) => {
+        warmedAccountId = String(params.accountId);
+        return HttpResponse.json({
+          accountId: warmedAccountId,
+          success: true,
+          requestId: "warmup-success",
+          model: "gpt-5.4-mini",
+          errorCode: null,
+          errorMessage: null,
+        });
+      }),
+    );
+    const { result } = renderHook(() => useAccounts(), {
+      wrapper: createWrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
+
+    await result.current.warmupMutation.mutateAsync({ accountId: "acc_primary" });
+
+    expect(warmedAccountId).toBe("acc_primary");
+    expect(toastMocks.success).toHaveBeenCalledWith("Account warmed");
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "request-logs"] });
+    });
+  });
+
+  it("shows structured and HTTP warmup failures", async () => {
+    const queryClient = createTestQueryClient();
+    let attempts = 0;
+    server.use(
+      http.post("/api/accounts/:accountId/warmup", () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return HttpResponse.json({
+            accountId: "acc_primary",
+            success: false,
+            requestId: "warmup-failed",
+            model: "gpt-5.4-mini",
+            errorCode: "upstream_unavailable",
+            errorMessage: "owner unavailable",
+          });
+        }
+        return HttpResponse.json(
+          { error: { code: "account_not_warmable", message: "Only active accounts can be warmed" } },
+          { status: 409 },
+        );
+      }),
+    );
+    const { result } = renderHook(() => useAccounts(), {
+      wrapper: createWrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
+
+    await result.current.warmupMutation.mutateAsync({ accountId: "acc_primary" });
+    expect(toastMocks.error).toHaveBeenCalledWith("Warm-up failed: owner unavailable");
+
+    await expect(
+      result.current.warmupMutation.mutateAsync({ accountId: "acc_primary" }),
+    ).rejects.toThrow("Only active accounts can be warmed");
+    expect(toastMocks.error).toHaveBeenCalledWith("Only active accounts can be warmed");
   });
 
   it("reuses the dashboard usage reset redemption id after a failed attempt", async () => {
