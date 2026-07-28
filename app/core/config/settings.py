@@ -317,6 +317,10 @@ class Settings(BaseSettings):
     account_token_vending_shared_secret: str | None = None
     account_token_vending_access_token_skew_seconds: float = Field(default=60.0, ge=0)
     sticky_session_cleanup_enabled: bool = True
+    # TTL backstop for the per-account upstream-route resolution cache; 0
+    # disables caching. Admin mutations invalidate durably through the
+    # cache-invalidation bus, so this only bounds out-of-band database edits.
+    upstream_route_cache_ttl_seconds: float = Field(default=60.0, ge=0)
     # Data retention (0 = disabled). Non-zero values have safety floors so
     # every in-product consumer window stays inside retained data.
     # DEPRECATED: retention is managed from the dashboard runtime settings
