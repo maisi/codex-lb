@@ -40,6 +40,24 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
       ),
     },
     {
+      id: "input-tokens",
+      label: t("reports.summary.inputTokens"),
+      value: formatNumber(summary.totalInputTokens),
+      sub: t("reports.summary.providerReported"),
+    },
+    {
+      id: "cached-input",
+      label: t("reports.summary.cachedInputTokens"),
+      value: formatNumber(summary.totalCachedTokens),
+      sub: t("reports.summary.cachedIncluded"),
+    },
+    {
+      id: "cache-hit-ratio",
+      label: t("reports.summary.cacheHitRatio"),
+      value: `${(summary.cacheHitRatio * 100).toFixed(1)}%`,
+      sub: t("reports.summary.providerReported"),
+    },
+    {
       id: "requests",
       label: t("reports.summary.requests"),
       value: formatNumber(summary.totalRequests),
@@ -57,7 +75,7 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
   ];
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {cards.map((card) => (
         <div
           key={card.id}

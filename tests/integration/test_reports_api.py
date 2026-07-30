@@ -78,6 +78,7 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
             "conversations": 0,
             "costUsd": 0.55,
             "cachedInputTokens": 2,
+            "cacheHitRatio": 0.1333,
             "date": start_at.date().isoformat(),
             "errorCount": 0,
             "requests": 2,
@@ -299,6 +300,7 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
             "conversations": 0,
             "costUsd": 0.42,
             "cachedInputTokens": 3,
+            "cacheHitRatio": 0.2308,
             "date": start_at.date().isoformat(),
             "errorCount": 0,
             "requests": 1,
@@ -442,6 +444,7 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
             "conversations": 0,
             "costUsd": 0.5,
             "cachedInputTokens": 0,
+            "cacheHitRatio": 0.0,
             "date": "2026-06-01",
             "errorCount": 0,
             "requests": 2,
@@ -692,6 +695,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "conversations": 0,
             "costUsd": 0.7,
             "cachedInputTokens": 0,
+            "cacheHitRatio": 0.0,
             "date": "2026-06-01",
             "errorCount": 0,
             "requests": 1,
@@ -706,6 +710,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "conversations": 0,
             "costUsd": 1.4,
             "cachedInputTokens": 0,
+            "cacheHitRatio": 0.0,
             "date": "2026-06-07",
             "errorCount": 0,
             "requests": 1,
@@ -795,6 +800,7 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
             "conversations": 0,
             "costUsd": 0.5,
             "cachedInputTokens": 0,
+            "cacheHitRatio": 0.0,
             "date": "2026-03-08",
             "errorCount": 0,
             "requests": 2,
@@ -1264,6 +1270,81 @@ async def test_reports_api_applies_account_and_model_filters(async_client, db_se
     assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0}]
 
 
+async def test_reports_api_filters_repeated_api_keys_and_reports_cache_ratios(async_client, db_setup):
+    requested_at = _naive_utc(datetime(2026, 6, 1, 13, 0, 0, tzinfo=timezone.utc))
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                RequestLog(
+                    api_key_id="key_report_a",
+                    request_id="report-key-a",
+                    requested_at=requested_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=100,
+                    cached_input_tokens=25,
+                ),
+                RequestLog(
+                    api_key_id="key_report_b",
+                    request_id="report-key-b",
+                    requested_at=requested_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=50,
+                    cached_input_tokens=75,
+                ),
+                RequestLog(
+                    api_key_id="key_report_c",
+                    request_id="report-key-c",
+                    requested_at=requested_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=1000,
+                    cached_input_tokens=1000,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params=[
+            ("start_date", "2026-06-01"),
+            ("end_date", "2026-06-01"),
+            ("api_key_id", "key_report_a"),
+            ("api_key_id", "key_report_b"),
+        ],
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["totalInputTokens"] == 150
+    assert payload["summary"]["totalCachedTokens"] == 75
+    assert payload["summary"]["cacheHitRatio"] == 0.5
+    assert payload["daily"][0]["cachedInputTokens"] == 75
+    assert payload["daily"][0]["cacheHitRatio"] == 0.5
+    assert payload["byApiKey"] == [
+        {
+            "apiKeyId": "key_report_a",
+            "apiKeyName": None,
+            "keyPrefix": None,
+            "requests": 1,
+            "totalInputTokens": 100,
+            "cachedInputTokens": 25,
+            "cacheHitRatio": 0.25,
+        },
+        {
+            "apiKeyId": "key_report_b",
+            "apiKeyName": None,
+            "keyPrefix": None,
+            "requests": 1,
+            "totalInputTokens": 50,
+            "cachedInputTokens": 50,
+            "cacheHitRatio": 1.0,
+        },
+    ]
+
+
 async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_client, db_setup):
     start_at = _naive_utc(datetime(2026, 6, 1, 14, 0, 0, tzinfo=timezone.utc))
     async with SessionLocal() as session:
@@ -1566,6 +1647,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "conversations": 0,
             "costUsd": 0.0,
             "cachedInputTokens": 0,
+            "cacheHitRatio": 0.0,
             "date": "2026-06-01",
             "errorCount": 0,
             "requests": 1,
@@ -1580,6 +1662,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "conversations": 0,
             "costUsd": 0.0,
             "cachedInputTokens": 0,
+            "cacheHitRatio": 0.0,
             "date": "2026-06-02",
             "errorCount": 0,
             "requests": 1,
@@ -1594,6 +1677,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "conversations": 0,
             "costUsd": 0.0,
             "cachedInputTokens": 0,
+            "cacheHitRatio": 0.0,
             "date": "2026-06-03",
             "errorCount": 0,
             "requests": 1,

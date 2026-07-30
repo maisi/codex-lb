@@ -8,6 +8,7 @@ const FILTERS: ReportsFiltersState = {
   startDate: "2026-06-01",
   endDate: "2026-06-07",
   accountId: [],
+  apiKeyId: [],
   model: "",
   useragent: "",
 };
@@ -36,6 +37,34 @@ describe("ReportsFilters", () => {
     await user.click(await screen.findByRole("menuitemcheckbox", { name: /primary account/i }));
 
     expect(onFiltersChange).toHaveBeenCalledWith({ ...FILTERS, accountId: ["acc_one"] });
+  });
+
+  it("keeps multiple API keys selected", async () => {
+    const user = userEvent.setup();
+    const onFiltersChange = vi.fn();
+    render(
+      <ReportsFilters
+        filters={{ ...FILTERS, apiKeyId: ["key_one"] }}
+        selectedPresetDays={7}
+        accountOptions={[]}
+        apiKeyOptions={[
+          { value: "key_one", label: "Key one" },
+          { value: "key_two", label: "Key two" },
+        ]}
+        modelOptions={[]}
+        useragentOptions={[]}
+        onPresetSelect={vi.fn()}
+        onFiltersChange={onFiltersChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /key one/i }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /key two/i }));
+
+    expect(onFiltersChange).toHaveBeenCalledWith({
+      ...FILTERS,
+      apiKeyId: ["key_one", "key_two"],
+    });
   });
 
   it("keeps the reports model filter as a single selected value", async () => {

@@ -195,6 +195,46 @@ async def test_api_keys_crud_and_regenerate(async_client):
 
 
 @pytest.mark.asyncio
+async def test_prompt_cache_affinity_continuation_round_trips_and_regenerates(async_client):
+    default_create = await async_client.post("/api/api-keys/", json={"name": "default-continuation"})
+    assert default_create.status_code == 200
+    assert default_create.json()["promptCacheAffinityContinuation"] is False
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "enabled-continuation",
+            "promptCacheAffinityContinuation": True,
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    assert create.json()["promptCacheAffinityContinuation"] is True
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    listed_by_id = {row["id"]: row for row in listed.json()}
+    assert listed_by_id[key_id]["promptCacheAffinityContinuation"] is True
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"promptCacheAffinityContinuation": False},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["promptCacheAffinityContinuation"] is False
+
+    re_enabled = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"promptCacheAffinityContinuation": True},
+    )
+    assert re_enabled.status_code == 200
+
+    regenerated = await async_client.post(f"/api/api-keys/{key_id}/regenerate")
+    assert regenerated.status_code == 200
+    assert regenerated.json()["promptCacheAffinityContinuation"] is True
+
+
+@pytest.mark.asyncio
 async def test_api_key_create_with_transport_policy_override_round_trips(async_client):
     create = await async_client.post(
         "/api/api-keys/",

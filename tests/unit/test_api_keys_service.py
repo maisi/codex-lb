@@ -145,6 +145,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         allowed_models: str | None | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
         force_include_usage: bool | _Unset = _UNSET,
+        prompt_cache_affinity_continuation: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
@@ -168,6 +169,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "allowed_models": allowed_models,
             "apply_to_codex_model": apply_to_codex_model,
             "force_include_usage": force_include_usage,
+            "prompt_cache_affinity_continuation": prompt_cache_affinity_continuation,
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
             "enforced_service_tier": enforced_service_tier,
@@ -1290,6 +1292,67 @@ async def test_update_key_ignores_null_force_include_usage_patch_value() -> None
 
 
 @pytest.mark.asyncio
+async def test_create_key_defaults_prompt_cache_affinity_continuation_off() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(ApiKeyCreateData(name="default-continuation", allowed_models=None))
+
+    assert created.prompt_cache_affinity_continuation is False
+
+
+@pytest.mark.asyncio
+async def test_create_and_update_key_persist_prompt_cache_affinity_continuation() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="continuation-policy",
+            allowed_models=None,
+            prompt_cache_affinity_continuation=True,
+        )
+    )
+    assert created.prompt_cache_affinity_continuation is True
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            prompt_cache_affinity_continuation=False,
+            prompt_cache_affinity_continuation_set=True,
+        ),
+    )
+
+    assert updated.prompt_cache_affinity_continuation is False
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.prompt_cache_affinity_continuation is False
+
+
+@pytest.mark.asyncio
+async def test_update_key_ignores_null_prompt_cache_affinity_continuation() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="continuation-null-update",
+            allowed_models=None,
+            prompt_cache_affinity_continuation=True,
+        )
+    )
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            prompt_cache_affinity_continuation=None,
+            prompt_cache_affinity_continuation_set=True,
+        ),
+    )
+
+    assert updated.prompt_cache_affinity_continuation is True
+
+
+@pytest.mark.asyncio
 async def test_create_key_with_limits() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
@@ -1750,6 +1813,23 @@ async def test_regenerate_key_rotates_hash_and_prefix() -> None:
     assert regenerated.key.startswith("sk-clb-")
     assert row_after.key_hash != old_hash
     assert row_after.key_prefix != old_prefix
+
+
+@pytest.mark.asyncio
+async def test_regenerate_key_preserves_prompt_cache_affinity_continuation() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="regen-continuation",
+            allowed_models=None,
+            prompt_cache_affinity_continuation=True,
+        )
+    )
+
+    regenerated = await service.regenerate_key(created.id)
+
+    assert regenerated.prompt_cache_affinity_continuation is True
 
 
 @pytest.mark.asyncio

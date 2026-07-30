@@ -258,6 +258,12 @@ if PROMETHEUS_AVAILABLE:
         ["outcome"],
         registry=REGISTRY,
     )
+    prompt_cache_continuation_total = Counter(
+        "codex_lb_prompt_cache_continuation_total",
+        "Total prompt-cache continuation decisions by outcome and bounded reason",
+        ["outcome", "reason"],
+        registry=REGISTRY,
+    )
     http_bridge_stuck_retire_total = Counter(
         "codex_lb_http_bridge_stuck_retire_total",
         "Total HTTP bridge stuck-session retirements",
@@ -334,6 +340,7 @@ else:
     cap_partition_replicas: GaugeLike | None = None
     proxy_phase_latency_seconds: HistogramLike | None = None
     http_bridge_prewarm_total: CounterLike | None = None
+    prompt_cache_continuation_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
     account_status_transition_total: CounterLike | None = None
     cache_invalidation_bump_failures_total: CounterLike | None = None
@@ -378,6 +385,7 @@ __all__ = [
     "continuity_fail_closed_total",
     "continuity_owner_resolution_total",
     "http_bridge_prewarm_total",
+    "prompt_cache_continuation_total",
     "http_bridge_stuck_retire_total",
     "image_request_duration_seconds",
     "image_requests_total",

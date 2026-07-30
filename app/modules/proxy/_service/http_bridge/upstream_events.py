@@ -102,6 +102,9 @@ from app.modules.proxy._service.observability import (
     _interesting_header_keys as _interesting_header_keys,
 )
 from app.modules.proxy._service.observability import (
+    _record_prompt_cache_continuation,
+)
+from app.modules.proxy._service.observability import (
     _tools_hash as _tools_hash,
 )
 from app.modules.proxy._service.observability import (
@@ -557,6 +560,25 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
         text: str,
     ) -> None:
+        # Settling an upstream event can pop the terminal request from
+        # ``pending_requests`` and then await the durable anchor write before
+        # ``session.last_completed_*`` is refreshed. Flag the whole settlement
+        # so prompt-cache continuation treats the anchor as ambiguous for its
+        # duration; the previous value is restored so nesting cannot clear an
+        # outer settlement, and ``finally`` keeps an early return or an
+        # exception from leaving the session permanently ambiguous.
+        previous_completion_pending = session.continuation_completion_pending
+        session.continuation_completion_pending = True
+        try:
+            await self._process_http_bridge_upstream_text_settlement(session, text)
+        finally:
+            session.continuation_completion_pending = previous_completion_pending
+
+    async def _process_http_bridge_upstream_text_settlement(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        text: str,
+    ) -> None:
         original_text = text
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
@@ -859,6 +881,36 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             event_block = f"data: {rewritten_text}\n\n"
 
+        if (
+            status_request_state is not None
+            and is_previous_response_not_found_event
+            and status_request_state.prompt_cache_continuation_attempted
+            and status_request_state.proxy_injected_previous_response_id
+            and status_request_state.fresh_upstream_request_is_retry_safe
+            and status_request_state.fresh_upstream_request_text is not None
+            and not has_other_pending_requests
+        ):
+            safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
+            if safe_request_text is not None:
+                status_request_state.request_stage = "first_turn"
+                async with session.pending_lock:
+                    if status_request_state not in session.pending_requests:
+                        session.pending_requests.appendleft(status_request_state)
+                        session.queued_request_count += 1
+                    status_request_state.awaiting_response_created = True
+                    status_request_state.response_id = None
+                _record_prompt_cache_continuation(
+                    outcome="fallback",
+                    reason="invalid_or_expired_response",
+                    request_id=status_request_state.request_log_id or status_request_state.request_id,
+                )
+                if await self._retry_http_bridge_precreated_request(session):
+                    return
+                async with session.pending_lock:
+                    if status_request_state in session.pending_requests:
+                        session.pending_requests.remove(status_request_state)
+                        session.queued_request_count = max(0, session.queued_request_count - 1)
+
         if status_request_state is not None and is_previous_response_not_found_event:
             status_request_state.error_http_status_override = 502
             status_request_state.previous_response_not_found_rewritten = (
@@ -1136,16 +1188,24 @@ class _HTTPBridgeUpstreamEventsMixin:
             # anchor for continuity lookups.
             if response_id is not None:
                 session.last_completed_response_id = response_id
+                session.last_completed_account_id = session.account.id
                 # Remember which tool-call items the completed response left
                 # pending so an anchored follow-up that omits their outputs
                 # (interrupted turn) can receive synthetic interrupted
                 # outputs instead of an upstream missing-tool-output 400.
                 session.last_pending_tool_calls = dict(terminal_request_state.pending_tool_call_types)
-            # Prefix trimming is only meaningful for list-shaped inputs, so
-            # keep the input-count / fingerprint update scoped to that path.
-            if terminal_request_state.input_item_count > 0:
+            # Prefix trimming is only meaningful when both values describe
+            # this completed response. Clear stale metadata for string/empty
+            # input rather than pairing a new response ID with an old prefix.
+            if (
+                terminal_request_state.input_item_count > 0
+                and terminal_request_state.input_full_fingerprint is not None
+            ):
                 session.last_completed_input_count = terminal_request_state.input_item_count
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
+            else:
+                session.last_completed_input_count = 0
+                session.last_completed_input_prefix_fingerprint = None
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract

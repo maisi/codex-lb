@@ -299,6 +299,7 @@ class ApiKeysRepository:
         allowed_models: str | None | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
         force_include_usage: bool | _Unset = _UNSET,
+        prompt_cache_affinity_continuation: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
@@ -328,6 +329,9 @@ class ApiKeysRepository:
         if force_include_usage is not _UNSET:
             assert isinstance(force_include_usage, bool)
             row.force_include_usage = force_include_usage
+        if prompt_cache_affinity_continuation is not _UNSET:
+            assert isinstance(prompt_cache_affinity_continuation, bool)
+            row.prompt_cache_affinity_continuation = prompt_cache_affinity_continuation
         if enforced_model is not _UNSET:
             assert enforced_model is None or isinstance(enforced_model, str)
             row.enforced_model = enforced_model

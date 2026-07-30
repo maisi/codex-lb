@@ -11,6 +11,7 @@ class DailyReportRow(DashboardModel):
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int
+    cache_hit_ratio: float
     cost_usd: float
     active_accounts: int
     conversations: int = 0
@@ -41,11 +42,22 @@ class UserAgentCostEntry(DashboardModel):
     percentage: float = 0.0
 
 
+class ApiKeyCacheEntry(DashboardModel):
+    api_key_id: str | None
+    api_key_name: str | None = None
+    key_prefix: str | None = None
+    requests: int
+    total_input_tokens: int
+    cached_input_tokens: int
+    cache_hit_ratio: float
+
+
 class ReportSummary(DashboardModel):
     total_cost_usd: float
     total_input_tokens: int
     total_output_tokens: int
     total_cached_tokens: int
+    cache_hit_ratio: float
     total_requests: int
     total_errors: int
     active_accounts: int
@@ -72,3 +84,4 @@ class ReportsResponse(DashboardModel):
     by_model: list[ModelCostEntry] = Field(default_factory=list)
     by_account: list[AccountCostEntry] = Field(default_factory=list)
     by_useragent: list[UserAgentCostEntry] = Field(default_factory=list)
+    by_api_key: list[ApiKeyCacheEntry] = Field(default_factory=list)

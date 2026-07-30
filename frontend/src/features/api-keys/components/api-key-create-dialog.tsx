@@ -76,6 +76,7 @@ type ApiKeyCreateDraft = {
   transportPolicyOverride: TransportPolicyOverride | null;
   applyToCodexModel: boolean;
   forceIncludeUsage: boolean;
+  promptCacheAffinityContinuation: boolean;
 };
 
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
@@ -92,6 +93,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   transportPolicyOverride: null,
   applyToCodexModel: false,
   forceIncludeUsage: false,
+  promptCacheAffinityContinuation: false,
 };
 
 function apiKeyCreateDraftReducer(
@@ -120,6 +122,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
       forceIncludeUsage: draft.forceIncludeUsage,
+      promptCacheAffinityContinuation: draft.promptCacheAffinityContinuation,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
       ...(draft.selectedSourceIds.length > 0 ? { assignedSourceIds: draft.selectedSourceIds } : {}),
       usageSections: draft.usageSections,
@@ -179,6 +182,22 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
               <label htmlFor="create-api-key-apply-to-codex-model" className="cursor-pointer">
                 {t("apiKeys.form.applyToCodexModel")}
               </label>
+            </div>
+
+            <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <Checkbox
+                id="create-api-key-prompt-cache-affinity-continuation"
+                checked={draft.promptCacheAffinityContinuation}
+                onCheckedChange={(checked) => updateDraft({ promptCacheAffinityContinuation: checked === true })}
+              />
+              <div>
+                <label htmlFor="create-api-key-prompt-cache-affinity-continuation" className="cursor-pointer">
+                  {t("apiKeys.form.promptCacheAffinityContinuation")}
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {t("apiKeys.form.promptCacheAffinityContinuationDescription")}
+                </p>
+              </div>
             </div>
 
             <div className="flex items-center gap-2 rounded-md border p-2 text-sm">

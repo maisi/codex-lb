@@ -48,6 +48,7 @@ export const ApiKeySchema = z.object({
   allowedModels: z.array(z.string()).nullable(),
   applyToCodexModel: z.boolean().default(false),
   forceIncludeUsage: z.boolean().default(false),
+  promptCacheAffinityContinuation: z.boolean().default(false),
   enforcedModel: z.string().nullable().default(null),
   trafficClass: z
     .enum(TRAFFIC_CLASSES)
@@ -87,6 +88,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   allowedModels: z.array(z.string()).optional(),
   applyToCodexModel: z.boolean().optional(),
   forceIncludeUsage: z.boolean().optional(),
+  promptCacheAffinityContinuation: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
@@ -112,6 +114,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   allowedModels: z.array(z.string()).nullable().optional(),
   applyToCodexModel: z.boolean().optional(),
   forceIncludeUsage: z.boolean().optional(),
+  promptCacheAffinityContinuation: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),

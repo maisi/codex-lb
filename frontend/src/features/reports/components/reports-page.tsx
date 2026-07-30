@@ -17,6 +17,7 @@ import type { QueueWaitChartProps } from "./queue-wait-chart";
 import type { ModelDistributionDonutProps } from "./model-distribution-donut";
 import type { UseragentDistributionDonutProps } from "./useragent-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
+import { ApiKeyCacheUsage } from "./api-key-cache-usage";
 import {
   daysAgoLocalISO,
   getBrowserReportsTimeZone,
@@ -69,6 +70,7 @@ const createDefaultFilters = (): ReportsFiltersState => ({
   startDate: daysAgoLocalISO(6),
   endDate: localDateISO(),
   accountId: [],
+  apiKeyId: [],
   model: "",
   useragent: "",
 });
@@ -115,7 +117,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const reportsQuery = useReports(filters, reportsTimeZone);
   const filterCatalogFilters = useMemo(
-    () => ({ ...filters, model: "", useragent: "" }),
+    () => ({ ...filters, apiKeyId: [], model: "", useragent: "" }),
     [filters],
   );
   const filterCatalogQuery = useReports(filterCatalogFilters, reportsTimeZone);
@@ -148,6 +150,21 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         value: entry.model,
         label: entry.model,
       })),
+    [filterCatalogQuery.data],
+  );
+
+  const apiKeyOptions = useMemo(
+    () =>
+      (filterCatalogQuery.data?.byApiKey ?? []).flatMap((entry) =>
+        entry.apiKeyId === null
+          ? []
+          : [{
+              value: entry.apiKeyId,
+              label: entry.apiKeyName
+                ? `${entry.apiKeyName}${entry.keyPrefix ? ` (${entry.keyPrefix}...)` : ""}`
+                : entry.apiKeyId,
+            }],
+      ),
     [filterCatalogQuery.data],
   );
 
@@ -215,6 +232,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         filters={filters}
         selectedPresetDays={selectedPresetDays}
         accountOptions={accountOptions}
+        apiKeyOptions={apiKeyOptions}
         modelOptions={modelOptions}
         useragentOptions={useragentOptions}
         onPresetSelect={handlePresetSelect}
@@ -301,6 +319,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
               />
             </div>
           </div>
+          <ApiKeyCacheUsage data={reportsQuery.data.byApiKey} />
         </>
       ) : hasAnyError ? (
         <div className="space-y-3 rounded-xl border bg-card p-4">

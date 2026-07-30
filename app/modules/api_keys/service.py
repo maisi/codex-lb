@@ -83,6 +83,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         allowed_models: str | None | _Unset = ...,
         apply_to_codex_model: bool | _Unset = ...,
         force_include_usage: bool | _Unset = ...,
+        prompt_cache_affinity_continuation: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         enforced_service_tier: str | None | _Unset = ...,
@@ -271,6 +272,7 @@ class ApiKeyCreateData:
     allowed_models: list[str] | None
     apply_to_codex_model: bool = False
     force_include_usage: bool = False
+    prompt_cache_affinity_continuation: bool = False
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     enforced_service_tier: str | None = None
@@ -293,6 +295,8 @@ class ApiKeyUpdateData:
     apply_to_codex_model_set: bool = False
     force_include_usage: bool | None = None
     force_include_usage_set: bool = False
+    prompt_cache_affinity_continuation: bool | None = None
+    prompt_cache_affinity_continuation_set: bool = False
     enforced_model: str | None = None
     enforced_model_set: bool = False
     enforced_reasoning_effort: str | None = None
@@ -333,6 +337,7 @@ class ApiKeyData:
     last_used_at: datetime | None
     apply_to_codex_model: bool = False
     force_include_usage: bool = False
+    prompt_cache_affinity_continuation: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
     usage_sections: str = "upstream_limits,account_pool_usage"
@@ -480,6 +485,7 @@ class ApiKeysService:
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
             apply_to_codex_model=bool(payload.apply_to_codex_model),
             force_include_usage=bool(payload.force_include_usage),
+            prompt_cache_affinity_continuation=bool(payload.prompt_cache_affinity_continuation),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
@@ -611,6 +617,15 @@ class ApiKeysService:
         else:
             force_include_usage = _UNSET
 
+        prompt_cache_affinity_continuation: bool | _Unset
+        if payload.prompt_cache_affinity_continuation_set:
+            if payload.prompt_cache_affinity_continuation is None:
+                prompt_cache_affinity_continuation = _UNSET
+            else:
+                prompt_cache_affinity_continuation = payload.prompt_cache_affinity_continuation
+        else:
+            prompt_cache_affinity_continuation = _UNSET
+
         if payload.enforced_reasoning_effort_set:
             enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
         else:
@@ -668,6 +683,7 @@ class ApiKeysService:
                 allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
                 apply_to_codex_model=apply_to_codex_model,
                 force_include_usage=force_include_usage,
+                prompt_cache_affinity_continuation=prompt_cache_affinity_continuation,
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
                 enforced_reasoning_effort=(
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
@@ -708,6 +724,7 @@ class ApiKeysService:
             or payload.allowed_models_set
             or payload.apply_to_codex_model_set
             or payload.force_include_usage_set
+            or payload.prompt_cache_affinity_continuation_set
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
             or payload.enforced_service_tier_set
@@ -1643,6 +1660,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         allowed_models=data.allowed_models,
         apply_to_codex_model=data.apply_to_codex_model,
         force_include_usage=data.force_include_usage,
+        prompt_cache_affinity_continuation=data.prompt_cache_affinity_continuation,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         enforced_service_tier=data.enforced_service_tier,
@@ -1679,6 +1697,7 @@ def _to_api_key_data(
         allowed_models=_deserialize_allowed_models(row.allowed_models),
         apply_to_codex_model=getattr(row, "apply_to_codex_model", False),
         force_include_usage=getattr(row, "force_include_usage", False),
+        prompt_cache_affinity_continuation=getattr(row, "prompt_cache_affinity_continuation", False),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         enforced_service_tier=_normalize_service_tier_lenient(row.enforced_service_tier),

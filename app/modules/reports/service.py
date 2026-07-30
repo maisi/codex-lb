@@ -7,6 +7,7 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.modules.reports.repository import MAX_DAILY_REPORT_DAYS, DailyReportRangeTooLargeError, ReportsRepository
 from app.modules.reports.schemas import (
     AccountCostEntry,
+    ApiKeyCacheEntry,
     DailyReportRow,
     ModelCostEntry,
     ReportComparison,
@@ -33,6 +34,7 @@ class ReportsService:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> ReportsResponse:
         timezone_info = _resolve_timezone(report_timezone)
         now = utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info)
@@ -53,15 +55,20 @@ class ReportsService:
         previous_start_at = _local_midnight_to_utc_naive(previous_start_date, timezone_info)
         previous_end_at = _local_midnight_to_utc_naive(previous_end_date + timedelta(days=1), timezone_info)
 
-        summary = await self._repository.aggregate_summary(start_at, end_at, account_ids, model, useragent_group)
+        summary = await self._repository.aggregate_summary(
+            start_at, end_at, account_ids, model, useragent_group, api_key_ids
+        )
         previous_summary = await self._repository.aggregate_summary(
             previous_start_at,
             previous_end_at,
             account_ids,
             model,
             useragent_group,
+            api_key_ids,
         )
-        earliest_activity_at = await self._repository.earliest_report_activity_at(account_ids, model, useragent_group)
+        earliest_activity_at = await self._repository.earliest_report_activity_at(
+            account_ids, model, useragent_group, api_key_ids
+        )
         daily_rows = await self._repository.aggregate_daily_rows(
             start_date,
             end_date,
@@ -69,6 +76,7 @@ class ReportsService:
             account_ids,
             model,
             useragent_group,
+            api_key_ids,
         )
         daily = [
             DailyReportRow(
@@ -77,6 +85,7 @@ class ReportsService:
                 input_tokens=row.input_tokens,
                 output_tokens=row.output_tokens,
                 cached_input_tokens=row.cached_input_tokens,
+                cache_hit_ratio=_cache_hit_ratio(row.cached_input_tokens, row.input_tokens),
                 cost_usd=round(row.cost_usd, 4),
                 active_accounts=row.active_accounts,
                 conversations=row.conversation_count,
@@ -87,14 +96,27 @@ class ReportsService:
             )
             for row in daily_rows
         ]
-        by_model = await self._repository.aggregate_by_model(start_at, end_at, account_ids, model, useragent_group)
-        by_account = await self._repository.aggregate_by_account(start_at, end_at, account_ids, model, useragent_group)
+        by_model = await self._repository.aggregate_by_model(
+            start_at, end_at, account_ids, model, useragent_group, api_key_ids
+        )
+        by_account = await self._repository.aggregate_by_account(
+            start_at, end_at, account_ids, model, useragent_group, api_key_ids
+        )
         by_useragent = await self._repository.aggregate_by_useragent(
             start_at,
             end_at,
             account_ids,
             model,
             useragent_group,
+            api_key_ids,
+        )
+        by_api_key = await self._repository.aggregate_by_api_key(
+            start_at,
+            end_at,
+            account_ids,
+            model,
+            useragent_group,
+            api_key_ids,
         )
 
         day_count = max((end_at.date() - start_at.date()).days, 1)
@@ -116,6 +138,7 @@ class ReportsService:
                 total_input_tokens=summary.total_input_tokens,
                 total_output_tokens=summary.total_output_tokens,
                 total_cached_tokens=summary.total_cached_tokens,
+                cache_hit_ratio=_cache_hit_ratio(summary.total_cached_tokens, summary.total_input_tokens),
                 total_requests=summary.total_requests,
                 total_errors=summary.total_errors,
                 active_accounts=summary.active_accounts,
@@ -152,6 +175,18 @@ class ReportsService:
                 )
                 for u in by_useragent
             ],
+            by_api_key=[
+                ApiKeyCacheEntry(
+                    api_key_id=row.api_key_id,
+                    api_key_name=row.api_key_name,
+                    key_prefix=row.key_prefix,
+                    requests=row.request_count,
+                    total_input_tokens=row.total_input_tokens,
+                    cached_input_tokens=row.cached_input_tokens,
+                    cache_hit_ratio=_cache_hit_ratio(row.cached_input_tokens, row.total_input_tokens),
+                )
+                for row in by_api_key
+            ],
         )
 
 
@@ -166,3 +201,9 @@ def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:
 
 def _local_midnight_to_utc_naive(value: date, timezone_info: ZoneInfo | timezone) -> datetime:
     return to_utc_naive(datetime.combine(value, datetime.min.time(), tzinfo=timezone_info))
+
+
+def _cache_hit_ratio(cached_input_tokens: int, total_input_tokens: int) -> float:
+    if total_input_tokens <= 0:
+        return 0.0
+    return round(cached_input_tokens / total_input_tokens, 4)
