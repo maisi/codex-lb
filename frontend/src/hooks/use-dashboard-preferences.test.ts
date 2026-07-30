@@ -83,4 +83,61 @@ describe("useDashboardPreferencesStore", () => {
     expect(useDashboardPreferencesStore.getState().accountListSort).toBeNull();
     expect(window.localStorage.getItem("codex-lb-dashboard-account-list-sort")).toBeNull();
   });
+
+  it("defaults request-log columns to the existing table layout", async () => {
+    const { DEFAULT_REQUEST_LOG_COLUMNS, useDashboardPreferencesStore } = await import(
+      "@/hooks/use-dashboard-preferences"
+    );
+
+    useDashboardPreferencesStore.getState().initializePreferences();
+
+    expect(useDashboardPreferencesStore.getState().requestLogColumns).toEqual(DEFAULT_REQUEST_LOG_COLUMNS);
+    expect(window.localStorage.getItem("codex-lb-dashboard-request-log-columns-v1")).toBe(
+      JSON.stringify(DEFAULT_REQUEST_LOG_COLUMNS),
+    );
+  });
+
+  it("persists and restores request-log column selections", async () => {
+    const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
+
+    useDashboardPreferencesStore.getState().setRequestLogColumns(["time", "model", "effort", "status"]);
+    useDashboardPreferencesStore.setState({ requestLogColumns: ["time"] });
+    useDashboardPreferencesStore.getState().initializePreferences();
+
+    expect(useDashboardPreferencesStore.getState().requestLogColumns).toEqual([
+      "time",
+      "model",
+      "effort",
+      "status",
+    ]);
+  });
+
+  it("keeps known request-log columns once and ignores stale IDs", async () => {
+    window.localStorage.setItem(
+      "codex-lb-dashboard-request-log-columns-v1",
+      JSON.stringify(["model", "removed-column", "effort", "model"]),
+    );
+    const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
+
+    useDashboardPreferencesStore.getState().initializePreferences();
+
+    expect(useDashboardPreferencesStore.getState().requestLogColumns).toEqual(["model", "effort"]);
+    expect(window.localStorage.getItem("codex-lb-dashboard-request-log-columns-v1")).toBe(
+      JSON.stringify(["model", "effort"]),
+    );
+  });
+
+  it.each(["not-json", JSON.stringify(["removed-column"])])(
+    "falls back from invalid request-log columns: %s",
+    async (stored) => {
+      window.localStorage.setItem("codex-lb-dashboard-request-log-columns-v1", stored);
+      const { DEFAULT_REQUEST_LOG_COLUMNS, useDashboardPreferencesStore } = await import(
+        "@/hooks/use-dashboard-preferences"
+      );
+
+      useDashboardPreferencesStore.getState().initializePreferences();
+
+      expect(useDashboardPreferencesStore.getState().requestLogColumns).toEqual(DEFAULT_REQUEST_LOG_COLUMNS);
+    },
+  );
 });

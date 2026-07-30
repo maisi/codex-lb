@@ -1,4 +1,4 @@
-import { Inbox } from "lucide-react";
+import { Inbox, SlidersHorizontal } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -17,6 +17,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Table,
   TableBody,
   TableCell,
@@ -27,6 +35,12 @@ import {
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { RequestArchivePanel } from "@/features/conversation-archive/components/request-archive-panel";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
+import {
+  DEFAULT_REQUEST_LOG_COLUMNS,
+  REQUEST_LOG_COLUMN_IDS,
+  useDashboardPreferencesStore,
+  type RequestLogColumnId,
+} from "@/hooks/use-dashboard-preferences";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatDateTimeInline,
@@ -71,6 +85,22 @@ const REQUEST_KIND_LABELS: Record<string, string> = {
   normal: "Normal",
   warmup: "Warmup",
   limit_warmup: "Warmup",
+};
+
+const REQUEST_LOG_COLUMN_WIDTHS: Record<RequestLogColumnId, number> = {
+  time: 112,
+  account: 160,
+  plan: 96,
+  apiKey: 128,
+  model: 176,
+  effort: 96,
+  transport: 128,
+  status: 96,
+  ttft: 80,
+  tps: 80,
+  tokens: 96,
+  cost: 80,
+  details: 288,
 };
 
 export type RecentRequestsTableProps = {
@@ -175,7 +205,35 @@ export function RecentRequestsTable({
   const { t } = useTranslation();
   const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
   const blurred = usePrivacyStore((s) => s.blurred);
+  const visibleColumns = useDashboardPreferencesStore((s) => s.requestLogColumns);
+  const setVisibleColumns = useDashboardPreferencesStore((s) => s.setRequestLogColumns);
+  const visibleColumnSet = new Set(visibleColumns);
+  const tableMinWidth = visibleColumns.reduce((width, column) => width + REQUEST_LOG_COLUMN_WIDTHS[column], 0);
   const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest, t);
+
+  const columnLabels: Record<RequestLogColumnId, string> = {
+    time: t("dashboard.requests.columns.time"),
+    account: t("dashboard.requests.columns.account"),
+    plan: t("dashboard.requests.columns.plan"),
+    apiKey: t("dashboard.requests.columns.apiKey"),
+    model: t("dashboard.requests.columns.model"),
+    effort: t("dashboard.requests.columns.effort"),
+    transport: t("dashboard.requests.columns.transport"),
+    status: t("dashboard.requests.columns.status"),
+    ttft: "TTFT",
+    tps: "TPS",
+    tokens: t("dashboard.requests.columns.tokens"),
+    cost: t("dashboard.requests.columns.cost"),
+    details: t("dashboard.requests.columns.details"),
+  };
+
+  function toggleColumn(column: RequestLogColumnId): void {
+    if (visibleColumnSet.has(column)) {
+      setVisibleColumns(visibleColumns.filter((current) => current !== column));
+      return;
+    }
+    setVisibleColumns(REQUEST_LOG_COLUMN_IDS.filter((current) => visibleColumnSet.has(current) || current === column));
+  }
 
   const accountLabelMap = useMemo(() => {
     const index = new Map<string, string>();
@@ -209,23 +267,51 @@ export function RecentRequestsTable({
 
   return (
     <div className="space-y-3">
-    <div className="rounded-xl border bg-card">
-      <div className="relative overflow-x-auto">
-        <Table className="w-full table-fixed">
+      <div className="flex justify-end">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="outline" size="sm" className="gap-2">
+              <SlidersHorizontal className="size-4" />
+              {t("dashboard.requests.columns.choose")}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            {REQUEST_LOG_COLUMN_IDS.map((column) => (
+              <DropdownMenuCheckboxItem
+                key={column}
+                checked={visibleColumnSet.has(column)}
+                disabled={visibleColumns.length === 1 && visibleColumnSet.has(column)}
+                onCheckedChange={() => toggleColumn(column)}
+                onSelect={(event) => event.preventDefault()}
+              >
+                {columnLabels[column]}
+              </DropdownMenuCheckboxItem>
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => setVisibleColumns(DEFAULT_REQUEST_LOG_COLUMNS)}>
+              {t("dashboard.requests.columns.reset")}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      <div className="rounded-xl border bg-card">
+        <div className="relative overflow-x-auto">
+        <Table className="w-full table-fixed" style={{ minWidth: `${tableMinWidth}px` }}>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.time")}</TableHead>
-              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.account")}</TableHead>
-              <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.plan")}</TableHead>
-              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.apiKey")}</TableHead>
-              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.model")}</TableHead>
-              <TableHead className="w-32 pr-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.transport")}</TableHead>
-              <TableHead className="w-24 pl-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.status")}</TableHead>
-              <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">TTFT</TableHead>
-              <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">TPS</TableHead>
-              <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.tokens")}</TableHead>
-              <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.cost")}</TableHead>
-              <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.details")}</TableHead>
+              {visibleColumnSet.has("time") ? <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.time}</TableHead> : null}
+              {visibleColumnSet.has("account") ? <TableHead className="w-40 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.account}</TableHead> : null}
+              {visibleColumnSet.has("plan") ? <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.plan}</TableHead> : null}
+              {visibleColumnSet.has("apiKey") ? <TableHead className="w-32 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.apiKey}</TableHead> : null}
+              {visibleColumnSet.has("model") ? <TableHead className="w-44 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.model}</TableHead> : null}
+              {visibleColumnSet.has("effort") ? <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.effort}</TableHead> : null}
+              {visibleColumnSet.has("transport") ? <TableHead className="w-32 pr-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.transport}</TableHead> : null}
+              {visibleColumnSet.has("status") ? <TableHead className="w-24 pl-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.status}</TableHead> : null}
+              {visibleColumnSet.has("ttft") ? <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.ttft}</TableHead> : null}
+              {visibleColumnSet.has("tps") ? <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.tps}</TableHead> : null}
+              {visibleColumnSet.has("tokens") ? <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.tokens}</TableHead> : null}
+              {visibleColumnSet.has("cost") ? <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.cost}</TableHead> : null}
+              {visibleColumnSet.has("details") ? <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.details}</TableHead> : null}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -245,20 +331,20 @@ export function RecentRequestsTable({
 
               return (
                 <TableRow key={request.requestId}>
-                  <TableCell className="pl-4 align-top">
+                  {visibleColumnSet.has("time") ? <TableCell className="pl-4 align-top">
                     <div className="leading-tight">
                       <div className="text-sm font-medium">{time.time}</div>
                       <div className="text-xs text-muted-foreground">{time.date}</div>
                     </div>
-                  </TableCell>
-                  <TableCell className="truncate align-top text-sm">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("account") ? <TableCell className="truncate align-top text-sm">
                     {isEmailLabel && blurred ? (
                       <span className="privacy-blur">{accountLabel}</span>
                     ) : (
                       accountLabel
                     )}
-                  </TableCell>
-                  <TableCell className="align-top">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("plan") ? <TableCell className="align-top">
                     {planType ? (
                       <Badge
                         variant="outline"
@@ -269,14 +355,18 @@ export function RecentRequestsTable({
                     ) : (
                       <span className="text-xs text-muted-foreground">--</span>
                     )}
-                  </TableCell>
-                  <TableCell className="truncate align-top text-xs text-muted-foreground">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("apiKey") ? <TableCell className="truncate align-top text-xs text-muted-foreground">
                     {request.apiKeyName || "--"}
-                  </TableCell>
-                  <TableCell className="truncate align-top">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("model") ? <TableCell className="truncate align-top">
                     <div className="leading-tight">
                       <span className="font-mono text-xs">
-                        {formatModelLabel(request.model, request.reasoningEffort, visibleServiceTier)}
+                        {formatModelLabel(
+                          request.model,
+                          visibleColumnSet.has("effort") ? null : request.reasoningEffort,
+                          visibleServiceTier,
+                        )}
                       </span>
                       {request.requestKind === "warmup" || request.requestKind === "limit_warmup" ? (
                         <div className="mt-1 text-xs text-muted-foreground">
@@ -289,8 +379,13 @@ export function RecentRequestsTable({
                         </div>
                       ) : null}
                     </div>
-                  </TableCell>
-                  <TableCell className="pr-3 align-top">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("effort") ? (
+                    <TableCell className="align-top font-mono text-xs">
+                      {request.reasoningEffort ? formatSlug(request.reasoningEffort) : "--"}
+                    </TableCell>
+                  ) : null}
+                  {visibleColumnSet.has("transport") ? <TableCell className="pr-3 align-top">
                     {request.transport ? (
                       <div className="space-y-1">
                         <Badge
@@ -309,22 +404,22 @@ export function RecentRequestsTable({
                     ) : (
                       <span className="text-xs text-muted-foreground">--</span>
                     )}
-                  </TableCell>
-                  <TableCell className="pl-3 align-top">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("status") ? <TableCell className="pl-3 align-top">
                     <Badge
                       variant="outline"
                       className={STATUS_CLASS_MAP[request.status] ?? STATUS_CLASS_MAP.error}
                     >
                       {t(`dashboard.requestStatus.${request.status}`, { defaultValue: REQUEST_STATUS_LABELS[request.status] ?? request.status })}
                     </Badge>
-                  </TableCell>
-                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("ttft") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {formatCompactElapsed(request.latencyFirstTokenMs) ?? "--"}
-                  </TableCell>
-                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("tps") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {generationSpeed ?? "--"}
-                  </TableCell>
-                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("tokens") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     <div className="leading-tight">
                       <div>{formatCompactNumber(request.tokens)}</div>
                       {request.cachedInputTokens != null && request.cachedInputTokens > 0 && (
@@ -333,11 +428,11 @@ export function RecentRequestsTable({
                         </div>
                       )}
                     </div>
-                  </TableCell>
-                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("cost") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {formatCurrency(request.costUsd)}
-                  </TableCell>
-                  <TableCell className="pr-4 align-top whitespace-normal">
+                  </TableCell> : null}
+                  {visibleColumnSet.has("details") ? <TableCell className="pr-4 align-top whitespace-normal">
                     {hasError ? (
                       <div className="space-y-2">
                         {request.errorCode ? (
@@ -371,14 +466,14 @@ export function RecentRequestsTable({
                         {t("dashboard.requests.viewDetails")}
                       </Button>
                     )}
-                  </TableCell>
+                  </TableCell> : null}
                 </TableRow>
               );
             })}
           </TableBody>
         </Table>
+        </div>
       </div>
-    </div>
 
       <div className="flex justify-end">
         <PaginationControls

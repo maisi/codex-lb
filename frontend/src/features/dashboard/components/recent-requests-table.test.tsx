@@ -1,7 +1,12 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
+import {
+  DEFAULT_REQUEST_LOG_COLUMNS,
+  useDashboardPreferencesStore,
+} from "@/hooks/use-dashboard-preferences";
 
 const ISO = "2026-01-01T12:00:00+00:00";
 const NULL_FAILURE_METADATA = {
@@ -56,6 +61,7 @@ describe("RecentRequestsTable", () => {
   beforeEach(() => {
     toastSuccess.mockReset();
     toastError.mockReset();
+    useDashboardPreferencesStore.getState().setRequestLogColumns(DEFAULT_REQUEST_LOG_COLUMNS);
   });
 
   afterEach(() => {
@@ -173,6 +179,123 @@ describe("RecentRequestsTable", () => {
     });
 
     expect(writeText).toHaveBeenCalledWith(longError);
+  });
+
+  it("lets the device replace transport with a dedicated effort column", async () => {
+    const user = userEvent.setup();
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-columns",
+            planType: "plus",
+            apiKeyName: "Key Columns",
+            apiKeyId: "key-columns",
+            requestId: "req-columns",
+            conversationId: null,
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: "default",
+            requestedServiceTier: null,
+            actualServiceTier: "default",
+            transport: "websocket",
+            upstreamTransport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            ...NULL_USERAGENT_METADATA,
+            tokens: 1200,
+            inputTokens: 1000,
+            outputTokens: 200,
+            outputTokensRaw: 200,
+            reasoningTokens: 40,
+            cachedInputTokens: 0,
+            reasoningEffort: "high",
+            costUsd: 0.01,
+            costBreakdown: null,
+            latencyMs: 1000,
+            latencyFirstTokenMs: 200,
+            latencyQueueMs: null,
+          },
+        ]}
+      />,
+    );
+
+    const table = screen.getByRole("table");
+    const defaultMinWidth = table.style.minWidth;
+    await user.click(screen.getByRole("button", { name: "Columns" }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: "Effort" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Transport" }));
+    await user.keyboard("{Escape}");
+
+    expect(screen.getByRole("columnheader", { name: "Effort" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Transport" })).not.toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "High" })).toBeInTheDocument();
+    expect(screen.getByText("gpt-5.1 (default)")).toBeInTheDocument();
+    expect(table.style.minWidth).not.toBe(defaultMinWidth);
+    expect(window.localStorage.getItem("codex-lb-dashboard-request-log-columns-v1")).toContain("effort");
+    expect(window.localStorage.getItem("codex-lb-dashboard-request-log-columns-v1")).not.toContain("transport");
+  });
+
+  it("keeps the final visible column selected and can reset the layout", async () => {
+    const user = userEvent.setup();
+    useDashboardPreferencesStore.getState().setRequestLogColumns(["effort"]);
+
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: null,
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-single-column",
+            conversationId: null,
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            ...NULL_USERAGENT_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            outputTokensRaw: 0,
+            cachedInputTokens: 0,
+            reasoningEffort: "medium",
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
+          },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Columns" }));
+
+    expect(await screen.findByRole("menuitemcheckbox", { name: "Effort" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    await user.click(screen.getByRole("menuitem", { name: "Reset columns" }));
+    expect(screen.getByRole("columnheader", { name: "Time" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Effort" })).not.toBeInTheDocument();
   });
 
   it("shows TTFT and output-token TPS beside tokens", () => {
