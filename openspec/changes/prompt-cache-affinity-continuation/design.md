@@ -30,7 +30,9 @@ Continuation requires a list input longer than the stored prefix, exact canonica
 
 ### Linearize prompt-cache continuation with response creation
 
-Prompt-cache continuation is prepared only while the bridge response-create gate owns the send slot. This prevents two concurrent full resends from independently selecting the same stale parent. If the invariant cannot be established at that point, the request remains a full resend and `first_turn`.
+Prompt-cache continuation is prepared only while the bridge response-create gate owns the send slot, and only when no other turn is pending on the lane. If the invariant cannot be established at that point, the request remains a full resend and `first_turn`.
+
+The gate alone is not sufficient: it is released on `response.created`, so a terminal event can pop its request from the pending queue and then await the durable anchor write before `last_completed_*` is refreshed. A turn admitted inside that window would see an empty pending queue and derive a continuation from the *previous* turn's anchor. Settling an upstream event therefore also marks the session's anchor as ambiguous for the duration of that settlement, so the window is closed by an explicit flag rather than by gate timing.
 
 ### Fall back once with the original request
 

@@ -393,6 +393,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _record_websocket_responses_lite_acceptance,
     _record_websocket_stale_anchor_failure,
     _release_websocket_response_create_gate,
+    _restore_prompt_cache_continuation_soft_capacity_reroute,
     _rewrite_websocket_continuity_corruption_event,
     _rewrite_websocket_downstream_response_id,
     _rewrite_websocket_previous_response_owner_unavailable_event,
@@ -4052,6 +4053,7 @@ class _WebSocketMixin:
                         )
                         request_state.request_stage = "first_turn"
                         request_state.preferred_account_id = None
+                        _restore_prompt_cache_continuation_soft_capacity_reroute(request_state)
                     request_state.request_text = request_state.fresh_upstream_request_text
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False

@@ -10,7 +10,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import aiohttp
 import anyio
@@ -2368,7 +2368,11 @@ async def test_prompt_cache_continuation_injects_exact_prefix_and_forwards_only_
     assert request_state.bridge_soft_capacity_reroute_allowed is False
     assert request_state.input_item_count == original_count == len(stored_items) + 1
     assert request_state.input_full_fingerprint == original_fingerprint
-    record_outcome.assert_called_once_with(outcome="attempt", reason="eligible", request_id="req-openclaw")
+    assert record_outcome.call_args_list == [
+        call(outcome="attempt", reason="eligible", request_id="req-openclaw"),
+        call(outcome="success", reason="exact_prefix", request_id="req-openclaw"),
+    ]
+    assert request_state.prompt_cache_continuation_success_recorded is True
 
 
 @pytest.mark.asyncio
@@ -2424,6 +2428,55 @@ async def test_prompt_cache_continuation_skips_while_another_turn_is_pending() -
 
     assert prepared == text_data
     assert request_state.previous_response_id is None
+
+
+@pytest.mark.asyncio
+async def test_prompt_cache_continuation_skips_while_a_completion_is_settling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The terminal request is popped from ``pending_requests`` before the
+    # durable anchor write refreshes ``last_completed_*``, so an empty pending
+    # queue alone does not prove the anchor is settled.
+    service, session, request_state, text_data, _stored_items = _make_prompt_cache_continuation_case()
+    record_outcome = Mock()
+    monkeypatch.setattr(http_bridge_request_submit_module, "_record_prompt_cache_continuation", record_outcome)
+    assert not session.pending_requests
+    session.continuation_completion_pending = True
+
+    prepared = await service._prepare_prompt_cache_affinity_continuation(
+        session,
+        request_state=request_state,
+        text_data=text_data,
+    )
+
+    assert prepared == text_data
+    assert request_state.previous_response_id is None
+    assert request_state.request_stage == "first_turn"
+    assert record_outcome.call_args_list == [
+        call(outcome="attempt", reason="eligible", request_id="req-openclaw"),
+        call(outcome="skipped", reason="pending_request", request_id="req-openclaw"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_flags_and_clears_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session, _request_state, _text_data, _stored_items = _make_prompt_cache_continuation_case()
+    observed: list[bool] = []
+
+    async def _settlement(bridge_session: Any, text: str) -> None:
+        observed.append(bridge_session.continuation_completion_pending)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(service, "_process_http_bridge_upstream_text_settlement", _settlement)
+
+    with pytest.raises(RuntimeError):
+        await service._process_http_bridge_upstream_text(session, "{}")
+
+    assert observed == [True]
+    # An exception must not leave the session permanently ambiguous.
+    assert session.continuation_completion_pending is False
 
 
 @pytest.mark.asyncio

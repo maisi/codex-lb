@@ -560,6 +560,25 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
         text: str,
     ) -> None:
+        # Settling an upstream event can pop the terminal request from
+        # ``pending_requests`` and then await the durable anchor write before
+        # ``session.last_completed_*`` is refreshed. Flag the whole settlement
+        # so prompt-cache continuation treats the anchor as ambiguous for its
+        # duration; the previous value is restored so nesting cannot clear an
+        # outer settlement, and ``finally`` keeps an early return or an
+        # exception from leaving the session permanently ambiguous.
+        previous_completion_pending = session.continuation_completion_pending
+        session.continuation_completion_pending = True
+        try:
+            await self._process_http_bridge_upstream_text_settlement(session, text)
+        finally:
+            session.continuation_completion_pending = previous_completion_pending
+
+    async def _process_http_bridge_upstream_text_settlement(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        text: str,
+    ) -> None:
         original_text = text
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)

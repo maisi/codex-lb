@@ -28,4 +28,34 @@ describe("ApiKeyCacheUsage", () => {
     expect(screen.getByText("25.0%")).toBeInTheDocument();
     expect(screen.getByText(/no saved tokens are inferred/i)).toBeInTheDocument();
   });
+
+  it("labels rows whose key metadata is gone and rows with no key at all", () => {
+    render(
+      <ApiKeyCacheUsage
+        data={[
+          {
+            apiKeyId: "key_deleted",
+            apiKeyName: null,
+            keyPrefix: null,
+            requests: 1,
+            totalInputTokens: 400,
+            cachedInputTokens: 0,
+            cacheHitRatio: 0,
+          },
+          {
+            apiKeyId: null,
+            apiKeyName: null,
+            keyPrefix: null,
+            requests: 1,
+            totalInputTokens: 100,
+            cachedInputTokens: 0,
+            cacheHitRatio: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("key_deleted (deleted)")).toBeInTheDocument();
+    expect(screen.getByText("No API key")).toBeInTheDocument();
+  });
 });

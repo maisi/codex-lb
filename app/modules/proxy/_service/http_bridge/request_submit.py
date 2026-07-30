@@ -375,9 +375,24 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state.fresh_upstream_request_responses_lite_model = request_state.responses_lite_model
         request_state.request_stage = "follow_up"
         request_state.preferred_account_id = session.account.id
+        # An anchored turn must stay on this account, so soft-capacity reroute
+        # is withdrawn for as long as the anchor is attached. The prior value
+        # is kept so a fallback to the full resend can restore it.
+        request_state.prompt_cache_continuation_prior_soft_capacity_reroute = (
+            request_state.bridge_soft_capacity_reroute_allowed
+        )
         request_state.bridge_soft_capacity_reroute_allowed = False
         request_state.request_text = continued_text
         _enforce_response_create_size_limit(request_state)
+        # Recorded only once the rewritten payload has survived the size limit,
+        # so the counter never claims a continuation that was not dispatched.
+        if not request_state.prompt_cache_continuation_success_recorded:
+            request_state.prompt_cache_continuation_success_recorded = True
+            _record_prompt_cache_continuation(
+                outcome="success",
+                reason="exact_prefix",
+                request_id=request_state.request_log_id or request_state.request_id,
+            )
         return continued_text
 
     def _prepare_http_bridge_request(

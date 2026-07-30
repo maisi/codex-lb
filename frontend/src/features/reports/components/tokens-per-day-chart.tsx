@@ -74,15 +74,6 @@ export function TokensPerDayChart({ startDate, endDate, data }: TokensPerDayChar
             />
             <Area
               type="monotone"
-              dataKey="cached"
-              stroke="#0d9488"
-              strokeWidth={2}
-              fill="url(#cachedGrad)"
-              dot={false}
-              activeDot={{ r: 4, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
-            />
-            <Area
-              type="monotone"
               dataKey="input"
               stroke="#8b5cf6"
               strokeWidth={2}
@@ -96,6 +87,18 @@ export function TokensPerDayChart({ startDate, endDate, data }: TokensPerDayChar
               stroke="#ec4899"
               strokeWidth={2}
               fill="url(#outputGrad)"
+              dot={false}
+              activeDot={{ r: 4, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
+            />
+            {/* Cached input is a subset of total input, so it is overlaid
+                (never stacked) and drawn last to stay legible above the
+                translucent input fill. */}
+            <Area
+              type="monotone"
+              dataKey="cached"
+              stroke="#0d9488"
+              strokeWidth={2}
+              fill="url(#cachedGrad)"
               dot={false}
               activeDot={{ r: 4, strokeWidth: 1.5, fill: "hsl(var(--popover))" }}
             />

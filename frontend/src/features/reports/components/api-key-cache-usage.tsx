@@ -28,24 +28,31 @@ export function ApiKeyCacheUsage({ data }: ApiKeyCacheUsageProps) {
             </tr>
           </thead>
           <tbody>
-            {data.map((entry) => (
-              <tr key={entry.apiKeyId ?? "unattributed"} className="border-t">
-                <td className="py-2 font-mono text-xs text-foreground">
-                  {entry.apiKeyName
-                    ? `${entry.apiKeyName}${entry.keyPrefix ? ` (${entry.keyPrefix}...)` : ""}`
-                    : entry.apiKeyId ?? t("reports.apiKeyCache.unattributed")}
-                </td>
-                <td className="py-2 text-right tabular-nums">
-                  {entry.totalInputTokens.toLocaleString()}
-                </td>
-                <td className="py-2 text-right tabular-nums">
-                  {entry.cachedInputTokens.toLocaleString()}
-                </td>
-                <td className="py-2 text-right tabular-nums">
-                  {(entry.cacheHitRatio * 100).toFixed(1)}%
-                </td>
-              </tr>
-            ))}
+            {data.map((entry) => {
+              // Historical rows outlive their key: the log keeps the id after
+              // the key row is gone, so label those as deleted rather than
+              // showing a bare id that reads like an active key.
+              const label = entry.apiKeyName
+                ? `${entry.apiKeyName}${entry.keyPrefix ? ` (${entry.keyPrefix}...)` : ""}`
+                : entry.apiKeyId
+                  ? t("reports.apiKeyCache.deletedKey", { id: entry.apiKeyId })
+                  : t("reports.apiKeyCache.unattributed");
+
+              return (
+                <tr key={entry.apiKeyId ?? "unattributed"} className="border-t">
+                  <td className="py-2 font-mono text-xs text-foreground">{label}</td>
+                  <td className="py-2 text-right tabular-nums">
+                    {entry.totalInputTokens.toLocaleString()}
+                  </td>
+                  <td className="py-2 text-right tabular-nums">
+                    {entry.cachedInputTokens.toLocaleString()}
+                  </td>
+                  <td className="py-2 text-right tabular-nums">
+                    {(entry.cacheHitRatio * 100).toFixed(1)}%
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

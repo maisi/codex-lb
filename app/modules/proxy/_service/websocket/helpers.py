@@ -359,6 +359,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
         if request_state.prompt_cache_continuation_attempted:
             request_state.request_stage = "first_turn"
             request_state.preferred_account_id = None
+            _restore_prompt_cache_continuation_soft_capacity_reroute(request_state)
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_text = request_state.request_text
     if not isinstance(request_text, str):
@@ -411,8 +412,25 @@ def _prepare_websocket_request_state_for_account_switch(
     request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
     if request_state.prompt_cache_continuation_attempted:
         request_state.request_stage = "first_turn"
+        _restore_prompt_cache_continuation_soft_capacity_reroute(request_state)
     _refresh_websocket_request_input_fingerprint_from_text(request_state)
     return request_state.request_text
+
+
+def _restore_prompt_cache_continuation_soft_capacity_reroute(
+    request_state: "_WebSocketRequestState",
+) -> None:
+    """Give back the reroute permission withdrawn when an anchor was injected.
+
+    The full resend is self-contained again, so it is no longer pinned to the
+    account that owned the anchor.
+    """
+
+    prior_reroute_allowed = request_state.prompt_cache_continuation_prior_soft_capacity_reroute
+    if prior_reroute_allowed is None:
+        return
+    request_state.bridge_soft_capacity_reroute_allowed = prior_reroute_allowed
+    request_state.prompt_cache_continuation_prior_soft_capacity_reroute = None
 
 
 def _websocket_continuity_anchor_for_payload(

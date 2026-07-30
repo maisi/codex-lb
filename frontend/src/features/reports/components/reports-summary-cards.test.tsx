@@ -63,6 +63,7 @@ describe("ReportsSummaryCards", () => {
           totalInputTokens: 300,
           totalOutputTokens: 150,
           totalCachedTokens: 0,
+          cacheHitRatio: 0,
           totalRequests: 1500,
           totalErrors: 0,
           totalConversations: 0,
@@ -90,6 +91,7 @@ describe("ReportsSummaryCards", () => {
           totalInputTokens: 300,
           totalOutputTokens: 150,
           totalCachedTokens: 0,
+          cacheHitRatio: 0,
           totalRequests: 1500,
           totalErrors: 0,
           totalConversations: 0,
@@ -127,6 +129,7 @@ describe("ReportsSummaryCards", () => {
           totalInputTokens: 300,
           totalOutputTokens: 150,
           totalCachedTokens: 0,
+          cacheHitRatio: 0,
           totalRequests: 1500,
           totalErrors: 0,
           totalConversations: 0,
@@ -152,7 +155,7 @@ describe("ReportsSummaryCards", () => {
   it("renders Conversations card immediately after Requests with distinctive value", () => {
     render(
       <ReportsSummaryCards
-        summary={{ totalCostUsd: 15, totalInputTokens: 300, totalOutputTokens: 150, totalCachedTokens: 0, totalRequests: 1500, totalErrors: 0, totalConversations: 42, activeAccounts: 3, avgCostPerDay: 5, avgRequestsPerDay: 500 }}
+        summary={{ totalCostUsd: 15, totalInputTokens: 300, totalOutputTokens: 150, totalCachedTokens: 0, cacheHitRatio: 0, totalRequests: 1500, totalErrors: 0, totalConversations: 42, activeAccounts: 3, avgCostPerDay: 5, avgRequestsPerDay: 500 }}
         comparison={{ canCompare: false, previous: { totalCostUsd: 0, totalTokens: 0, totalRequests: 0 } }}
       />,
     );
@@ -173,6 +176,7 @@ describe("ReportsSummaryCards", () => {
           totalInputTokens: 100_000_000_000,
           totalOutputTokens: 0,
           totalCachedTokens: 0,
+          cacheHitRatio: 0,
           totalRequests: 100_000,
           totalErrors: 0,
           totalConversations: 0,

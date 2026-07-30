@@ -87,6 +87,6 @@ export type ModelCostEntry = z.infer<typeof ModelCostEntrySchema>;
 export type UseragentCostEntry = z.infer<typeof UseragentCostEntrySchema>;
 export type AccountCostEntry = z.infer<typeof AccountCostEntrySchema>;
 export type ApiKeyCacheEntry = z.infer<typeof ApiKeyCacheEntrySchema>;
-export type ReportSummary = z.input<typeof ReportSummarySchema>;
+export type ReportSummary = z.infer<typeof ReportSummarySchema>;
 export type ReportComparison = z.infer<typeof ReportComparisonSchema>;
 export type ReportsResponse = z.infer<typeof ReportsResponseSchema>;

@@ -949,6 +949,7 @@
   "reports.apiKeyCache.cached": "Cached input",
   "reports.apiKeyCache.hitRatio": "Cache-hit ratio",
   "reports.apiKeyCache.unattributed": "No API key",
+  "reports.apiKeyCache.deletedKey": "{{id}} (deleted)",
   "settings.page.title": "Settings",
   "settings.page.subtitle": "Configure appearance, auth, and API keys. Power-user tuning lives in the Advanced settings group below.",
   "settings.page.readOnlyNotice": "You are viewing the dashboard with read-only guest access. Admin controls are disabled.",
