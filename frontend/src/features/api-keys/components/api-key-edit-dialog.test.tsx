@@ -445,6 +445,29 @@ describe("ApiKeyEditDialog", () => {
     expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).toBeChecked();
   });
 
+  it("shows and submits the stored continuation value", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ promptCacheAffinityContinuation: true })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const continuation = screen.getByRole("checkbox", { name: "Continue prompt-cache-affinity responses" });
+    expect(continuation).toBeChecked();
+    await user.click(continuation);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].promptCacheAffinityContinuation).toBe(false);
+  });
+
   it("submits opportunistic traffic class", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

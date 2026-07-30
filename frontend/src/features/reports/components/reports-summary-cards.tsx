@@ -25,19 +25,22 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
       comparison: buildComparison(summary.totalCostUsd, comparison.previous.totalCostUsd, comparison.canCompare),
     },
     {
-      id: "tokens",
-      label: t("reports.summary.tokens"),
-      value: formatNumber(summary.totalInputTokens + summary.totalOutputTokens),
-      sub: t("reports.summary.tokensSub", {
-        input: formatNumber(summary.totalInputTokens),
-        cache: formatNumber(summary.totalCachedTokens),
-        output: formatNumber(summary.totalOutputTokens),
-      }),
-      comparison: buildComparison(
-        summary.totalInputTokens + summary.totalOutputTokens,
-        comparison.previous.totalTokens,
-        comparison.canCompare,
-      ),
+      id: "input-tokens",
+      label: t("reports.summary.inputTokens"),
+      value: formatNumber(summary.totalInputTokens),
+      sub: t("reports.summary.providerReported"),
+    },
+    {
+      id: "cached-input",
+      label: t("reports.summary.cachedInputTokens"),
+      value: formatNumber(summary.totalCachedTokens),
+      sub: t("reports.summary.cachedIncluded"),
+    },
+    {
+      id: "cache-hit-ratio",
+      label: t("reports.summary.cacheHitRatio"),
+      value: `${((summary.cacheHitRatio ?? 0) * 100).toFixed(1)}%`,
+      sub: t("reports.summary.providerReported"),
     },
     {
       id: "requests",
@@ -57,7 +60,7 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
   ];
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-6">
       {cards.map((card) => (
         <div
           key={card.id}

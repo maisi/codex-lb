@@ -891,3 +891,82 @@ async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups
         ("CodexCLI", 0.3, 1),
         ("Missing User-Agent", 0.1, 1),
     ]
+
+
+@pytest.mark.asyncio
+async def test_cache_usage_clamps_each_row_and_groups_repeated_api_key_filters(
+    async_session: AsyncSession,
+) -> None:
+    async_session.add_all(
+        [
+            RequestLog(
+                api_key_id="key_a",
+                request_id="cache-report-a-valid",
+                requested_at=datetime(2026, 6, 1, 10, 0),
+                model="gpt-5.1",
+                status="success",
+                input_tokens=100,
+                cached_input_tokens=40,
+            ),
+            RequestLog(
+                api_key_id="key_a",
+                request_id="cache-report-a-overflow",
+                requested_at=datetime(2026, 6, 1, 11, 0),
+                model="gpt-5.1",
+                status="success",
+                input_tokens=20,
+                cached_input_tokens=50,
+            ),
+            RequestLog(
+                api_key_id="key_b",
+                request_id="cache-report-b-negative",
+                requested_at=datetime(2026, 6, 2, 10, 0),
+                model="gpt-5.1",
+                status="success",
+                input_tokens=80,
+                cached_input_tokens=-10,
+            ),
+            RequestLog(
+                api_key_id="key_c",
+                request_id="cache-report-filtered-out",
+                requested_at=datetime(2026, 6, 2, 11, 0),
+                model="gpt-5.1",
+                status="success",
+                input_tokens=500,
+                cached_input_tokens=500,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    repo = ReportsRepository(async_session)
+    api_key_ids = ["key_a", "key_b"]
+    summary = await repo.aggregate_summary(
+        datetime(2026, 6, 1),
+        datetime(2026, 6, 3),
+        api_key_ids=api_key_ids,
+    )
+    daily = await repo.aggregate_daily_rows(
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+        timezone.utc,
+        api_key_ids=api_key_ids,
+    )
+    grouped = await repo.aggregate_by_api_key(
+        datetime(2026, 6, 1),
+        datetime(2026, 6, 3),
+        api_key_ids=api_key_ids,
+    )
+
+    assert summary.total_input_tokens == 200
+    assert summary.total_cached_tokens == 60
+    assert [(row.date, row.input_tokens, row.cached_input_tokens) for row in daily] == [
+        ("2026-06-01", 120, 60),
+        ("2026-06-02", 80, 0),
+    ]
+    assert [
+        (row.api_key_id, row.request_count, row.total_input_tokens, row.cached_input_tokens) for row in grouped
+    ] == [
+        ("key_a", 2, 120, 60),
+        ("key_b", 1, 80, 0),
+    ]

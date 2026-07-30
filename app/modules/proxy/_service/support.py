@@ -784,6 +784,8 @@ class _WebSocketRequestState:
     previous_response_id: str | None = None
     session_id: str | None = None
     proxy_injected_previous_response_id: bool = False
+    prompt_cache_continuation_attempted: bool = False
+    prompt_cache_continuation_success_recorded: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
@@ -918,6 +920,8 @@ class _HTTPBridgeSession:
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
+    last_completed_account_id: str | None = None
+    continuation_completion_pending: bool = False
     last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None

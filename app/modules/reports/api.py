@@ -31,6 +31,7 @@ async def get_reports(
     account_id: Annotated[list[str] | None, Query()] = None,
     model: Annotated[str | None, Query()] = None,
     useragent_group: Annotated[str | None, Query()] = None,
+    api_key_id: Annotated[list[str] | None, Query()] = None,
 ) -> ReportsResponse:
     try:
         return await context.service.get_reports(
@@ -40,6 +41,7 @@ async def get_reports(
             account_ids=account_id,
             model=model,
             useragent_group=useragent_group,
+            api_key_ids=api_key_id,
         )
     except InvalidReportDateRangeError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_report_date_range") from exc

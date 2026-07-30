@@ -86,9 +86,35 @@ describe("TokensPerDayChart", () => {
     );
 
     expect(capturedProps?.data).toEqual([
-      { date: "06-05", input: 5_400_000, output: 59_000 },
-      { date: "06-06", input: 0, output: 0 },
-      { date: "06-07", input: 6_800_000, output: 73_000 },
+      { date: "06-05", input: 5_400_000, cached: 0, output: 59_000 },
+      { date: "06-06", input: 0, cached: 0, output: 0 },
+      { date: "06-07", input: 6_800_000, cached: 0, output: 73_000 },
+    ]);
+  });
+
+  it("renders cached input as its own subset trend", () => {
+    render(
+      <TokensPerDayChart
+        startDate="2026-06-05"
+        endDate="2026-06-05"
+        data={[
+          {
+            date: "2026-06-05",
+            requests: 1,
+            conversations: 0,
+            inputTokens: 100,
+            outputTokens: 20,
+            cachedInputTokens: 40,
+            costUsd: 0,
+            activeAccounts: 1,
+            errorCount: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(capturedProps?.data).toEqual([
+      { date: "06-05", input: 100, cached: 40, output: 20 },
     ]);
   });
 });

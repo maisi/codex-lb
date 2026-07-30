@@ -116,6 +116,9 @@ from app.modules.proxy._service.observability import (
     _interesting_header_keys as _interesting_header_keys,
 )
 from app.modules.proxy._service.observability import (
+    _record_prompt_cache_continuation,
+)
+from app.modules.proxy._service.observability import (
     _tools_hash as _tools_hash,
 )
 from app.modules.proxy._service.observability import (
@@ -286,6 +289,97 @@ def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
 
 
 class _HTTPBridgeRequestSubmitMixin:
+    async def _prepare_prompt_cache_affinity_continuation(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        text_data: str,
+    ) -> str:
+        api_key = request_state.api_key
+        if (
+            session.key.affinity_kind != "prompt_cache"
+            or api_key is None
+            or not api_key.prompt_cache_affinity_continuation
+            or request_state.prompt_cache_continuation_attempted
+        ):
+            return text_data
+
+        request_state.prompt_cache_continuation_attempted = True
+        _record_prompt_cache_continuation(
+            outcome="attempt",
+            reason="eligible",
+            request_id=request_state.request_log_id or request_state.request_id,
+        )
+
+        skip_reason: str | None = None
+        if request_state.previous_response_id is not None:
+            skip_reason = "explicit_anchor"
+        elif session.key.api_key_id != api_key.id or (session.api_key is not None and session.api_key.id != api_key.id):
+            skip_reason = "api_key_mismatch"
+        elif session.request_model != request_state.model:
+            skip_reason = "model_mismatch"
+        elif session.last_completed_account_id != session.account.id or request_state.preferred_account_id not in {
+            None,
+            session.account.id,
+        }:
+            skip_reason = "account_mismatch"
+        elif session.last_completed_response_id is None:
+            skip_reason = "missing_response"
+        elif session.last_completed_input_count <= 0 or session.last_completed_input_prefix_fingerprint is None:
+            skip_reason = "missing_prefix"
+
+        if skip_reason is None:
+            async with session.pending_lock:
+                if session.pending_requests or session.continuation_completion_pending:
+                    skip_reason = "pending_request"
+
+        payload: dict[str, JsonValue] | None = None
+        input_items: list[JsonValue] | None = None
+        if skip_reason is None:
+            try:
+                parsed = json.loads(text_data)
+            except (TypeError, json.JSONDecodeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                payload = cast(dict[str, JsonValue], parsed)
+                raw_input = payload.get("input")
+                if isinstance(raw_input, list):
+                    input_items = cast(list[JsonValue], raw_input)
+            stored_count = session.last_completed_input_count
+            if input_items is None or len(input_items) <= stored_count:
+                skip_reason = "prefix_mismatch"
+            elif (
+                _fingerprint_input_items(input_items[:stored_count]) != session.last_completed_input_prefix_fingerprint
+            ):
+                skip_reason = "prefix_mismatch"
+
+        if skip_reason is not None or payload is None or input_items is None:
+            _record_prompt_cache_continuation(
+                outcome="skipped",
+                reason=skip_reason or "prefix_mismatch",
+                request_id=request_state.request_log_id or request_state.request_id,
+            )
+            return text_data
+
+        response_id = session.last_completed_response_id
+        assert response_id is not None
+        stored_count = session.last_completed_input_count
+        payload["previous_response_id"] = response_id
+        payload["input"] = input_items[stored_count:]
+        continued_text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        request_state.previous_response_id = response_id
+        request_state.proxy_injected_previous_response_id = True
+        request_state.fresh_upstream_request_text = text_data
+        request_state.fresh_upstream_request_is_retry_safe = True
+        request_state.fresh_upstream_request_responses_lite_model = request_state.responses_lite_model
+        request_state.request_stage = "follow_up"
+        request_state.preferred_account_id = session.account.id
+        request_state.bridge_soft_capacity_reroute_allowed = False
+        request_state.request_text = continued_text
+        _enforce_response_create_size_limit(request_state)
+        return continued_text
+
     def _prepare_http_bridge_request(
         self: Any,
         payload: ResponsesRequest,
@@ -768,6 +862,11 @@ class _HTTPBridgeRequestSubmitMixin:
                         502,
                         openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
                     )
+                text_data = await self._prepare_prompt_cache_affinity_continuation(
+                    session,
+                    request_state=request_state,
+                    text_data=text_data,
+                )
                 recovery_receipt: DurableBridgeAliasRegistrationReceipt | None = None
                 upstream_send_started = False
                 try:

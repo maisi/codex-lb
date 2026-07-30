@@ -31,6 +31,7 @@ vi.mock("@/lib/api-client", () => ({
     byModel: [],
     byUseragent: [],
     byAccount: [],
+    byApiKey: [],
   }),
 }));
 
@@ -74,6 +75,7 @@ describe("useReports", () => {
             startDate: "2030-01-09",
             endDate: "2030-01-15",
             accountId: ["acct_123"],
+            apiKeyId: ["key_one", "key_two"],
             model: "gpt-5.1",
             useragent: "claude-code",
           },
@@ -91,6 +93,7 @@ describe("useReports", () => {
     expect(searchParams.get("model")).toBe("gpt-5.1");
     expect(searchParams.get("useragent_group")).toBe("claude-code");
     expect(searchParams.getAll("account_id")).toEqual(["acct_123"]);
+    expect(searchParams.getAll("api_key_id")).toEqual(["key_one", "key_two"]);
     expect(searchParams.get("timezone")).toBe("America/Los_Angeles");
   });
 

@@ -12,6 +12,7 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    prompt_cache_continuation_total,
     upstream_transport_decisions_total,
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, canonicalized_tools
@@ -25,6 +26,21 @@ from app.modules.proxy.affinity import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+_PROMPT_CACHE_CONTINUATION_OUTCOMES = {"attempt", "success", "skipped", "fallback"}
+_PROMPT_CACHE_CONTINUATION_REASONS = {
+    "eligible",
+    "exact_prefix",
+    "explicit_anchor",
+    "missing_response",
+    "missing_prefix",
+    "prefix_mismatch",
+    "pending_request",
+    "model_mismatch",
+    "account_mismatch",
+    "api_key_mismatch",
+    "invalid_or_expired_response",
+}
 
 
 def _service_global(name: str, fallback: Any) -> Any:
@@ -55,6 +71,20 @@ def _record_upstream_transport_decision(
         sticky="true" if sticky else "false",
         status="success" if status == "success" else "error",
     ).inc()
+
+
+def _record_prompt_cache_continuation(*, outcome: str, reason: str, request_id: str | None = None) -> None:
+    normalized_outcome = outcome if outcome in _PROMPT_CACHE_CONTINUATION_OUTCOMES else "skipped"
+    normalized_reason = reason if reason in _PROMPT_CACHE_CONTINUATION_REASONS else "prefix_mismatch"
+    counter = _service_global("prompt_cache_continuation_total", prompt_cache_continuation_total)
+    if counter is not None:
+        counter.labels(outcome=normalized_outcome, reason=normalized_reason).inc()
+    logger.info(
+        "prompt_cache_continuation request_id=%s outcome=%s reason=%s",
+        request_id or get_request_id(),
+        normalized_outcome,
+        normalized_reason,
+    )
 
 
 def _maybe_log_proxy_request_shape(

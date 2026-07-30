@@ -29,6 +29,7 @@ class ApiKeyCreateRequest(DashboardModel):
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool = False
     force_include_usage: bool = False
+    prompt_cache_affinity_continuation: bool = False
     enforced_model: str | None = Field(default=None, min_length=1)
     enforced_reasoning_effort: str | None = Field(
         default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh|max|ultra)$"
@@ -49,6 +50,7 @@ class ApiKeyUpdateRequest(DashboardModel):
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool | None = None
     force_include_usage: bool | None = None
+    prompt_cache_affinity_continuation: bool | None = None
     enforced_model: str | None = Field(default=None, min_length=1)
     enforced_reasoning_effort: str | None = Field(
         default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh|max|ultra)$"
@@ -80,6 +82,7 @@ class ApiKeyResponse(DashboardModel):
     allowed_models: list[str] | None
     apply_to_codex_model: bool = False
     force_include_usage: bool = False
+    prompt_cache_affinity_continuation: bool = False
     enforced_model: str | None
     enforced_reasoning_effort: str | None
     enforced_service_tier: str | None

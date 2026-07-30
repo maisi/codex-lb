@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { ReportsSummaryCards } from "./reports-summary-cards";
 
 describe("ReportsSummaryCards", () => {
-  it("renders inline comparison badges for cost, tokens, and requests", () => {
+  it("renders cache usage semantics alongside cost and request comparisons", () => {
     render(
       <ReportsSummaryCards
         summary={{
@@ -13,6 +13,7 @@ describe("ReportsSummaryCards", () => {
           totalInputTokens: 1_600_000_000,
           totalOutputTokens: 13_000_000,
           totalCachedTokens: 990_000_000,
+          cacheHitRatio: 0.61875,
           totalRequests: 1500,
           totalErrors: 0,
           totalConversations: 0,
@@ -37,11 +38,8 @@ describe("ReportsSummaryCards", () => {
       "dark:text-emerald-400",
     );
 
-    const tokensCard = screen.getByTestId("report-summary-card-tokens");
-    expect(within(tokensCard).getByText("▼ 50%")).toHaveClass(
-      "text-red-600",
-      "dark:text-red-400",
-    );
+    const inputCard = screen.getByTestId("report-summary-card-input-tokens");
+    expect(within(inputCard).getByText("Total input tokens")).toBeInTheDocument();
 
     const requestsCard = screen.getByTestId("report-summary-card-requests");
     expect(within(requestsCard).getByText("▲ 50%")).toHaveClass(
@@ -50,8 +48,10 @@ describe("ReportsSummaryCards", () => {
     );
 
     expect(
-      within(tokensCard).getByText("Input 1.6B · Cache 990M · Output 13.0M"),
+      within(screen.getByTestId("report-summary-card-cached-input")).getByText("Included within total input"),
     ).toBeInTheDocument();
+    expect(within(screen.getByTestId("report-summary-card-cache-hit-ratio")).getByText("61.9%"))
+      .toBeInTheDocument();
     expect(within(requestsCard).getByText("avg 500/day · 3 accounts")).toBeInTheDocument();
   });
 
@@ -112,7 +112,7 @@ describe("ReportsSummaryCards", () => {
       within(screen.getByTestId("report-summary-card-total-cost")).queryByText(/^[▲▼] \d+%$/),
     ).not.toBeInTheDocument();
     expect(
-      within(screen.getByTestId("report-summary-card-tokens")).queryByText(/^[▲▼] \d+%$/),
+      within(screen.getByTestId("report-summary-card-input-tokens")).queryByText(/^[▲▼] \d+%$/),
     ).not.toBeInTheDocument();
     expect(
       within(screen.getByTestId("report-summary-card-requests")).getByText("▲ 50%"),
@@ -191,11 +191,11 @@ describe("ReportsSummaryCards", () => {
       />,
     );
 
-    const tokensCard = screen.getByTestId("report-summary-card-tokens");
+    const tokensCard = screen.getByTestId("report-summary-card-input-tokens");
     const requestsCard = screen.getByTestId("report-summary-card-requests");
 
     expect(within(tokensCard).getByText("100.0B")).toBeInTheDocument();
-    expect(within(tokensCard).getByText("Input 100.0B · Cache 0 · Output 0")).toBeInTheDocument();
+    expect(within(tokensCard).getByText("Provider-reported logged usage")).toBeInTheDocument();
     expect(within(requestsCard).getByText("100.0K")).toBeInTheDocument();
   });
 });

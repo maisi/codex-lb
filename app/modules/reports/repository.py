@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Account, RequestLog
+from app.db.models import Account, ApiKey, RequestLog
 
 _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
@@ -73,6 +73,16 @@ class UserAgentAggregateRow:
     request_count: int
 
 
+@dataclass(frozen=True)
+class ApiKeyCacheAggregateRow:
+    api_key_id: str | None
+    api_key_name: str | None
+    key_prefix: str | None
+    request_count: int
+    total_input_tokens: int
+    cached_input_tokens: int
+
+
 class ReportsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -93,6 +103,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> list[DailyReportAggregateRow]:
         window_days = (end_date - start_date).days + 1
         if window_days > MAX_DAILY_REPORT_DAYS:
@@ -107,7 +118,7 @@ class ReportsRepository:
         for day_ranges_batch in batched(day_ranges, _SQLITE_COMPOUND_SELECT_LIMIT):
             day_ranges_list = list(day_ranges_batch)
             speed_result = await self._session.execute(
-                _daily_speed_medians_stmt(day_ranges_list, account_ids, model, useragent_group)
+                _daily_speed_medians_stmt(day_ranges_list, account_ids, model, useragent_group, api_key_ids)
             )
             speed_values = {
                 speed_row.report_date: (
@@ -118,7 +129,9 @@ class ReportsRepository:
                 for speed_row in speed_result.all()
             }
 
-            result = await self._session.execute(_daily_rows_stmt(day_ranges_list, account_ids, model, useragent_group))
+            result = await self._session.execute(
+                _daily_rows_stmt(day_ranges_list, account_ids, model, useragent_group, api_key_ids)
+            )
             rows.extend(
                 DailyReportAggregateRow(
                     date=row.report_date,
@@ -145,15 +158,16 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> SummaryAggregateRow:
-        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group)
+        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids)
 
         result = await self._session.execute(
             select(
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(func.sum(_input_tokens_expr()), 0).label("total_input_tokens"),
                 func.coalesce(func.sum(RequestLog.output_tokens), 0).label("total_output_tokens"),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("total_cached_tokens"),
+                func.coalesce(func.sum(_cached_input_tokens_expr()), 0).label("total_cached_tokens"),
                 func.count().label("total_requests"),
                 func.coalesce(
                     func.sum(case((RequestLog.status != "success", 1), else_=0)),
@@ -182,9 +196,10 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> list[ModelAggregateRow]:
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
+            *_report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids),
             RequestLog.model.is_not(None),
         ]
 
@@ -215,8 +230,9 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> list[AccountAggregateRow]:
-        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group)
+        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids)
 
         stmt = (
             select(
@@ -256,10 +272,11 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> list[UserAgentAggregateRow]:
         useragent_group_bucket = _useragent_group_bucket_expr()
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
+            *_report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids),
             or_(RequestLog.useragent_group.is_(None), func.trim(RequestLog.useragent_group) != ""),
         ]
 
@@ -283,6 +300,49 @@ class ReportsRepository:
             for row in result.all()
         ]
 
+    async def aggregate_by_api_key(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        account_ids: list[str] | None = None,
+        model: str | None = None,
+        useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
+    ) -> list[ApiKeyCacheAggregateRow]:
+        conditions = _report_conditions(
+            start_date,
+            end_date,
+            account_ids,
+            model,
+            useragent_group,
+            api_key_ids,
+        )
+        result = await self._session.execute(
+            select(
+                RequestLog.api_key_id,
+                ApiKey.name.label("api_key_name"),
+                ApiKey.key_prefix,
+                func.count().label("request_count"),
+                func.coalesce(func.sum(_input_tokens_expr()), 0).label("total_input_tokens"),
+                func.coalesce(func.sum(_cached_input_tokens_expr()), 0).label("cached_input_tokens"),
+            )
+            .outerjoin(ApiKey, ApiKey.id == RequestLog.api_key_id)
+            .where(and_(*conditions))
+            .group_by(RequestLog.api_key_id, ApiKey.name, ApiKey.key_prefix)
+            .order_by(func.coalesce(func.sum(_input_tokens_expr()), 0).desc())
+        )
+        return [
+            ApiKeyCacheAggregateRow(
+                api_key_id=row.api_key_id,
+                api_key_name=row.api_key_name,
+                key_prefix=row.key_prefix,
+                request_count=int(row.request_count),
+                total_input_tokens=int(row.total_input_tokens),
+                cached_input_tokens=int(row.cached_input_tokens),
+            )
+            for row in result.all()
+        ]
+
     async def count_active_accounts(
         self,
         start_date: datetime,
@@ -290,9 +350,10 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> int:
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
+            *_report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids),
             RequestLog.account_id.is_not(None),
         ]
 
@@ -306,12 +367,15 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> datetime | None:
         conditions = [_normal_traffic_clause()]
         if account_ids:
             conditions.append(RequestLog.account_id.in_(account_ids))
         if model:
             conditions.append(RequestLog.model == model)
+        if api_key_ids:
+            conditions.append(RequestLog.api_key_id.in_(api_key_ids))
         useragent_group_clause = _useragent_group_filter_clause(useragent_group)
         if useragent_group_clause is not None:
             conditions.append(useragent_group_clause)
@@ -327,6 +391,7 @@ def _report_conditions(
     account_ids: list[str] | None,
     model: str | None,
     useragent_group: str | None,
+    api_key_ids: list[str] | None = None,
 ) -> list:
     conditions = [
         RequestLog.requested_at >= start_date,
@@ -337,10 +402,30 @@ def _report_conditions(
         conditions.append(RequestLog.account_id.in_(account_ids))
     if model:
         conditions.append(RequestLog.model == model)
+    if api_key_ids:
+        conditions.append(RequestLog.api_key_id.in_(api_key_ids))
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     if useragent_group_clause is not None:
         conditions.append(useragent_group_clause)
     return conditions
+
+
+def _input_tokens_expr():
+    return case(
+        (RequestLog.input_tokens.is_(None), 0),
+        (RequestLog.input_tokens < 0, 0),
+        else_=RequestLog.input_tokens,
+    )
+
+
+def _cached_input_tokens_expr():
+    input_tokens = _input_tokens_expr()
+    return case(
+        (RequestLog.cached_input_tokens.is_(None), 0),
+        (RequestLog.cached_input_tokens < 0, 0),
+        (RequestLog.cached_input_tokens > input_tokens, input_tokens),
+        else_=RequestLog.cached_input_tokens,
+    )
 
 
 def _useragent_group_bucket_expr():
@@ -386,6 +471,7 @@ def _daily_speed_medians_stmt(
     account_ids: list[str] | None,
     model: str | None,
     useragent_group: str | None,
+    api_key_ids: list[str] | None = None,
 ):
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     day_ranges_cte = _day_ranges_cte(day_ranges)
@@ -397,6 +483,7 @@ def _daily_speed_medians_stmt(
             _normal_traffic_clause(),
             *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
             *([RequestLog.model == model] if model else []),
+            *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
             *([useragent_group_clause] if useragent_group_clause is not None else []),
         ),
     )
@@ -530,6 +617,7 @@ def _daily_rows_stmt(
     account_ids: list[str] | None,
     model: str | None,
     useragent_group: str | None,
+    api_key_ids: list[str] | None = None,
 ):
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     day_ranges_cte = _day_ranges_cte(day_ranges)
@@ -537,9 +625,9 @@ def _daily_rows_stmt(
         select(
             day_ranges_cte.c.report_date,
             func.count(RequestLog.id).label("requests"),
-            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(_input_tokens_expr()), 0).label("input_tokens"),
             func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
-            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(_cached_input_tokens_expr()), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
             func.count(func.distinct(ReportsRepository._conversation_id_expr())).label("conversation_count"),
@@ -557,6 +645,7 @@ def _daily_rows_stmt(
                     _normal_traffic_clause(),
                     *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
                     *([RequestLog.model == model] if model else []),
+                    *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
                     *([useragent_group_clause] if useragent_group_clause is not None else []),
                 ),
             )

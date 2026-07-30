@@ -44,6 +44,7 @@ const EMPTY_REPORT: ReportsResponse = {
     totalInputTokens: 0,
     totalOutputTokens: 0,
     totalCachedTokens: 0,
+    cacheHitRatio: 0,
     totalRequests: 0,
     totalErrors: 0,
     totalConversations: 0,
@@ -63,6 +64,7 @@ const EMPTY_REPORT: ReportsResponse = {
   byModel: [],
   byUseragent: [],
   byAccount: [],
+  byApiKey: [],
 };
 
 const useReportsMock = vi.mocked(useReports);

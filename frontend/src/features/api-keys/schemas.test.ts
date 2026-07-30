@@ -19,6 +19,7 @@ describe("ApiKeySchema", () => {
       keyPrefix: "sk-live",
       allowedModels: ["gpt-4.1"],
       applyToCodexModel: true,
+      promptCacheAffinityContinuation: true,
       expiresAt: null,
       isActive: true,
       createdAt: ISO,
@@ -39,6 +40,7 @@ describe("ApiKeySchema", () => {
     expect(parsed.id).toBe("key-1");
     expect(parsed.allowedModels).toEqual(["gpt-4.1"]);
     expect(parsed.applyToCodexModel).toBe(true);
+    expect(parsed.promptCacheAffinityContinuation).toBe(true);
     expect(parsed.limits).toHaveLength(1);
     expect(parsed.limits[0].limitType).toBe("total_tokens");
     expect(parsed.trafficClass).toBe("foreground");
@@ -58,6 +60,7 @@ describe("ApiKeySchema", () => {
 
     expect(parsed.limits).toEqual([]);
     expect(parsed.applyToCodexModel).toBe(false);
+    expect(parsed.promptCacheAffinityContinuation).toBe(false);
     expect(parsed.pooledRemainingPercentPrimary).toBeNull();
     expect(parsed.pooledRemainingPercentSecondary).toBeNull();
     expect(parsed.pooledCapacityCreditsPrimary).toBe(0);
@@ -156,10 +159,12 @@ describe("ApiKeyCreateRequestSchema", () => {
       name: "Scoped Key",
       assignedAccountIds: ["acc_primary"],
       usageSections: "account_pool_usage",
+      promptCacheAffinityContinuation: true,
     });
 
     expect(parsed.assignedAccountIds).toEqual(["acc_primary"]);
     expect(parsed.usageSections).toBe("account_pool_usage");
+    expect(parsed.promptCacheAffinityContinuation).toBe(true);
   });
 
   it("accepts optional assigned model sources", () => {
@@ -205,6 +210,7 @@ describe("ApiKeyUpdateRequestSchema", () => {
       name: "Updated Key",
       allowedModels: ["gpt-4.1-mini"],
       applyToCodexModel: true,
+      promptCacheAffinityContinuation: true,
       weeklyTokenLimit: 50000,
       expiresAt: ISO,
       isActive: false,
@@ -213,6 +219,7 @@ describe("ApiKeyUpdateRequestSchema", () => {
 
     expect(parsed.name).toBe("Updated Key");
     expect(parsed.applyToCodexModel).toBe(true);
+    expect(parsed.promptCacheAffinityContinuation).toBe(true);
     expect(parsed.isActive).toBe(false);
     expect(parsed.usageSections).toBe("upstream_limits");
   });

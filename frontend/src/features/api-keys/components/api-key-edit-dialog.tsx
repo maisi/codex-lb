@@ -99,6 +99,7 @@ type ApiKeyEditDraft = {
   expiresAt: Date | null;
   applyToCodexModel: boolean;
   forceIncludeUsage: boolean;
+  promptCacheAffinityContinuation: boolean;
   enforcedModel: string;
   enforcedReasoningEffort: string;
   enforcedServiceTier: string;
@@ -117,6 +118,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     expiresAt: parseDate(apiKey.expiresAt),
     applyToCodexModel: apiKey.applyToCodexModel,
     forceIncludeUsage: apiKey.forceIncludeUsage,
+    promptCacheAffinityContinuation: apiKey.promptCacheAffinityContinuation,
     enforcedModel: apiKey.enforcedModel || "",
     enforcedReasoningEffort: apiKey.enforcedReasoningEffort || "none",
     enforcedServiceTier: apiKey.enforcedServiceTier || "none",
@@ -167,6 +169,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
       applyToCodexModel: draft.applyToCodexModel,
       forceIncludeUsage: draft.forceIncludeUsage,
+      promptCacheAffinityContinuation: draft.promptCacheAffinityContinuation,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as ReasoningEffortType,
@@ -230,6 +233,22 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               <label htmlFor="edit-api-key-apply-to-codex-model" className="cursor-pointer">
                 {t("apiKeys.form.applyToCodexModel")}
               </label>
+            </div>
+
+            <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <Checkbox
+                id="edit-api-key-prompt-cache-affinity-continuation"
+                checked={draft.promptCacheAffinityContinuation}
+                onCheckedChange={(checked) => updateDraft({ promptCacheAffinityContinuation: checked === true })}
+              />
+              <div>
+                <label htmlFor="edit-api-key-prompt-cache-affinity-continuation" className="cursor-pointer">
+                  {t("apiKeys.form.promptCacheAffinityContinuation")}
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {t("apiKeys.form.promptCacheAffinityContinuationDescription")}
+                </p>
+              </div>
             </div>
 
             <div className="flex items-center gap-2 rounded-md border p-2 text-sm">

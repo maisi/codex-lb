@@ -39,6 +39,7 @@ from app.modules.proxy._service.http_bridge import helpers as http_bridge_helper
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
+from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
@@ -2243,6 +2244,7 @@ def _make_api_key(
     key_id: str,
     assigned_account_ids: list[str],
     account_assignment_scope_enabled: bool | None = None,
+    prompt_cache_affinity_continuation: bool = False,
 ) -> proxy_service.ApiKeyData:
     return proxy_service.ApiKeyData(
         id=key_id,
@@ -2260,7 +2262,206 @@ def _make_api_key(
             bool(assigned_account_ids) if account_assignment_scope_enabled is None else account_assignment_scope_enabled
         ),
         assigned_account_ids=assigned_account_ids,
+        prompt_cache_affinity_continuation=prompt_cache_affinity_continuation,
     )
+
+
+def _make_prompt_cache_continuation_case(
+    *,
+    enabled: bool = True,
+    input_items: list[dict[str, Any]] | None = None,
+) -> tuple[
+    proxy_service.ProxyService,
+    proxy_service._HTTPBridgeSession,
+    proxy_service._WebSocketRequestState,
+    str,
+    list[dict[str, Any]],
+]:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    api_key = _make_api_key(
+        key_id="key-openclaw",
+        assigned_account_ids=[],
+        prompt_cache_affinity_continuation=enabled,
+    )
+    stored_items = [
+        {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+    ]
+    incoming_items = input_items or [
+        *stored_items,
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+    text_data = json.dumps(
+        {"type": "response.create", "model": "gpt-5.6-sol", "input": incoming_items},
+        separators=(",", ":"),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-openclaw",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        api_key=api_key,
+        request_text=text_data,
+        input_item_count=len(incoming_items),
+        input_full_fingerprint=proxy_service._fingerprint_input_items(cast(Any, incoming_items)),
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "cache-openclaw", api_key.id),
+        key_value="cache-openclaw",
+    )
+    session.affinity = proxy_service._AffinityPolicy(
+        key="cache-openclaw",
+        kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+    )
+    session.api_key = api_key
+    session.request_model = "gpt-5.6-sol"
+    session.account = cast(Any, SimpleNamespace(id="acc-openclaw", status=AccountStatus.ACTIVE, plan_type="plus"))
+    session.last_completed_response_id = "resp-openclaw-previous"
+    session.last_completed_account_id = "acc-openclaw"
+    session.last_completed_input_count = len(stored_items)
+    session.last_completed_input_prefix_fingerprint = proxy_service._fingerprint_input_items(cast(Any, stored_items))
+    return service, session, request_state, text_data, stored_items
+
+
+@pytest.mark.asyncio
+async def test_prompt_cache_continuation_defaults_off_and_preserves_full_resend() -> None:
+    service, session, request_state, text_data, _stored_items = _make_prompt_cache_continuation_case(enabled=False)
+
+    prepared = await service._prepare_prompt_cache_affinity_continuation(
+        session,
+        request_state=request_state,
+        text_data=text_data,
+    )
+
+    assert prepared == text_data
+    assert request_state.previous_response_id is None
+    assert request_state.request_stage == "first_turn"
+    assert request_state.prompt_cache_continuation_attempted is False
+
+
+@pytest.mark.asyncio
+async def test_prompt_cache_continuation_injects_exact_prefix_and_forwards_only_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session, request_state, text_data, stored_items = _make_prompt_cache_continuation_case()
+    record_outcome = Mock()
+    monkeypatch.setattr(http_bridge_request_submit_module, "_record_prompt_cache_continuation", record_outcome)
+    original_count = request_state.input_item_count
+    original_fingerprint = request_state.input_full_fingerprint
+
+    prepared = await service._prepare_prompt_cache_affinity_continuation(
+        session,
+        request_state=request_state,
+        text_data=text_data,
+    )
+
+    payload = json.loads(prepared)
+    assert payload["previous_response_id"] == "resp-openclaw-previous"
+    assert payload["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}]
+    assert request_state.fresh_upstream_request_text == text_data
+    assert request_state.fresh_upstream_request_is_retry_safe is True
+    assert request_state.request_stage == "follow_up"
+    assert request_state.preferred_account_id == "acc-openclaw"
+    assert request_state.bridge_soft_capacity_reroute_allowed is False
+    assert request_state.input_item_count == original_count == len(stored_items) + 1
+    assert request_state.input_full_fingerprint == original_fingerprint
+    record_outcome.assert_called_once_with(outcome="attempt", reason="eligible", request_id="req-openclaw")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "input_items",
+    [
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "unrelated"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+        ],
+        [{"role": "user", "content": [{"type": "input_text", "text": "compacted summary"}]}],
+    ],
+    ids=["prefix-mismatch", "compaction"],
+)
+async def test_prompt_cache_continuation_skips_rewritten_or_compacted_history(
+    input_items: list[dict[str, Any]],
+) -> None:
+    service, session, request_state, text_data, _stored_items = _make_prompt_cache_continuation_case(
+        input_items=input_items
+    )
+
+    prepared = await service._prepare_prompt_cache_affinity_continuation(
+        session,
+        request_state=request_state,
+        text_data=text_data,
+    )
+
+    assert prepared == text_data
+    assert request_state.previous_response_id is None
+    assert request_state.request_stage == "first_turn"
+
+
+@pytest.mark.asyncio
+async def test_prompt_cache_continuation_skips_while_another_turn_is_pending() -> None:
+    service, session, request_state, text_data, _stored_items = _make_prompt_cache_continuation_case()
+    session.pending_requests.append(
+        proxy_service._WebSocketRequestState(
+            request_id="req-pending",
+            model="gpt-5.6-sol",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=0.5,
+        )
+    )
+
+    prepared = await service._prepare_prompt_cache_affinity_continuation(
+        session,
+        request_state=request_state,
+        text_data=text_data,
+    )
+
+    assert prepared == text_data
+    assert request_state.previous_response_id is None
+
+
+@pytest.mark.asyncio
+async def test_prompt_cache_continuation_skips_when_completed_response_is_missing() -> None:
+    service, session, request_state, text_data, _stored_items = _make_prompt_cache_continuation_case()
+    session.last_completed_response_id = None
+
+    prepared = await service._prepare_prompt_cache_affinity_continuation(
+        session,
+        request_state=request_state,
+        text_data=text_data,
+    )
+
+    assert prepared == text_data
+    assert request_state.previous_response_id is None
+    assert request_state.request_stage == "first_turn"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("isolation", ["api-key", "model", "account"])
+async def test_prompt_cache_continuation_requires_api_key_model_and_account_isolation(isolation: str) -> None:
+    service, session, request_state, text_data, _stored_items = _make_prompt_cache_continuation_case()
+    if isolation == "api-key":
+        session.key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "cache-openclaw", "key-other")
+    elif isolation == "model":
+        session.request_model = "gpt-5.6-codex"
+    else:
+        request_state.preferred_account_id = "acc-other"
+
+    prepared = await service._prepare_prompt_cache_affinity_continuation(
+        session,
+        request_state=request_state,
+        text_data=text_data,
+    )
+
+    assert prepared == text_data
+    assert request_state.previous_response_id is None
+    assert request_state.request_stage == "first_turn"
 
 
 def test_http_bridge_request_budget_falls_back_to_proxy_budget() -> None:
@@ -13486,6 +13687,94 @@ async def test_process_http_bridge_upstream_text_masks_single_previous_response_
     assert session.upstream_control.reconnect_requested is False
     assert session.pending_requests == deque()
     assert session.queued_request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_full_resend_fallback_for_prompt_cache_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    full_resend_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "full history"}]}],
+        },
+        separators=(",", ":"),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prompt-cache-stale",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp-stale-prompt-cache",
+        preferred_account_id="acc-1",
+        proxy_injected_previous_response_id=True,
+        prompt_cache_continuation_attempted=True,
+        fresh_upstream_request_text=full_resend_text,
+        fresh_upstream_request_is_retry_safe=True,
+        request_stage="follow_up",
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "previous_response_id": "resp-stale-prompt-cache",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "new"}]}],
+            },
+            separators=(",", ":"),
+        ),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "cache-openclaw", "key-openclaw"),
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.request_model = "gpt-5.6-sol"
+    session.account = cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE, plan_type="plus"))
+    record_outcome = Mock()
+
+    async def retry_fresh(retry_session: proxy_service._HTTPBridgeSession) -> bool:
+        assert retry_session is session
+        assert request_state.request_text == full_resend_text
+        assert request_state.previous_response_id is None
+        assert request_state.proxy_injected_previous_response_id is False
+        assert request_state.request_stage == "first_turn"
+        assert request_state.preferred_account_id is None
+        return True
+
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_fresh)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_record_prompt_cache_continuation", record_outcome)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "message": "Previous response with id 'resp-stale-prompt-cache' not found.",
+                    "param": "previous_response_id",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    record_outcome.assert_called_once_with(
+        outcome="fallback",
+        reason="invalid_or_expired_response",
+        request_id="req-prompt-cache-stale",
+    )
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
 
 
 @pytest.mark.asyncio

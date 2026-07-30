@@ -356,6 +356,9 @@ def _prepare_websocket_request_state_for_visible_output_replay(
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
         request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
+        if request_state.prompt_cache_continuation_attempted:
+            request_state.request_stage = "first_turn"
+            request_state.preferred_account_id = None
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_text = request_state.request_text
     if not isinstance(request_text, str):
@@ -406,6 +409,8 @@ def _prepare_websocket_request_state_for_account_switch(
     request_state.proxy_injected_previous_response_id = False
     request_state.fresh_upstream_request_is_retry_safe = False
     request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
+    if request_state.prompt_cache_continuation_attempted:
+        request_state.request_stage = "first_turn"
     _refresh_websocket_request_input_fingerprint_from_text(request_state)
     return request_state.request_text
 

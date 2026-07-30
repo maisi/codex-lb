@@ -2295,6 +2295,7 @@ class _HTTPBridgeMixin(
             session.last_completed_response_id = None
             session.last_completed_input_count = 0
             session.last_completed_input_prefix_fingerprint = None
+            session.last_completed_account_id = None
             session.last_pending_tool_calls.clear()
             session.affinity = selection_affinity or session.affinity
             session.codex_session = False

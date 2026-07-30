@@ -296,6 +296,9 @@ from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
 )
 from app.modules.proxy._service.observability import (
+    _record_prompt_cache_continuation as _record_prompt_cache_continuation,
+)
+from app.modules.proxy._service.observability import (
     _record_upstream_transport_decision as _record_upstream_transport_decision,
 )
 from app.modules.proxy._service.observability import (
@@ -4041,6 +4044,14 @@ class _WebSocketMixin:
                     retry_error_code = None
                 else:
                     upstream_control.reconnect_requested = True
+                    if request_state.prompt_cache_continuation_attempted:
+                        _record_prompt_cache_continuation(
+                            outcome="fallback",
+                            reason="invalid_or_expired_response",
+                            request_id=request_state.request_log_id or request_state.request_id,
+                        )
+                        request_state.request_stage = "first_turn"
+                        request_state.preferred_account_id = None
                     request_state.request_text = request_state.fresh_upstream_request_text
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False

@@ -120,6 +120,18 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         aggregate_by_useragent=AsyncMock(
             return_value=[SimpleNamespace(useragent_group="opencode", cost_usd=1.2, request_count=2)]
         ),
+        aggregate_by_api_key=AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    api_key_id="key_reports",
+                    api_key_name="Reports key",
+                    key_prefix="sk-reports",
+                    request_count=2,
+                    total_input_tokens=12,
+                    cached_input_tokens=2,
+                )
+            ]
+        ),
         earliest_report_activity_at=AsyncMock(return_value=datetime(2026, 5, 1, 0, 0, 0)),
     )
     service = ReportsService(cast(ReportsRepository, repo))
@@ -136,6 +148,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         None,
         "opencode",
+        None,
     )
     repo.aggregate_daily_rows.assert_awaited_once_with(
         date(2026, 6, 1),
@@ -144,6 +157,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         None,
         "opencode",
+        None,
     )
     repo.aggregate_by_model.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),
@@ -151,6 +165,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         None,
         "opencode",
+        None,
     )
     repo.aggregate_by_account.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),
@@ -158,6 +173,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         None,
         "opencode",
+        None,
     )
     repo.aggregate_by_useragent.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),
@@ -165,8 +181,17 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         None,
         "opencode",
+        None,
     )
-    repo.earliest_report_activity_at.assert_awaited_once_with(None, None, "opencode")
+    repo.aggregate_by_api_key.assert_awaited_once_with(
+        datetime(2026, 6, 1, 0, 0, 0),
+        datetime(2026, 6, 2, 0, 0, 0),
+        None,
+        None,
+        "opencode",
+        None,
+    )
+    repo.earliest_report_activity_at.assert_awaited_once_with(None, None, "opencode", None)
 
     assert result.daily[0].median_ttft_ms == 123.46
     assert result.daily[0].conversations == 1
@@ -178,3 +203,8 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
     assert result.by_useragent[0].useragent == "opencode"
     assert result.by_useragent[0].requests == 2
     assert result.by_useragent[0].percentage == 100.0
+    assert result.summary.total_cached_tokens == 2
+    assert result.summary.cache_hit_ratio == 0.1667
+    assert result.daily[0].cache_hit_ratio == 0.1667
+    assert result.by_api_key[0].api_key_id == "key_reports"
+    assert result.by_api_key[0].cache_hit_ratio == 0.1667

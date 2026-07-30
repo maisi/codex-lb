@@ -7,6 +7,7 @@ const DailyReportRowSchema = z.object({
   inputTokens: z.number(),
   outputTokens: z.number(),
   cachedInputTokens: z.number(),
+  cacheHitRatio: z.number().default(0),
   costUsd: z.number(),
   activeAccounts: z.number(),
   errorCount: z.number(),
@@ -36,11 +37,22 @@ const AccountCostEntrySchema = z.object({
   requests: z.number(),
 });
 
+const ApiKeyCacheEntrySchema = z.object({
+  apiKeyId: z.string().nullable(),
+  apiKeyName: z.string().nullable().default(null),
+  keyPrefix: z.string().nullable().default(null),
+  requests: z.number(),
+  totalInputTokens: z.number(),
+  cachedInputTokens: z.number(),
+  cacheHitRatio: z.number().default(0),
+});
+
 const ReportSummarySchema = z.object({
   totalCostUsd: z.number(),
   totalInputTokens: z.number(),
   totalOutputTokens: z.number(),
   totalCachedTokens: z.number(),
+  cacheHitRatio: z.number().default(0),
   totalRequests: z.number(),
   totalErrors: z.number(),
   totalConversations: z.number(),
@@ -67,12 +79,14 @@ export const ReportsResponseSchema = z.object({
   byModel: z.array(ModelCostEntrySchema),
   byUseragent: z.array(UseragentCostEntrySchema),
   byAccount: z.array(AccountCostEntrySchema),
+  byApiKey: z.array(ApiKeyCacheEntrySchema).default([]),
 });
 
 export type DailyReportRow = z.input<typeof DailyReportRowSchema>;
 export type ModelCostEntry = z.infer<typeof ModelCostEntrySchema>;
 export type UseragentCostEntry = z.infer<typeof UseragentCostEntrySchema>;
 export type AccountCostEntry = z.infer<typeof AccountCostEntrySchema>;
-export type ReportSummary = z.infer<typeof ReportSummarySchema>;
+export type ApiKeyCacheEntry = z.infer<typeof ApiKeyCacheEntrySchema>;
+export type ReportSummary = z.input<typeof ReportSummarySchema>;
 export type ReportComparison = z.infer<typeof ReportComparisonSchema>;
 export type ReportsResponse = z.infer<typeof ReportsResponseSchema>;
