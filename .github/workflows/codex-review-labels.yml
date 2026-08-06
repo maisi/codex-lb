@@ -10,8 +10,6 @@ on:
     types: [created, edited]
   pull_request_review:
     types: [submitted, edited, dismissed]
-  schedule:
-    - cron: "*/15 * * * *"
 
 permissions:
   actions: write
@@ -76,11 +74,8 @@ jobs:
     runs-on: ubuntu-24.04
     if: >-
       ${{
-        github.event_name == 'schedule' ||
-        (
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.event == 'pull_request'
-        )
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.event == 'pull_request'
       }}
 
     steps:
