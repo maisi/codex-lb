@@ -1854,14 +1854,31 @@ When a direct Responses WebSocket request has a prepared retry-safe fresh upstre
 - **AND** it does not rewrite the turn to `previous_response_owner_unavailable`
 
 ### Requirement: Codex WebSocket prewarm completions are classified separately
-When a direct Responses WebSocket request carries Codex turn metadata with `request_kind: "prewarm"`, the service MUST preserve that request kind in request logs. Empty-output prewarm completions MUST NOT update account success state or previous-response ownership, while still allowing the upstream terminal frame to pass through.
+For a direct Responses WebSocket, the service MUST treat Codex turn metadata received on the HTTP handshake as connection-scoped metadata rather than applying its `request_kind` to every `response.create` frame. The service MUST classify an individual turn as `prewarm` when the connection metadata is `prewarm` and either that turn carries `generate: false` or its completed usage reports zero output tokens. Other turns on the same connection MUST be classified as `normal`.
+
+Request logs for direct Responses WebSocket turns MUST persist the connection-scoped value separately as `connection_request_kind`. Empty-output prewarm completions MUST NOT update account success state or previous-response ownership, while still allowing the upstream terminal frame to pass through.
+
+#### Scenario: generated turn on a prewarm-opened connection is normal
+- **GIVEN** a direct Responses WebSocket handshake carries `x-codex-turn-metadata` with `request_kind: "prewarm"`
+- **WHEN** a later `response.create` does not carry `generate: false` and upstream completes it with non-zero output tokens
+- **THEN** the request log records `request_kind` as `normal`
+- **AND** the request log records `connection_request_kind` as `prewarm`
+- **AND** the completion remains eligible to update account success state and previous-response ownership
 
 #### Scenario: empty prewarm completion does not look like user turn progress
-- **GIVEN** a direct WebSocket request carries `x-codex-turn-metadata` with `request_kind: "prewarm"`
-- **WHEN** upstream emits `response.completed` with zero output tokens
+- **GIVEN** a direct Responses WebSocket handshake carries `x-codex-turn-metadata` with `request_kind: "prewarm"`
+- **WHEN** a `response.create` carries `generate: false` or upstream completes it with zero output tokens
 - **THEN** the request log records `request_kind` as `prewarm`
+- **AND** the request log records `connection_request_kind` as `prewarm`
 - **AND** the service does not mark the account successful for that completion
 - **AND** the service does not remember the response id as a usable previous-response owner
+
+#### Scenario: failed generated turn on a prewarm-opened connection is normal
+- **GIVEN** a direct Responses WebSocket handshake carries `x-codex-turn-metadata` with `request_kind: "prewarm"`
+- **AND** a later `response.create` does not carry `generate: false`
+- **WHEN** that turn fails before completed usage is available
+- **THEN** the request log records `request_kind` as `normal`
+- **AND** the request log records `connection_request_kind` as `prewarm`
 
 ### Requirement: Codex compact requests are bounded by the proxy request budget
 When `/backend-api/codex/responses/compact` is called for Codex auto-compaction, the service MUST bound the upstream compact call by the remaining proxy compact request budget even when no explicit upstream compact timeout is configured. The service MUST preserve Codex turn metadata `request_kind` in compact request logs so auto-compaction failures are distinguishable from normal user turns.
@@ -2231,13 +2248,23 @@ The service MUST track tool-call items completed by a streamed response that may
 - **AND** if upstream rejects it with a missing-tool-output error, the extended classifier masks it as a retryable continuity failure instead of surfacing the raw upstream 400
 
 ### Requirement: Missing-tool-output classification covers all tool call variants
-The service MUST classify an upstream `invalid_request_error` with `param=input` whose message starts with `No tool output found for function call call_`, `No tool output found for custom tool call call_`, or `No tool output found for apply patch call call_` as a missing-tool-output continuity error, so the existing masking and retry recovery paths engage instead of forwarding the raw upstream 400 downstream.
+The service MUST classify an upstream `invalid_request_error` with `param=input` whose message starts with `No tool output found for function call call_`, `No tool output found for custom tool call call_`, `No tool output found for apply patch call call_`, or `No tool output found for tool search call call_` as a missing-tool-output continuity error, so the existing masking and retry recovery paths engage instead of forwarding the raw upstream 400 downstream. The hosted `No tool output found for web search call` wording MUST NOT be classified, because a `web_search_call` is executed upstream and carries no client-addressable tool output.
 
 #### Scenario: custom tool call variant is masked on the HTTP bridge
 - **WHEN** upstream emits `invalid_request_error` with `param=input` and message `No tool output found for custom tool call call_x`
 - **AND** the pending bridge request carries `previous_response_id`
 - **THEN** the service rewrites the error to a retryable `stream_incomplete` continuity failure
 - **AND** the raw upstream message and call id are not exposed downstream
+
+#### Scenario: tool search call variant is masked on the HTTP bridge
+- **WHEN** upstream emits `invalid_request_error` with `param=input` and message `No tool output found for tool search call call_x`
+- **AND** the pending bridge request carries `previous_response_id`
+- **THEN** the service rewrites the error to a retryable `stream_incomplete` continuity failure
+- **AND** the raw upstream message and call id are not exposed downstream
+
+#### Scenario: hosted web search wording stays unclassified
+- **WHEN** upstream emits `invalid_request_error` with `param=input` and a message starting `No tool output found for web search call`
+- **THEN** the service does not treat it as a missing-tool-output continuity error
 
 ### Requirement: Non-message system and developer input items are preserved
 

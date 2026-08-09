@@ -1,19 +1,29 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
+from typing import Any
 
-from sqlalchemy import Row, and_, case, delete, or_, select, text, update
+from sqlalchemy import Row, and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import HttpBridgeSessionAlias, HttpBridgeSessionRecord, HttpBridgeSessionState
+from app.db.models import (
+    HttpBridgeRecoveryAttemptRecord,
+    HttpBridgeRecoveryAttemptState,
+    HttpBridgeRetryCircuit,
+    HttpBridgeSessionAlias,
+    HttpBridgeSessionRecord,
+    HttpBridgeSessionState,
+)
 from app.db.session import sqlite_writer_section
 from app.modules.proxy.continuity import (
     HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
@@ -26,7 +36,10 @@ _ANONYMOUS_API_KEY_SCOPE = "__anonymous__"
 REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_sessions",
     "http_bridge_session_aliases",
+    "http_bridge_retry_circuits",
+    "http_bridge_recovery_attempts",
 )
+DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _PURGE_CLOSED_BATCH_SIZE = 500
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
 
@@ -65,6 +78,37 @@ def durable_bridge_hash(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
 
 
+def _encode_pending_tool_calls(response_id: str, value: Mapping[str, str] | None) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(
+        {"response_id": response_id, "calls": dict(sorted(value.items()))},
+        separators=(",", ":"),
+    )
+
+
+def _decode_pending_tool_calls(response_id: str | None, value: str | None) -> dict[str, str] | None:
+    if response_id is None or value is None:
+        return None
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("response_id") != response_id:
+        return None
+    calls = payload.get("calls")
+    if not isinstance(calls, dict):
+        return None
+    result: dict[str, str] = {}
+    for call_id, call_type in calls.items():
+        if not isinstance(call_id, str) or not call_id.strip():
+            return None
+        if not isinstance(call_type, str) or not call_type.strip():
+            return None
+        result[call_id] = call_type
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class DurableBridgeSessionSnapshot:
     id: str
@@ -85,6 +129,30 @@ class DurableBridgeSessionSnapshot:
     latest_input_full_fingerprint: str | None
     last_seen_at: datetime
     closed_at: datetime | None
+    latest_pending_tool_calls: dict[str, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeRetryCircuitSnapshot:
+    session_key_kind: str
+    session_key_hash: str
+    api_key_scope: str
+    consecutive_failures: int
+    cooldown_until_epoch: float
+    last_detail: str | None
+    updated_at_epoch: float
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeRecoveryAttemptSnapshot:
+    session_id: str
+    request_fingerprint: str
+    request_id: str
+    account_id: str | None
+    model: str | None
+    replay_safe: bool
+    state: HttpBridgeRecoveryAttemptState
+    response_id: str | None
 
 
 class DurableBridgeRepository:
@@ -110,6 +178,286 @@ class DurableBridgeRepository:
         result = await self._session.execute(statement)
         row = result.scalar_one_or_none()
         return _to_snapshot(row)
+
+    async def get_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+    ) -> DurableBridgeRetryCircuitSnapshot | None:
+        result = await self._session.execute(
+            select(HttpBridgeRetryCircuit).where(
+                HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+            )
+        )
+        return _to_retry_circuit_snapshot(result.scalar_one_or_none())
+
+    async def upsert_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+        consecutive_failures: int,
+        cooldown_until_epoch: float,
+        last_detail: str | None,
+        updated_at_epoch: float,
+        base_updated_at_epoch: float = 0.0,
+        failure_threshold: int = 1,
+        conflict_cooldown_until_epoch: float | None = None,
+        base_backoff_seconds: float = 60.0,
+        max_backoff_seconds: float = 600.0,
+        clean_close_max_backoff_seconds: float = 30.0,
+    ) -> None:
+        values = {
+            "session_key_kind": session_key_kind,
+            "session_key_hash": durable_bridge_hash(session_key_value),
+            "api_key_scope": api_key_scope,
+            "consecutive_failures": consecutive_failures,
+            "cooldown_until_epoch": cooldown_until_epoch,
+            "last_detail": last_detail,
+            "updated_at_epoch": updated_at_epoch,
+        }
+        threshold = max(1, failure_threshold)
+        cooldown_floor = (
+            max(0.0, conflict_cooldown_until_epoch)
+            if conflict_cooldown_until_epoch is not None
+            else max(0.0, cooldown_until_epoch)
+        )
+        # A reset starts a new failure lineage. Never carry the incoming
+        # cooldown into that fresh lineage, even when the threshold is one.
+        reset_failure_cooldown = 0.0
+        base_backoff = max(0.001, base_backoff_seconds)
+        max_backoff = max(base_backoff, max_backoff_seconds)
+        clean_close_max_backoff = max(0.001, clean_close_max_backoff_seconds)
+
+        def cooldown_for_failure_count(failure_count: Any, last_detail: Any) -> Any:
+            regular_cooldown = case(
+                (failure_count < threshold, 0.0),
+                (failure_count == threshold, base_backoff),
+                (failure_count == threshold + 1, min(max_backoff, base_backoff * 2.0)),
+                (failure_count == threshold + 2, min(max_backoff, base_backoff * 4.0)),
+                else_=max_backoff,
+            )
+            clean_cooldown = case(
+                (failure_count < threshold, 0.0),
+                else_=clean_close_max_backoff,
+            )
+            return case((last_detail == "clean_close", clean_cooldown), else_=regular_cooldown)
+
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            insert_statement = pg_insert(HttpBridgeRetryCircuit).values(**values)
+            excluded = insert_statement.excluded
+            reset_lineage = and_(
+                HttpBridgeRetryCircuit.consecutive_failures == 0,
+                HttpBridgeRetryCircuit.cooldown_until_epoch <= 0,
+                HttpBridgeRetryCircuit.last_detail.is_(None),
+                HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
+            )
+            # ``updated_at_epoch`` is an observation timestamp, not a
+            # concurrency version. Treat an unchanged loaded row as a CAS
+            # match, even when a replica's wall clock lags it. The failure
+            # count guard still rejects an older snapshot that was loaded from
+            # the same row after a newer failure had already been merged.
+            failure_from_loaded_row = and_(
+                HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
+                excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
+            )
+            failure_is_newer_than_base = or_(
+                excluded.updated_at_epoch > base_updated_at_epoch,
+                failure_from_loaded_row,
+            )
+            conflict_failures = case(
+                (reset_lineage, 1),
+                (
+                    failure_is_newer_than_base,
+                    func.greatest(
+                        HttpBridgeRetryCircuit.consecutive_failures + 1,
+                        excluded.consecutive_failures,
+                    ),
+                ),
+                else_=HttpBridgeRetryCircuit.consecutive_failures,
+            )
+            merged_updated_at = func.greatest(
+                HttpBridgeRetryCircuit.updated_at_epoch,
+                excluded.updated_at_epoch,
+            )
+            merged_cooldown = case(
+                (reset_lineage, reset_failure_cooldown),
+                (
+                    conflict_failures >= threshold,
+                    func.greatest(
+                        cooldown_floor,
+                        merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
+                    ),
+                ),
+                else_=0.0,
+            )
+            statement = insert_statement.on_conflict_do_update(
+                index_elements=[
+                    HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeRetryCircuit.api_key_scope,
+                ],
+                set_={
+                    "consecutive_failures": conflict_failures,
+                    "cooldown_until_epoch": case(
+                        (reset_lineage, reset_failure_cooldown),
+                        else_=func.greatest(
+                            HttpBridgeRetryCircuit.cooldown_until_epoch,
+                            excluded.cooldown_until_epoch,
+                            merged_cooldown,
+                        ),
+                    ),
+                    "last_detail": case(
+                        (reset_lineage, excluded.last_detail),
+                        (
+                            excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
+                            excluded.last_detail,
+                        ),
+                        else_=HttpBridgeRetryCircuit.last_detail,
+                    ),
+                    "updated_at_epoch": case(
+                        (reset_lineage, excluded.updated_at_epoch),
+                        else_=func.greatest(
+                            HttpBridgeRetryCircuit.updated_at_epoch,
+                            excluded.updated_at_epoch,
+                        ),
+                    ),
+                },
+            )
+        elif dialect == "sqlite":
+            insert_statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values)
+            excluded = insert_statement.excluded
+            reset_lineage = and_(
+                HttpBridgeRetryCircuit.consecutive_failures == 0,
+                HttpBridgeRetryCircuit.cooldown_until_epoch <= 0,
+                HttpBridgeRetryCircuit.last_detail.is_(None),
+                HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
+            )
+            failure_from_loaded_row = and_(
+                HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
+                excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
+            )
+            failure_is_newer_than_base = or_(
+                excluded.updated_at_epoch > base_updated_at_epoch,
+                failure_from_loaded_row,
+            )
+            conflict_failures = case(
+                (reset_lineage, 1),
+                (
+                    failure_is_newer_than_base,
+                    func.max(
+                        HttpBridgeRetryCircuit.consecutive_failures + 1,
+                        excluded.consecutive_failures,
+                    ),
+                ),
+                else_=HttpBridgeRetryCircuit.consecutive_failures,
+            )
+            merged_updated_at = func.max(
+                HttpBridgeRetryCircuit.updated_at_epoch,
+                excluded.updated_at_epoch,
+            )
+            merged_cooldown = case(
+                (reset_lineage, reset_failure_cooldown),
+                (
+                    conflict_failures >= threshold,
+                    func.max(
+                        cooldown_floor,
+                        merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
+                    ),
+                ),
+                else_=0.0,
+            )
+            statement = insert_statement.on_conflict_do_update(
+                index_elements=[
+                    HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeRetryCircuit.api_key_scope,
+                ],
+                set_={
+                    "consecutive_failures": conflict_failures,
+                    "cooldown_until_epoch": case(
+                        (reset_lineage, reset_failure_cooldown),
+                        else_=func.max(
+                            HttpBridgeRetryCircuit.cooldown_until_epoch,
+                            excluded.cooldown_until_epoch,
+                            merged_cooldown,
+                        ),
+                    ),
+                    "last_detail": case(
+                        (reset_lineage, excluded.last_detail),
+                        (
+                            excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
+                            excluded.last_detail,
+                        ),
+                        else_=HttpBridgeRetryCircuit.last_detail,
+                    ),
+                    "updated_at_epoch": case(
+                        (reset_lineage, excluded.updated_at_epoch),
+                        else_=func.max(
+                            HttpBridgeRetryCircuit.updated_at_epoch,
+                            excluded.updated_at_epoch,
+                        ),
+                    ),
+                },
+            )
+        else:
+            raise RuntimeError(f"DurableBridgeRepository retry circuit upsert unsupported for dialect={dialect!r}")
+        async with sqlite_writer_section():
+            await self._session.execute(statement)
+            await self._session.commit()
+
+    async def delete_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+        expected_updated_at_epoch: float | None = None,
+    ) -> None:
+        conditions = [
+            HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+            HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+            HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+        ]
+        if expected_updated_at_epoch is not None:
+            conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+        async with sqlite_writer_section():
+            await self._session.execute(
+                update(HttpBridgeRetryCircuit)
+                .where(*conditions)
+                .values(
+                    consecutive_failures=0,
+                    cooldown_until_epoch=0.0,
+                    last_detail=None,
+                    updated_at_epoch=time.time(),
+                )
+            )
+            await self._session.commit()
+
+    async def purge_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+        expected_updated_at_epoch: float | None = None,
+    ) -> None:
+        conditions = [
+            HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+            HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+            HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+        ]
+        if expected_updated_at_epoch is not None:
+            conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+        async with sqlite_writer_section():
+            await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
+            await self._session.commit()
 
     async def get_session_by_id(self, session_id: str) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
@@ -274,6 +622,7 @@ class DurableBridgeRepository:
                     existing.latest_response_id = latest_response_id
                     existing.latest_input_item_count = None
                     existing.latest_input_full_fingerprint = None
+                    existing.latest_pending_tool_calls_json = None
                 elif owner_changed:
                     if latest_turn_state is not None:
                         existing.latest_turn_state = latest_turn_state
@@ -281,6 +630,7 @@ class DurableBridgeRepository:
                         existing.latest_response_id = latest_response_id
                         existing.latest_input_item_count = None
                         existing.latest_input_full_fingerprint = None
+                        existing.latest_pending_tool_calls_json = None
                 else:
                     if latest_turn_state is not None:
                         existing.latest_turn_state = latest_turn_state
@@ -288,6 +638,7 @@ class DurableBridgeRepository:
                         existing.latest_response_id = latest_response_id
                         existing.latest_input_item_count = None
                         existing.latest_input_full_fingerprint = None
+                        existing.latest_pending_tool_calls_json = None
                 existing.last_seen_at = now
                 existing.closed_at = None
                 await self._session.commit()
@@ -306,6 +657,7 @@ class DurableBridgeRepository:
         latest_response_id: str | None = None,
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
+        latest_pending_tool_calls: Mapping[str, str] | None = None,
         state: HttpBridgeSessionState | None = None,
     ) -> DurableBridgeSessionSnapshot | None:
         """Renew the lease with a single fenced UPDATE.
@@ -322,6 +674,10 @@ class DurableBridgeRepository:
             values["latest_turn_state"] = latest_turn_state
         if latest_response_id is not None:
             values["latest_response_id"] = latest_response_id
+            values["latest_pending_tool_calls_json"] = _encode_pending_tool_calls(
+                latest_response_id,
+                latest_pending_tool_calls,
+            )
             if latest_input_item_count is None or latest_input_full_fingerprint is None:
                 values["latest_input_item_count"] = None
                 values["latest_input_full_fingerprint"] = None
@@ -336,6 +692,41 @@ class DurableBridgeRepository:
             owner_epoch=owner_epoch,
             values=values,
         )
+
+    async def rebind_session_account(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        account_id: str,
+        clear_continuity: bool = False,
+    ) -> bool:
+        """Persist a replacement account only while this worker owns the lease."""
+
+        async with sqlite_writer_section():
+            values: dict[str, object] = {"account_id": account_id}
+            if clear_continuity:
+                values.update(
+                    latest_turn_state=None,
+                    latest_response_id=None,
+                    latest_input_item_count=None,
+                    latest_input_full_fingerprint=None,
+                    latest_pending_tool_calls_json=None,
+                )
+            result = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .values(**values)
+            )
+            if clear_continuity and bool(getattr(result, "rowcount", 0)):
+                await self._clear_aliases_for_session(session_id)
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
 
     async def release_session(
         self,
@@ -364,6 +755,244 @@ class DurableBridgeRepository:
             owner_epoch=owner_epoch,
             values=values,
         )
+
+    async def clear_latest_response_anchor(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> DurableBridgeSessionSnapshot | None:
+        """Invalidate a stuck eventless anchor with a single fenced UPDATE.
+
+        Clears only the response-id anchor and the state bound to it
+        (input fingerprint/count, pending tool-call manifest). Leaves
+        ``latest_turn_state`` and aliases untouched so the durable session
+        remains reattachable without the stale anchor. Fenced-out callers
+        mutate nothing and receive the current owner snapshot.
+        """
+
+        values: dict[str, object] = {
+            "latest_response_id": None,
+            "latest_input_item_count": None,
+            "latest_input_full_fingerprint": None,
+            "latest_pending_tool_calls_json": None,
+        }
+        return await self._execute_fenced_session_update(
+            session_id=session_id,
+            instance_id=instance_id,
+            owner_epoch=owner_epoch,
+            values=values,
+        )
+
+    async def record_recovery_attempt(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+        request_id: str,
+        account_id: str | None,
+        model: str | None,
+        replay_safe: bool,
+    ) -> DurableBridgeRecoveryAttemptSnapshot | None:
+        """Record a safe request before dispatch so an ambiguous outcome is recoverable."""
+        async with sqlite_writer_section():
+            # Lock the owner row through the journal write so a takeover
+            # cannot advance the epoch after this check but before dispatch.
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return None
+            attempt = await self._session.scalar(
+                select(HttpBridgeRecoveryAttemptRecord)
+                .where(HttpBridgeRecoveryAttemptRecord.session_id == session_id)
+                .where(HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint)
+                .with_for_update()
+            )
+            if attempt is None:
+                attempt = HttpBridgeRecoveryAttemptRecord(
+                    session_id=session_id,
+                    request_fingerprint=request_fingerprint,
+                    request_id=request_id,
+                    account_id=account_id,
+                    model=model,
+                    replay_safe=replay_safe,
+                    state=HttpBridgeRecoveryAttemptState.UNKNOWN,
+                )
+                self._session.add(attempt)
+            elif attempt.state == HttpBridgeRecoveryAttemptState.REPLAYED:
+                snapshot = _to_recovery_attempt_snapshot(attempt)
+                await self._session.rollback()
+                return snapshot
+            elif attempt.request_id != request_id:
+                # A different request already owns the UNKNOWN checkpoint.
+                # Do not overwrite it while that request may still be between
+                # admission and dispatch; the caller must fail closed rather
+                # than sharing a journal generation.
+                snapshot = _to_recovery_attempt_snapshot(attempt)
+                await self._session.rollback()
+                return snapshot
+            else:
+                attempt.request_id = request_id
+                attempt.account_id = account_id
+                attempt.model = model
+                attempt.replay_safe = replay_safe
+                attempt.state = HttpBridgeRecoveryAttemptState.UNKNOWN
+                attempt.response_id = None
+            try:
+                await self._session.commit()
+            except IntegrityError:
+                # A concurrent owner may have inserted the same fingerprint
+                # after our initial SELECT (the absent-row case cannot be
+                # locked by SQLite). Re-read the winner and use its durable
+                # state instead of surfacing a transient uniqueness failure.
+                await self._session.rollback()
+                owner_exists = await self._session.scalar(
+                    select(HttpBridgeSessionRecord.id)
+                    .where(
+                        HttpBridgeSessionRecord.id == session_id,
+                        HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                        HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                    )
+                    .with_for_update()
+                )
+                if owner_exists is None:
+                    await self._session.rollback()
+                    return None
+                attempt = await self._session.scalar(
+                    select(HttpBridgeRecoveryAttemptRecord)
+                    .where(HttpBridgeRecoveryAttemptRecord.session_id == session_id)
+                    .where(HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint)
+                )
+                if attempt is None:
+                    raise
+                if attempt.state == HttpBridgeRecoveryAttemptState.REPLAYED:
+                    snapshot = _to_recovery_attempt_snapshot(attempt)
+                    await self._session.rollback()
+                    return snapshot
+                if attempt.request_id != request_id:
+                    snapshot = _to_recovery_attempt_snapshot(attempt)
+                    await self._session.rollback()
+                    return snapshot
+                attempt.request_id = request_id
+                attempt.account_id = account_id
+                attempt.model = model
+                attempt.replay_safe = replay_safe
+                attempt.state = HttpBridgeRecoveryAttemptState.UNKNOWN
+                attempt.response_id = None
+                await self._session.commit()
+            await self._session.refresh(attempt)
+            return _to_recovery_attempt_snapshot(attempt)
+
+    async def lookup_recovery_attempt(
+        self,
+        *,
+        session_id: str,
+        request_fingerprint: str,
+    ) -> DurableBridgeRecoveryAttemptSnapshot | None:
+        attempt = await self._session.scalar(
+            select(HttpBridgeRecoveryAttemptRecord)
+            .where(HttpBridgeRecoveryAttemptRecord.session_id == session_id)
+            .where(HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint)
+            .where(HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.UNKNOWN)
+            .where(HttpBridgeRecoveryAttemptRecord.replay_safe.is_(True))
+        )
+        return _to_recovery_attempt_snapshot(attempt) if attempt is not None else None
+
+    async def mark_recovery_attempt_replayed(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+        response_id: str | None = None,
+    ) -> bool:
+        async with sqlite_writer_section():
+            # Keep the owner fence and journal transition in one transaction.
+            # PostgreSQL's row lock prevents a concurrent takeover from
+            # advancing the epoch between the check and the state update;
+            # sqlite_writer_section provides the equivalent writer
+            # serialization for SQLite.
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
+            values: dict[str, object] = {"state": HttpBridgeRecoveryAttemptState.REPLAYED}
+            if response_id is not None:
+                values["response_id"] = response_id
+            # A claim authorizes one replay and must only transition UNKNOWN
+            # rows. Settlement (which supplies response_id) remains idempotent
+            # for a REPLAYED row after the replay completes.
+            claimable_states = (
+                (HttpBridgeRecoveryAttemptState.UNKNOWN,)
+                if response_id is None
+                else (HttpBridgeRecoveryAttemptState.UNKNOWN, HttpBridgeRecoveryAttemptState.REPLAYED)
+            )
+            result = await self._session.execute(
+                update(HttpBridgeRecoveryAttemptRecord)
+                .where(
+                    HttpBridgeRecoveryAttemptRecord.session_id == session_id,
+                    HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint,
+                    HttpBridgeRecoveryAttemptRecord.state.in_(claimable_states),
+                )
+                .values(**values)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
+    async def rollback_recovery_attempt_replayed(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+    ) -> bool:
+        """Return a pre-dispatch replay claim to UNKNOWN under the owner fence."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
+            result = await self._session.execute(
+                update(HttpBridgeRecoveryAttemptRecord)
+                .where(
+                    HttpBridgeRecoveryAttemptRecord.session_id == session_id,
+                    HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint,
+                    HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.REPLAYED,
+                    HttpBridgeRecoveryAttemptRecord.response_id.is_(None),
+                )
+                .values(state=HttpBridgeRecoveryAttemptState.UNKNOWN)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
 
     async def _execute_fenced_session_update(
         self,
@@ -598,6 +1227,43 @@ class DurableBridgeRepository:
                 await self._session.commit()
             deleted_count += len(deleted.scalars().all())
 
+    async def purge_retry_circuits_before(
+        self,
+        cutoff_epoch: float,
+        *,
+        batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
+    ) -> int:
+        deleted_count = 0
+        while True:
+            result = await self._session.execute(
+                select(
+                    HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeRetryCircuit.api_key_scope,
+                )
+                .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                .limit(batch_size)
+            )
+            keys = [tuple(row) for row in result.fetchall()]
+            if not keys:
+                return deleted_count
+            batch_deleted_count = 0
+            async with sqlite_writer_section():
+                for session_key_kind, session_key_hash, api_key_scope in keys:
+                    deleted = await self._session.execute(
+                        delete(HttpBridgeRetryCircuit)
+                        .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
+                        .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
+                        .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
+                        .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                        .returning(HttpBridgeRetryCircuit.session_key_hash)
+                    )
+                    batch_deleted_count += len(deleted.scalars().all())
+                await self._session.commit()
+            if batch_deleted_count == 0:
+                return deleted_count
+            deleted_count += batch_deleted_count
+
     async def upsert_alias(
         self,
         *,
@@ -629,6 +1295,7 @@ class DurableBridgeRepository:
         latest_response_id: str | None = None,
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
+        latest_pending_tool_calls: Mapping[str, str] | None = None,
     ) -> DurableBridgeAliasRegistration:
         """Register continuity only while the caller still owns the durable row."""
 
@@ -644,6 +1311,10 @@ class DurableBridgeRepository:
                 session_values["latest_response_id"] = latest_response_id
                 session_values["latest_input_item_count"] = latest_input_item_count
                 session_values["latest_input_full_fingerprint"] = latest_input_full_fingerprint
+                session_values["latest_pending_tool_calls_json"] = _encode_pending_tool_calls(
+                    latest_response_id,
+                    latest_pending_tool_calls,
+                )
             elif latest_input_item_count is not None and latest_input_full_fingerprint is not None:
                 session_values["latest_input_item_count"] = latest_input_item_count
                 session_values["latest_input_full_fingerprint"] = latest_input_full_fingerprint
@@ -1029,7 +1700,9 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
         result = await session.execute(
             text(
                 "SELECT name FROM sqlite_master "
-                "WHERE type = 'table' AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases')"
+                "WHERE type = 'table' "
+                "AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits', "
+                "'http_bridge_recovery_attempts')"
             )
         )
     else:
@@ -1037,7 +1710,10 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' "
-                "AND table_name IN ('http_bridge_sessions', 'http_bridge_session_aliases')"
+                "AND table_name IN ("
+                "'http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits', "
+                "'http_bridge_recovery_attempts'"
+                ")"
             )
         )
     present = {str(row[0]) for row in result.fetchall()}
@@ -1061,6 +1737,7 @@ _SNAPSHOT_COLUMNS = (
     HttpBridgeSessionRecord.latest_response_id,
     HttpBridgeSessionRecord.latest_input_item_count,
     HttpBridgeSessionRecord.latest_input_full_fingerprint,
+    HttpBridgeSessionRecord.latest_pending_tool_calls_json,
     HttpBridgeSessionRecord.last_seen_at,
     HttpBridgeSessionRecord.closed_at,
 )
@@ -1085,6 +1762,10 @@ def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSess
         latest_response_id=mapping[HttpBridgeSessionRecord.latest_response_id],
         latest_input_item_count=mapping[HttpBridgeSessionRecord.latest_input_item_count],
         latest_input_full_fingerprint=mapping[HttpBridgeSessionRecord.latest_input_full_fingerprint],
+        latest_pending_tool_calls=_decode_pending_tool_calls(
+            mapping[HttpBridgeSessionRecord.latest_response_id],
+            mapping[HttpBridgeSessionRecord.latest_pending_tool_calls_json],
+        ),
         last_seen_at=mapping[HttpBridgeSessionRecord.last_seen_at],
         closed_at=mapping[HttpBridgeSessionRecord.closed_at],
     )
@@ -1110,6 +1791,10 @@ def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSna
         latest_response_id=row.latest_response_id,
         latest_input_item_count=row.latest_input_item_count,
         latest_input_full_fingerprint=row.latest_input_full_fingerprint,
+        latest_pending_tool_calls=_decode_pending_tool_calls(
+            row.latest_response_id,
+            row.latest_pending_tool_calls_json,
+        ),
         last_seen_at=row.last_seen_at,
         closed_at=row.closed_at,
     )
@@ -1120,3 +1805,32 @@ def _to_snapshot_required(row: HttpBridgeSessionRecord) -> DurableBridgeSessionS
     if snapshot is None:
         raise RuntimeError("Expected durable bridge session snapshot")
     return snapshot
+
+
+def _to_recovery_attempt_snapshot(
+    row: HttpBridgeRecoveryAttemptRecord,
+) -> DurableBridgeRecoveryAttemptSnapshot:
+    return DurableBridgeRecoveryAttemptSnapshot(
+        session_id=row.session_id,
+        request_fingerprint=row.request_fingerprint,
+        request_id=row.request_id,
+        account_id=row.account_id,
+        model=row.model,
+        replay_safe=bool(row.replay_safe),
+        state=row.state,
+        response_id=row.response_id,
+    )
+
+
+def _to_retry_circuit_snapshot(row: HttpBridgeRetryCircuit | None) -> DurableBridgeRetryCircuitSnapshot | None:
+    if row is None:
+        return None
+    return DurableBridgeRetryCircuitSnapshot(
+        session_key_kind=row.session_key_kind,
+        session_key_hash=row.session_key_hash,
+        api_key_scope=row.api_key_scope,
+        consecutive_failures=row.consecutive_failures,
+        cooldown_until_epoch=row.cooldown_until_epoch,
+        last_detail=row.last_detail,
+        updated_at_epoch=row.updated_at_epoch,
+    )

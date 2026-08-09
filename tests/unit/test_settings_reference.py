@@ -32,9 +32,8 @@ def _isolated_settings(**overrides: Any) -> Settings:
     """
     clean = {k: v for k, v in os.environ.items() if not k.startswith("CODEX_LB_") and k != "PORT"}
     with mock.patch.dict(os.environ, clean, clear=True):
-        # ``_env_file`` is a documented pydantic-settings init kwarg that its
-        # type stubs do not expose; ty flags it as unknown.
-        return Settings(_env_file=None, **overrides)  # ty: ignore[unknown-argument]
+        # ``_env_file`` is a documented pydantic-settings initialization keyword.
+        return Settings(_env_file=None, **overrides)
 
 
 pytestmark = pytest.mark.unit
@@ -46,7 +45,15 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # number when fields are removed; never raise it without a simplicity-budget
 # discussion — every new CODEX_LB_* setting needs a why-not-a-default
 # justification per CONTRIBUTING.md's simplicity gates.
-MAX_SETTINGS_FIELDS = 119
+# 115 -> 119: account_token_vending_* (fork account ownership topology;
+# zero-config defaults leave vending disabled).
+# 119 -> 120: http_responses_session_bridge_clean_close_retry_jitter_max_seconds
+# (http-bridge clean-close recovery, #1394).
+# 120 -> 121: proxy_api_key_fair_share_congestion_threshold_pct (fair-share
+# gate, issue #1535). Not a hardcoded default because the right congestion
+# threshold depends on pool size and workload mix, and 0-means-off is the P1
+# default-off switch; the companion min-guarantee constant stayed hardcoded.
+MAX_SETTINGS_FIELDS = 121
 
 
 def test_generated_settings_reference_matches_code() -> None:

@@ -14,11 +14,13 @@ from uuid import uuid4
 from app.core import usage as usage_core
 from app.core.auth.reauth_telemetry import REAUTH_SOURCE_PROXY, record_account_status_transition
 from app.core.balancer import (
+    ERROR_BACKOFF_THRESHOLD,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
     TRAFFIC_CLASS_FOREGROUND,
     TRAFFIC_CLASS_OPPORTUNISTIC,
+    USAGE_LIMIT_REACHED,
     AccountState,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
@@ -44,6 +46,9 @@ from app.core.metrics.prometheus import (
     account_lease_acquired_total,
     account_lease_released_total,
     account_lease_stale_reclaimed_total,
+    api_key_fair_share_rejections_total,
+    stream_pool_capacity,
+    stream_pool_inflight,
 )
 from app.core.openai.model_registry import canonical_service_tier_value, get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
@@ -128,6 +133,12 @@ from app.modules.proxy.cap_partitioning import (
     get_cap_partition,
     partition_cap,
 )
+from app.modules.proxy.fair_share import (
+    ApiKeyFairShareDenialError,
+    FairShareDecision,
+    effective_stream_pool_capacity,
+    evaluate_stream_fair_share,
+)
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
@@ -195,6 +206,7 @@ class AccountSelection:
     account: Account | None
     error_message: str | None
     error_code: str | None = None
+    resets_at: int | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
 
@@ -290,7 +302,19 @@ class LoadBalancer:
         kind: AccountLeaseKind,
         estimated_tokens: float = 0.0,
         concurrency_caps: AccountConcurrencyCaps | None = None,
+        api_key_id: str | None = None,
+        api_key_stream_fair_share_threshold_pct: int = 0,
     ) -> AccountLease | None:
+        """Acquire a lease pinned to one account, or None on a cap denial.
+
+        Keyed stream acquires join the same per-key accounting and
+        congestion-gated fair-share admission as selection. A direct acquire
+        is pinned to one account (e.g. a warm HTTP bridge session reacquiring
+        its slot between turns), so the key's usable pool -- and therefore the
+        fair-share candidate set -- is exactly that account. Fair-share
+        denials raise ``ApiKeyFairShareDenialError`` so callers can
+        distinguish them from the plain cap denial ``None``.
+        """
         caps = concurrency_caps or effective_account_concurrency_caps()
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
@@ -305,10 +329,21 @@ class LoadBalancer:
                 if cap > 0 and runtime.inflight_streams >= cap:
                     _record_account_cap_rejection("stream")
                     return None
+                denial = self._api_key_stream_fair_share_denial_locked(
+                    api_key_id=api_key_id,
+                    lease_kind=kind,
+                    candidate_account_ids=(account_id,),
+                    caps=caps,
+                    stream_reserve_slots=0,
+                    threshold_pct=api_key_stream_fair_share_threshold_pct,
+                )
+                if denial is not None:
+                    raise ApiKeyFairShareDenialError(denial)
             return self._acquire_account_lease_locked(
                 account_id,
                 kind=kind,
                 estimated_tokens=estimated_tokens,
+                api_key_id=api_key_id,
             )
 
     async def account_pressure_snapshot(self, account_id: str) -> tuple[int, int, float]:
@@ -325,6 +360,7 @@ class LoadBalancer:
         kind: AccountLeaseKind,
         estimated_tokens: float,
         record_selection: bool = True,
+        api_key_id: str | None = None,
     ) -> AccountLease:
         runtime = self._runtime.setdefault(account_id, RuntimeState())
         lease = AccountLease(
@@ -333,6 +369,7 @@ class LoadBalancer:
             kind=kind,
             acquired_at=time.monotonic(),
             estimated_tokens=max(0.0, estimated_tokens),
+            api_key_id=api_key_id,
         )
         if runtime.leases is None:
             runtime.leases = {}
@@ -341,6 +378,10 @@ class LoadBalancer:
             runtime.inflight_response_creates += 1
         else:
             runtime.inflight_streams += 1
+            if api_key_id is not None:
+                if runtime.stream_key_inflight is None:
+                    runtime.stream_key_inflight = {}
+                runtime.stream_key_inflight[api_key_id] = runtime.stream_key_inflight.get(api_key_id, 0) + 1
         runtime.leased_tokens += lease.estimated_tokens
         if record_selection:
             runtime.last_selected_at = time.time()
@@ -365,7 +406,73 @@ class LoadBalancer:
         effective_cap = max(1, cap - max(0, stream_reserve_slots))
         return cap <= 0 or runtime.inflight_streams < effective_cap
 
-    def _release_account_lease_locked(self, lease: AccountLease, *, reason: str) -> bool:
+    def _api_key_stream_fair_share_denial_locked(
+        self,
+        *,
+        api_key_id: str | None,
+        lease_kind: AccountLeaseKind | None,
+        candidate_account_ids: Collection[str],
+        caps: AccountConcurrencyCaps,
+        stream_reserve_slots: int,
+        threshold_pct: int,
+        redact_sensitive_details: bool = False,
+    ) -> FairShareDecision | None:
+        """Return the denial decision, or None when admitted or inactive.
+
+        Must be called under ``_runtime_lock``: it reads the same runtime
+        lease counters the admission path mutates.
+        """
+        if lease_kind != "stream" or api_key_id is None or threshold_pct <= 0:
+            return None
+        pool_capacity = effective_stream_pool_capacity(
+            candidate_account_count=len(candidate_account_ids),
+            stream_limit=caps.stream_limit,
+            stream_reserve_slots=stream_reserve_slots,
+        )
+        if pool_capacity <= 0:
+            return None
+        pool_inflight = 0
+        requester_inflight = 0
+        other_active_keys: set[str] = set()
+        for account_id in candidate_account_ids:
+            runtime = self._runtime.get(account_id)
+            if runtime is None:
+                continue
+            pool_inflight += runtime.inflight_streams
+            if runtime.stream_key_inflight:
+                requester_inflight += runtime.stream_key_inflight.get(api_key_id, 0)
+                other_active_keys.update(runtime.stream_key_inflight)
+        other_active_keys.discard(api_key_id)
+        decision = evaluate_stream_fair_share(
+            pool_capacity=pool_capacity,
+            pool_inflight=pool_inflight,
+            requester_inflight=requester_inflight,
+            other_active_key_count=len(other_active_keys),
+            threshold_pct=threshold_pct,
+        )
+        _record_stream_pool_gauges(decision.pool_capacity, decision.pool_inflight)
+        if decision.admitted:
+            return None
+        _record_api_key_fair_share_rejection()
+        logger.warning(
+            "API key stream fair share denial api_key_id=%s key_inflight=%s fair_share=%s "
+            "pool_inflight=%s pool_capacity=%s active_keys=%s",
+            "<redacted>" if redact_sensitive_details else api_key_id,
+            decision.requester_inflight,
+            decision.fair_share,
+            decision.pool_inflight,
+            decision.pool_capacity,
+            decision.active_key_count,
+        )
+        return decision
+
+    def _release_account_lease_locked(
+        self,
+        lease: AccountLease,
+        *,
+        reason: str,
+        redact_sensitive_details: bool = False,
+    ) -> bool:
         runtime = self._runtime.get(lease.account_id)
         if runtime is None or runtime.leases is None:
             return False
@@ -376,6 +483,12 @@ class LoadBalancer:
             runtime.inflight_response_creates = max(0, runtime.inflight_response_creates - 1)
         else:
             runtime.inflight_streams = max(0, runtime.inflight_streams - 1)
+            if current.api_key_id is not None and runtime.stream_key_inflight is not None:
+                remaining = runtime.stream_key_inflight.get(current.api_key_id, 0) - 1
+                if remaining > 0:
+                    runtime.stream_key_inflight[current.api_key_id] = remaining
+                else:
+                    runtime.stream_key_inflight.pop(current.api_key_id, None)
         runtime.leased_tokens = max(0.0, runtime.leased_tokens - current.estimated_tokens)
         runtime.version += 1
         _record_account_lease_released(current.kind, reason)
@@ -384,13 +497,17 @@ class LoadBalancer:
             _record_account_lease_stale_reclaimed(current.kind)
             logger.warning(
                 "Reclaimed stale account lease account_id=%s kind=%s age_seconds=%.3f",
-                current.account_id,
+                "<redacted>" if redact_sensitive_details else current.account_id,
                 current.kind,
                 time.monotonic() - current.acquired_at,
             )
         return True
 
-    def _reclaim_stale_account_leases_locked(self) -> None:
+    def _reclaim_stale_account_leases_locked(
+        self,
+        *,
+        redact_sensitive_details: bool = False,
+    ) -> None:
         settings = get_settings()
         now = time.monotonic()
         for runtime in self._runtime.values():
@@ -402,7 +519,11 @@ class LoadBalancer:
                 if now - lease.acquired_at >= _account_lease_stale_ttl_seconds(lease.kind, settings)
             ]
             for lease in stale:
-                self._release_account_lease_locked(lease, reason="stale")
+                self._release_account_lease_locked(
+                    lease,
+                    reason="stale",
+                    redact_sensitive_details=redact_sensitive_details,
+                )
 
     async def select_account(
         self,
@@ -437,6 +558,10 @@ class LoadBalancer:
         stream_reserve_slots: int = 0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         concurrency_caps: AccountConcurrencyCaps | None = None,
+        redact_sensitive_details: bool = False,
+        allow_usage_exhaustion_error: bool = True,
+        api_key_id: str | None = None,
+        api_key_stream_fair_share_threshold_pct: int = 0,
     ) -> AccountSelection:
         return await self._select_account(
             sticky_key,
@@ -469,6 +594,10 @@ class LoadBalancer:
             stream_reserve_slots=stream_reserve_slots,
             traffic_class=traffic_class,
             concurrency_caps=concurrency_caps,
+            redact_sensitive_details=redact_sensitive_details,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            api_key_id=api_key_id,
+            api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
         )
 
     async def _select_account(
@@ -504,6 +633,10 @@ class LoadBalancer:
         stream_reserve_slots: int = 0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         concurrency_caps: AccountConcurrencyCaps | None = None,
+        redact_sensitive_details: bool = False,
+        allow_usage_exhaustion_error: bool = True,
+        api_key_id: str | None = None,
+        api_key_stream_fair_share_threshold_pct: int = 0,
     ) -> AccountSelection:
         if (required_account_is_ownership_constraint or required_continuity_owner) and required_account_id is None:
             raise ValueError("required account ownership flags require required_account_id")
@@ -637,6 +770,7 @@ class LoadBalancer:
         error_message: str | None = None
         selected_lease: AccountLease | None = None
         selection_error_code: str | None = None
+        selection_resets_at: int | None = None
         legacy_existing_account_id: str | None = None
         if sticky_source == "session_header" and legacy_sticky_key is not None:
             async with self._repo_factory() as repos:
@@ -697,9 +831,13 @@ class LoadBalancer:
                     stream_reserve_slots=stream_reserve_slots,
                     traffic_class=traffic_class,
                     concurrency_caps=caps,
+                    redact_sensitive_details=redact_sensitive_details,
+                    api_key_id=api_key_id,
+                    api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
+                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                 ),
             )
             selection_inputs = unbound_outcome.selection_inputs
@@ -707,6 +845,7 @@ class LoadBalancer:
             selected_lease = unbound_outcome.selected_lease
             error_message = unbound_outcome.error_message
             selection_error_code = unbound_outcome.error_code
+            selection_resets_at = unbound_outcome.resets_at
             if unbound_outcome.disposition == "direct_error":
                 return AccountSelection(
                     account=None,
@@ -740,9 +879,13 @@ class LoadBalancer:
                     stream_reserve_slots=stream_reserve_slots,
                     traffic_class=traffic_class,
                     concurrency_caps=caps,
+                    redact_sensitive_details=redact_sensitive_details,
+                    api_key_id=api_key_id,
+                    api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
+                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                 ),
             )
             selection_inputs = sticky_outcome.selection_inputs
@@ -750,6 +893,7 @@ class LoadBalancer:
             selected_lease = sticky_outcome.selected_lease
             error_message = sticky_outcome.error_message
             selection_error_code = sticky_outcome.error_code
+            selection_resets_at = sticky_outcome.resets_at
             if sticky_outcome.disposition == "direct_error":
                 return AccountSelection(
                     account=None,
@@ -796,12 +940,17 @@ class LoadBalancer:
                 and (selection_inputs.accounts or selection_inputs.error_code is not None)
             ):
                 set_normal()
-            return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)
+            return AccountSelection(
+                account=None,
+                error_message=error_message,
+                error_code=selection_error_code,
+                resets_at=selection_resets_at,
+            )
         if not circuit_breaker_open:
             set_normal()
         logger.info(
             "Selected account_id=%s strategy=%s sticky=%s model=%s",
-            selected_snapshot.id,
+            "<redacted>" if redact_sensitive_details else selected_snapshot.id,
             routing_strategy,
             bool(sticky_key),
             model,
@@ -1249,8 +1398,16 @@ class LoadBalancer:
             deterministic_probe=True,
             traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
             ignore_standard_quota=False,
+            usage_exhaustion_states=states,
         )
         if result.account is None:
+            if result.error_code == USAGE_LIMIT_REACHED:
+                return AccountSelection(
+                    account=None,
+                    error_message=result.error_message,
+                    error_code=result.error_code,
+                    resets_at=result.resets_at,
+                )
             return AccountSelection(
                 account=None,
                 error_message=result.error_message,
@@ -1399,8 +1556,11 @@ class LoadBalancer:
         selection_inputs: SelectionInputsProtocol,
         *,
         required_account_id: str | None,
+        redact_sensitive_details: bool,
     ) -> tuple[list[AccountState], dict[str, Account]]:
-        self._reclaim_stale_account_leases_locked()
+        self._reclaim_stale_account_leases_locked(
+            redact_sensitive_details=redact_sensitive_details,
+        )
         self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
         states, account_map = _build_states(
             accounts=selection_inputs.accounts,
@@ -1468,6 +1628,8 @@ class LoadBalancer:
         preserve_existing_mapping_on_fallback: bool = False,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
+        allow_usage_exhaustion_error: bool = True,
+        usage_exhaustion_states: Iterable[AccountState] | None = None,
     ) -> _StickySelectionOutcome:
         return await _run_select_with_stickiness(
             states=states,
@@ -1489,6 +1651,8 @@ class LoadBalancer:
             preserve_existing_mapping_on_fallback=preserve_existing_mapping_on_fallback,
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
 
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)
@@ -1576,7 +1740,17 @@ class LoadBalancer:
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)
 
-    async def record_errors(self, account: Account, count: int) -> None:
+    async def record_error_backoff(self, account: Account) -> None:
+        """Record one error and immediately enter the bounded transient backoff."""
+        await self.record_errors(account, 1, minimum_error_count=ERROR_BACKOFF_THRESHOLD)
+
+    async def record_errors(
+        self,
+        account: Account,
+        count: int,
+        *,
+        minimum_error_count: int = 0,
+    ) -> None:
         """Record *count* transient errors in a single lock acquisition."""
         if count < 1:
             return
@@ -1584,7 +1758,7 @@ class LoadBalancer:
         async with lock:
             account_snapshot = _clone_account(account)
             state = self._state_for(account)
-            state.error_count += count
+            state.error_count = max(state.error_count + count, minimum_error_count)
             state.last_error_at = time.time()
             self._sync_runtime_state(account, state)
             runtime = self._runtime.get(account.id)
@@ -1971,6 +2145,18 @@ def _record_account_cap_rejection(kind: AccountLeaseKind | None) -> None:
         return
     if PROMETHEUS_AVAILABLE and account_cap_rejections_total is not None:
         account_cap_rejections_total.labels(kind=kind).inc()
+
+
+def _record_stream_pool_gauges(pool_capacity: int, pool_inflight: int) -> None:
+    if PROMETHEUS_AVAILABLE and stream_pool_capacity is not None:
+        stream_pool_capacity.set(pool_capacity)
+    if PROMETHEUS_AVAILABLE and stream_pool_inflight is not None:
+        stream_pool_inflight.set(pool_inflight)
+
+
+def _record_api_key_fair_share_rejection() -> None:
+    if PROMETHEUS_AVAILABLE and api_key_fair_share_rejections_total is not None:
+        api_key_fair_share_rejections_total.inc()
 
 
 async def _load_dashboard_additional_quota_routing_overrides() -> dict[str, str]:

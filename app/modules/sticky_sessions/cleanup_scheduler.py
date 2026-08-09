@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -14,7 +15,11 @@ from app.core.config.settings import Settings, get_settings
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
 from app.db.session import SessionLocal, get_background_session
-from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository, missing_durable_bridge_tables
+from app.modules.proxy.durable_bridge_repository import (
+    DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS,
+    DurableBridgeRepository,
+    missing_durable_bridge_tables,
+)
 from app.modules.proxy.ring_membership import RING_MEMBER_RETENTION_SECONDS, RingMembershipService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
@@ -25,6 +30,15 @@ logger = logging.getLogger(__name__)
 # keeps ``interval_seconds`` as a constructor field so tests can exercise the
 # loop with a short interval.
 _CLEANUP_INTERVAL_SECONDS = 300
+
+# A hard codex_session mapping is never rebound while its owner is merely
+# rate-limited/quota-exceeded/paused (see load_balancer.py's hard_sticky
+# branch and openspec/specs/sticky-session-operations/spec.md). This is
+# deliberately far longer than any ordinary quota-reset window (typically
+# minutes to a few hours) so a transient blip never loses its mapping; only
+# an owner stuck unavailable well past when it should have recovered gets
+# its mapping dropped (never rebound) so the next request re-resolves fresh.
+_STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS = 6 * 3600
 
 
 _T = TypeVar("_T")
@@ -109,6 +123,19 @@ class StickySessionCleanupScheduler:
                     deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                     if deleted_count > 0:
                         logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)
+                    cleanup_now = utcnow()
+                    stale_hard_codex_session_cutoff = cleanup_now - timedelta(
+                        seconds=_STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS
+                    )
+                    stale_hard_codex_session_deleted_count = await sticky_repo.purge_stale_hard_codex_session_mappings(
+                        stale_hard_codex_session_cutoff, now=cleanup_now
+                    )
+                    if stale_hard_codex_session_deleted_count > 0:
+                        logger.info(
+                            "Purged stale hard codex_session sticky mappings pinned to a durably unavailable "
+                            "owner deleted_count=%s",
+                            stale_hard_codex_session_deleted_count,
+                        )
                     if startup_module._bridge_durable_schema_ready or not await missing_durable_bridge_tables(session):
                         bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
                         if bridge_deleted_count > 0:
@@ -120,6 +147,14 @@ class StickySessionCleanupScheduler:
                         if abandoned_deleted_count > 0:
                             logger.info(
                                 "Purged abandoned HTTP bridge sessions deleted_count=%s", abandoned_deleted_count
+                            )
+                        retry_circuit_deleted_count = await bridge_repo.purge_retry_circuits_before(
+                            time.time() - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+                        )
+                        if retry_circuit_deleted_count > 0:
+                            logger.info(
+                                "Purged expired HTTP bridge retry circuits deleted_count=%s",
+                                retry_circuit_deleted_count,
                             )
                 ring_cutoff = utcnow() - timedelta(seconds=RING_MEMBER_RETENTION_SECONDS)
                 ring_deleted_count = await RingMembershipService(SessionLocal).purge_stale_before(ring_cutoff)

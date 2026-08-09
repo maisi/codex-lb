@@ -15,6 +15,7 @@ import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import Enum
 from typing import (
     Any,
     AsyncContextManager,
@@ -91,6 +92,7 @@ from app.core.utils.sse import format_sse_event, parse_sse_data_json
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
+CODEX_LB_REQUIRED_CAPABILITY_HEADER = "x-codex-lb-required-capability"
 CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
 CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite"
 
@@ -102,6 +104,7 @@ IGNORE_INBOUND_HEADERS = {
     "forwarded",
     "x-real-ip",
     CODEX_INSTALLATION_ID_HEADER,
+    CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     "true-client-ip",
 }
 INTERNAL_OPENAI_UPSTREAM_HEADERS = frozenset(
@@ -474,6 +477,7 @@ class ProxyResponseError(Exception):
         upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
         failed_session: aiohttp.ClientSession | None = None,
+        retry_after_seconds: int | None = None,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -485,6 +489,25 @@ class ProxyResponseError(Exception):
         self.upstream_status_code = upstream_status_code
         self.upstream_error_code = upstream_error_code
         self.failed_session = failed_session
+        self.retry_after_seconds = retry_after_seconds
+
+
+def is_confirmed_pre_dispatch_transport_error(exc: ProxyResponseError) -> bool:
+    """Return whether the transport proved the upstream request never dispatched.
+
+    Only this provenance authorizes replaying a movable request on another
+    account: a typed connector failure while reaching the account's routed
+    proxy endpoint, before any request bytes could leave for upstream.
+    Host-wide network loss (``proxy_network_unavailable``) stays on its
+    account-neutral process recovery path instead of penalizing the selected
+    account, and ambiguous dispatch outcomes remain non-replayable.
+    """
+
+    if not (exc.retryable_same_contract and exc.failure_phase == "connect"):
+        return False
+    error = exc.payload.get("error")
+    error_code = error.get("code") if isinstance(error, dict) else None
+    return error_code != PROCESS_NETWORK_UNAVAILABLE_CODE
 
 
 def _process_network_failure_error(
@@ -523,6 +546,15 @@ class CodexControlResponse:
     status_code: int
     body: bytes
     headers: Mapping[str, str]
+
+
+class CodexControlRequestPrivacyPolicy(Enum):
+    STANDARD = "standard"
+    PRIVATE_REALTIME = "private_realtime"
+
+    @property
+    def redacts_sensitive_details(self) -> bool:
+        return self is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
 
 
 def _should_drop_inbound_header(name: str) -> bool:
@@ -927,6 +959,7 @@ def _maybe_log_upstream_request_start(
     method: str,
     payload_summary: str,
     payload_json: str | None = None,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
 ) -> None:
     trace_channels = get_settings().trace_channels
     if "upstream_summary" not in trace_channels and "upstream_payload" not in trace_channels:
@@ -937,6 +970,10 @@ def _maybe_log_upstream_request_start(
     account_id = _account_id_for_upstream_log(headers)
     header_keys = _interesting_upstream_header_keys(headers)
 
+    if privacy_policy.redacts_sensitive_details:
+        account_id = "<redacted>"
+        payload_summary = "sensitive private payload redacted"
+        payload_json = None
     if "upstream_summary" in trace_channels:
         logger.info(
             "upstream_request_start request_id=%s kind=%s method=%s target=%s account_id=%s headers=%s payload=%s",
@@ -973,6 +1010,7 @@ def _maybe_log_upstream_request_complete(
     failure_detail: str | None = None,
     failure_exception_type: str | None = None,
     retryable_same_contract: bool | None = None,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
 ) -> None:
     if "upstream_summary" not in get_settings().trace_channels:
         return
@@ -982,6 +1020,13 @@ def _maybe_log_upstream_request_complete(
         level = logging.ERROR
     elif (status_code is not None and status_code >= 400) or error_code is not None:
         level = logging.WARNING
+    account_id = "<redacted>" if privacy_policy.redacts_sensitive_details else _account_id_for_upstream_log(headers)
+    if privacy_policy.redacts_sensitive_details:
+        error_code = "upstream_error" if error_code is not None else None
+        error_message = "Upstream request failed" if error_message is not None else None
+        payload_object = None
+        failure_detail = None
+        failure_exception_type = None
 
     logger.log(
         level,
@@ -995,7 +1040,7 @@ def _maybe_log_upstream_request_complete(
         kind,
         method,
         _summarize_upstream_target(url),
-        _account_id_for_upstream_log(headers),
+        account_id,
         status_code,
         int((time.monotonic() - started_at) * 1000),
         error_code,
@@ -2754,14 +2799,32 @@ async def _stream_responses_with_session(
         pre_request_started_at,
         time.monotonic(),
     )
+    # sock_read carries the idle budget into the phase before response headers
+    # exist. Without it, a connection that is established but never answered is
+    # bounded only by the request budget, which is hours long, while it holds a
+    # per-session response-create gate that later turns queue behind.
     timeout = aiohttp.ClientTimeout(
         total=remaining_request_timeout,
         sock_connect=effective_connect_timeout,
-        sock_read=None,
+        sock_read=effective_idle_timeout,
     )
     started_at = time.monotonic()
 
     async def _stream_via_http(
+        current_headers: Mapping[str, str],
+        current_timeout: aiohttp.ClientTimeout,
+    ) -> AsyncIterator[str]:
+        try:
+            async for event_block in _stream_via_http_attempt(current_headers, current_timeout):
+                yield event_block
+        except aiohttp.SocketTimeoutError as exc:
+            # A socket read timeout means the connection was established and
+            # then produced nothing. That is an idle stream, not a transport
+            # failure, so it joins the idle-timeout path instead of being
+            # reported as an unavailable upstream.
+            raise StreamIdleTimeoutError() from exc
+
+    async def _stream_via_http_attempt(
         current_headers: Mapping[str, str],
         current_timeout: aiohttp.ClientTimeout,
     ) -> AsyncIterator[str]:
@@ -3025,7 +3088,7 @@ async def _stream_responses_with_session(
         timeout = aiohttp.ClientTimeout(
             total=remaining_request_timeout,
             sock_connect=effective_connect_timeout,
-            sock_read=None,
+            sock_read=effective_idle_timeout,
         )
         started_at = time.monotonic()
         _maybe_log_upstream_request_start(
@@ -4241,11 +4304,15 @@ async def codex_control_request(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     allow_direct_egress: bool = True,
 ) -> CodexControlResponse:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     normalized_path = path.strip("/")
+    effective_privacy_policy = (
+        CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME if normalized_path == "realtime/calls" else privacy_policy
+    )
     upstream_path = normalized_path if normalized_path.startswith("wham/") else f"codex/{normalized_path}"
     url = f"{upstream_base}/{upstream_path}"
     request_method = method.upper()
@@ -4290,7 +4357,8 @@ async def codex_control_request(
     error_code: str | None = None
     error_message: str | None = None
     payload_summary: dict[str, JsonValue] | None = None
-    if payload and content_type and "json" in content_type.lower():
+    sensitive_realtime_payload = effective_privacy_policy.redacts_sensitive_details
+    if not sensitive_realtime_payload and payload and content_type and "json" in content_type.lower():
         with contextlib.suppress(Exception):
             decoded = json.loads(payload)
             if isinstance(decoded, dict):
@@ -4300,10 +4368,17 @@ async def codex_control_request(
         url=url,
         headers=upstream_headers,
         method=request_method,
-        payload_summary=_summarize_json_payload(payload_summary or {}),
-        payload_json=payload.decode("utf-8", errors="replace")
-        if payload is not None and "upstream_payload" in settings.trace_channels
-        else None,
+        payload_summary=(
+            "sensitive realtime payload redacted"
+            if sensitive_realtime_payload
+            else _summarize_json_payload(payload_summary or {})
+        ),
+        payload_json=(
+            payload.decode("utf-8", errors="replace")
+            if not sensitive_realtime_payload and payload is not None and "upstream_payload" in settings.trace_channels
+            else None
+        ),
+        privacy_policy=effective_privacy_policy,
     )
     try:
         if route is not None:
@@ -4420,6 +4495,7 @@ async def codex_control_request(
                 status_code=status_code,
                 error_code=error_code,
                 error_message=error_message,
+                privacy_policy=effective_privacy_policy,
             )
         finally:
             if lease is not None:

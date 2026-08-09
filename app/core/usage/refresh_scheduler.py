@@ -192,6 +192,10 @@ class UsageRefreshScheduler:
                             window="secondary",
                             account_ids=selected_account_ids,
                         )
+                        before_monthly = await usage_repo.latest_by_account(
+                            window="monthly",
+                            account_ids=selected_account_ids,
+                        )
                     detach_session_objects(session)
                 account_count = len(accounts)
                 if selected_account is None:
@@ -214,6 +218,10 @@ class UsageRefreshScheduler:
                             window="secondary",
                             account_ids=selected_account_ids,
                         )
+                        after_monthly = await usage_repo.latest_by_account(
+                            window="monthly",
+                            account_ids=selected_account_ids,
+                        )
                         dashboard_settings = await settings_repo.get_or_create()
                         refreshed_accounts = await accounts_repo.list_accounts(refresh_existing=True)
                         refreshed_selected_accounts = [
@@ -233,9 +241,17 @@ class UsageRefreshScheduler:
                         stagger_accounts=refreshed_accounts,
                         settings=dashboard_settings,
                         before_primary=before_primary,
-                        before_secondary=before_secondary,
+                        before_secondary=_select_long_window_entries(
+                            accounts=refreshed_selected_accounts,
+                            monthly_entries=before_monthly,
+                            secondary_entries=before_secondary,
+                        ),
                         after_primary=after_primary,
-                        after_secondary=after_secondary,
+                        after_secondary=_select_long_window_entries(
+                            accounts=refreshed_selected_accounts,
+                            monthly_entries=after_monthly,
+                            secondary_entries=after_secondary,
+                        ),
                         refresh_started_at=refresh_started_at,
                         usage_refresh_interval_seconds=self.interval_seconds,
                     )
@@ -368,3 +384,21 @@ def _select_long_window_entry(
     if monthly_entry is not None and capacity_for_plan(account.plan_type, "monthly") is not None:
         return monthly_entry
     return secondary_entry
+
+
+def _select_long_window_entries(
+    *,
+    accounts: list[Account],
+    monthly_entries: dict[str, UsageHistory],
+    secondary_entries: dict[str, UsageHistory],
+) -> dict[str, UsageHistory]:
+    selected: dict[str, UsageHistory] = {}
+    for account in accounts:
+        entry = _select_long_window_entry(
+            account=account,
+            monthly_entry=monthly_entries.get(account.id),
+            secondary_entry=secondary_entries.get(account.id),
+        )
+        if entry is not None:
+            selected[account.id] = entry
+    return selected

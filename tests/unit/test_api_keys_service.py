@@ -20,6 +20,7 @@ from app.db.models import (
     ModelSource,
     UsageHistory,
 )
+from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -75,7 +76,6 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self.commit_calls = 0
         self.rollback_calls = 0
         self.commit_count = 0
-        self.update_last_used_commit_flags: list[bool] = []
         self.touched_reservations: list[str] = []
 
     async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey:
@@ -198,14 +198,6 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self._source_assignments.pop(key_id, None)
         return True
 
-    async def update_last_used(self, key_id: str, *, commit: bool = True) -> None:
-        self.update_last_used_commit_flags.append(commit)
-        row = self.rows.get(key_id)
-        if row is not None:
-            row.last_used_at = utcnow()
-        if commit:
-            await self.commit()
-
     async def commit(self) -> None:
         self.commit_calls += 1
         self.commit_count += 1
@@ -287,9 +279,6 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             increment = _compute_increment(limit, input_tokens, output_tokens, cost_microdollars)
             if increment > 0:
                 limit.current_value += increment
-        row = self.rows.get(key_id)
-        if row is not None:
-            row.last_used_at = utcnow()
 
     async def reset_limit(self, limit_id: int, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool:
         for limits in self._limits.values():
@@ -2004,8 +1993,8 @@ async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
     [
         ("gpt-5.6", 286_720, 31_000_000),
         ("gpt-5.6-sol-snapshot", 286_720, 31_000_000),
-        ("gpt-5.6-terra-snapshot", 143_360, 15_500_000),
-        ("gpt-5.6-luna-snapshot", 57_344, 6_200_000),
+        ("gpt-5.6-terra-snapshot", 114_688, 12_400_000),
+        ("gpt-5.6-luna-snapshot", 11_468, 1_240_000),
     ],
 )
 async def test_usage_reservation_uses_gpt_5_6_personality_pricing(
@@ -2129,9 +2118,10 @@ async def test_finalize_usage_reservation_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalize_usage_reservation_updates_last_used_in_settlement_commit() -> None:
+async def test_finalize_usage_reservation_records_last_used_in_coalescer() -> None:
     repo = _FakeApiKeysRepository()
-    service = ApiKeysService(repo)
+    coalescer = ApiKeyLastUsedCoalescer()
+    service = ApiKeysService(repo, last_used_coalescer=coalescer)
     created = await service.create_key(
         ApiKeyCreateData(
             name="reservation-last-used-key",
@@ -2157,8 +2147,12 @@ async def test_finalize_usage_reservation_updates_last_used_in_settlement_commit
 
     stored = await repo.get_by_id(created.id)
     assert stored is not None
-    assert stored.last_used_at is not None
-    assert repo.update_last_used_commit_flags == [False]
+    # Write-behind: the settlement commit no longer carries the last_used_at
+    # UPDATE; the touch is recorded in the coalescer for the periodic flush.
+    assert stored.last_used_at is None
+    pending = coalescer.pending_snapshot()
+    assert set(pending) == {created.id}
+    assert pending[created.id] <= utcnow()
     assert repo.commit_count == initial_commit_count + 2
 
 
