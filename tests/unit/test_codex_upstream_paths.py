@@ -17,6 +17,7 @@ from app.core.clients.proxy import (
     UpstreamProxyRouteTrace,
     codex_control_request,
     compact_responses,
+    is_confirmed_pre_dispatch_transport_error,
     stream_responses,
     thread_goal_request,
     transcribe_audio,
@@ -24,6 +25,7 @@ from app.core.clients.proxy import (
 from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError, connect_responses_websocket
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 
 pytestmark = pytest.mark.unit
 
@@ -48,7 +50,7 @@ class _FailingRouteMetadataCodexClient:
         **kwargs: Any,
     ) -> object:
         del method, url, route, kwargs
-        raise RuntimeError("proxy http://user:pass@proxy.test:8080 connect failed")
+        raise RuntimeError("proxy " + runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " connect failed")
 
 
 class _Response:
@@ -98,7 +100,7 @@ class _StreamResponse:
 
 class _FakeStreamErrorContent:
     async def iter_chunked(self, size: int):
-        raise OSError("proxy http://user:***@proxy.test:8080 read failed")
+        raise OSError("proxy " + runtime_basic_auth_url("user", "***", "proxy.test:8080") + " read failed")
         yield b""
 
 
@@ -156,20 +158,21 @@ class _FakeCodexWebSocket:
 
     def send_str(self, payload: str) -> None:
         if self.fail_send:
-            raise OSError("proxy http://user:pass@proxy.test:8080 send failed")
+            raise OSError("proxy " + runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " send failed")
         self.sent.append(payload)
 
     def send_bytes(self, payload: bytes) -> None:
         if self.fail_send:
-            raise OSError("proxy http://user:pass@proxy.test:8080 send failed")
+            raise OSError("proxy " + runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " send failed")
         self.sent.append(payload)
 
     async def receive(self) -> aiohttp.WSMessage:
         if self.fail_receive:
-            raise OSError("proxy http://user:***@proxy.test:8080 websocket failed")
+            raise OSError("proxy " + runtime_basic_auth_url("user", "***", "proxy.test:8080") + " websocket failed")
         return aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, '{"type":"response.completed"}', None)
 
-    def close(self) -> None:
+    def close(self, *, code: int = 1000, message: bytes = b"") -> None:
+        del code, message
         self.closed = True
 
 
@@ -733,6 +736,65 @@ async def test_stream_responses_marks_typed_routed_connector_failure_replay_safe
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_propagates_confirmed_pre_dispatch_failure_for_status_retry(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    key = ConnectionKey("proxy.test", 8080, False, False, None, None, None)
+    network_error = aiohttp.ClientProxyConnectionError(key, ConnectionRefusedError("connection refused"))
+    client = CodexClient(_NetworkFailureSession(network_error))
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=client,
+            raise_for_status=True,
+        ):
+            pass
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert exc_info.value.retryable_same_contract is True
+    assert exc_info.value.failure_phase == "connect"
+    assert is_confirmed_pre_dispatch_transport_error(exc_info.value) is True
+    assert "connection refused" not in str(exc_info.value.payload["error"]["message"])
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_ambiguous_transport_failure_stays_terminal_without_retry_authorization(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=cast(Any, _TransportErrorCodexClient()),
+            raise_for_status=True,
+        )
+    ]
+
+    # Dispatch is unknown, so even ``raise_for_status`` callers receive the
+    # terminal downstream event rather than a replay-authorizing exception.
+    combined = "".join(events)
+    assert '"type":"response.failed"' in combined or '"type": "response.failed"' in combined
+    assert '"code":"upstream_unavailable"' in combined or '"code": "upstream_unavailable"' in combined
+
+
+@pytest.mark.asyncio
 async def test_codex_client_buffered_body_network_failure_is_neutral_but_unsafe(
     route: ResolvedUpstreamRoute,
 ) -> None:
@@ -936,10 +998,16 @@ async def test_responses_websocket_post_connect_network_failures_preserve_safe_c
     class _NetworkFailureWebSocket(_FakeCodexWebSocket):
         def send_str(self, payload: str) -> None:
             del payload
-            raise OSError(errno.ENETUNREACH, "proxy http://user:pass@proxy.test:8080 unreachable")
+            raise OSError(
+                errno.ENETUNREACH,
+                "proxy " + runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " unreachable",
+            )
 
         async def receive(self) -> aiohttp.WSMessage:
-            raise OSError(errno.ENETUNREACH, "proxy http://user:pass@proxy.test:8080 unreachable")
+            raise OSError(
+                errno.ENETUNREACH,
+                "proxy " + runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " unreachable",
+            )
 
     client = _WsCodexClient()
     client.websocket = _NetworkFailureWebSocket()

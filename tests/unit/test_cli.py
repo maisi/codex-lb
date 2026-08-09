@@ -23,7 +23,7 @@ def test_main_passes_timestamped_log_config(monkeypatch):
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(sys, "argv", ["codex-lb"])
-    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(cli, "_run_server", fake_run)
 
     cli.main()
 
@@ -36,7 +36,55 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
     assert kwargs["timeout_keep_alive"] == 7200
     assert kwargs["ws_max_size"] == 128 * 1024 * 1024
+    assert "workers" not in kwargs
     assert kwargs["proxy_headers"] is False
+
+
+def test_main_pins_one_worker_when_web_concurrency_requests_more(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeConfig:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            captured["workers"] = kwargs["workers"]
+            self.workers = kwargs["workers"]
+
+        def load_app(self) -> None:
+            captured["loaded"] = True
+
+    class FakeServer:
+        started = True
+
+        def __init__(self, _config: FakeConfig, *, drain_timeout_seconds: float) -> None:
+            captured["drain_timeout_seconds"] = drain_timeout_seconds
+
+        def run(self) -> None:
+            captured["ran"] = True
+
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(Config=FakeConfig))
+    monkeypatch.setattr(cli, "_load_graceful_drain_server", lambda: FakeServer)
+    monkeypatch.setattr(cli, "_load_shutdown_drain_timeout_seconds", lambda: 17)
+
+    cli.main([])
+
+    assert captured == {
+        "workers": 1,
+        "loaded": True,
+        "drain_timeout_seconds": 17,
+        "ran": True,
+    }
+
+
+def test_main_validates_selected_port_before_loading_uvicorn(monkeypatch):
+    def fail_load_uvicorn():
+        pytest.fail("Uvicorn must not load when the selected port conflicts with the metrics port")
+
+    monkeypatch.setenv("PORT", "2455")
+    monkeypatch.setenv("CODEX_LB_METRICS_PORT", "9090")
+    monkeypatch.setattr(cli, "_load_uvicorn", fail_load_uvicorn)
+
+    with pytest.raises(ValueError, match="metrics_port must not match the main application port \\(9090\\)"):
+        cli.main(["--port", "9090"])
 
 
 def test_main_passes_custom_keep_alive_timeout(monkeypatch):
@@ -47,7 +95,7 @@ def test_main_passes_custom_keep_alive_timeout(monkeypatch):
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(sys, "argv", ["codex-lb", "--timeout-keep-alive", "900"])
-    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(cli, "_run_server", fake_run)
 
     cli.main()
 
@@ -62,7 +110,7 @@ def test_main_passes_custom_ws_max_size_flag(monkeypatch):
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(sys, "argv", ["codex-lb", "--ws-max-size", "33554432"])
-    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(cli, "_run_server", fake_run)
 
     cli.main()
 
@@ -78,7 +126,7 @@ def test_main_reads_ws_max_size_from_env(monkeypatch):
 
     monkeypatch.setattr(sys, "argv", ["codex-lb"])
     monkeypatch.setenv("UVICORN_WS_MAX_SIZE", "67108864")
-    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(cli, "_run_server", fake_run)
 
     cli.main()
 
@@ -94,7 +142,7 @@ def test_main_ws_max_size_flag_overrides_env(monkeypatch):
 
     monkeypatch.setattr(sys, "argv", ["codex-lb", "--ws-max-size", "33554432"])
     monkeypatch.setenv("UVICORN_WS_MAX_SIZE", "67108864")
-    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(cli, "_run_server", fake_run)
 
     cli.main()
 
@@ -118,7 +166,7 @@ def test_main_reports_non_positive_ws_max_size(monkeypatch):
 
 @pytest.mark.parametrize("source", ["flag", "env"])
 def test_main_reports_invalid_server_port_before_loading_uvicorn(monkeypatch, source):
-    def fail_load_uvicorn():
+    def fail_run_server(*_args, **_kwargs):
         pytest.fail("Uvicorn must not load for a non-integer server port")
 
     if source == "flag":
@@ -127,7 +175,7 @@ def test_main_reports_invalid_server_port_before_loading_uvicorn(monkeypatch, so
     else:
         monkeypatch.setenv("PORT", "not-a-port")
         argv = []
-    monkeypatch.setattr(cli, "_load_uvicorn", fail_load_uvicorn)
+    monkeypatch.setattr(cli, "_run_server", fail_run_server)
 
     with pytest.raises(SystemExit) as exc_info:
         cli.main(argv)
@@ -138,7 +186,7 @@ def test_main_reports_invalid_server_port_before_loading_uvicorn(monkeypatch, so
 @pytest.mark.parametrize("source", ["flag", "env"])
 @pytest.mark.parametrize("raw_port", ["-1", "65536", "70000"])
 def test_main_rejects_out_of_range_server_port_before_loading_uvicorn(monkeypatch, source, raw_port):
-    def fail_load_uvicorn():
+    def fail_run_server(*_args, **_kwargs):
         pytest.fail("Uvicorn must not load for an out-of-range server port")
 
     if source == "flag":
@@ -147,7 +195,7 @@ def test_main_rejects_out_of_range_server_port_before_loading_uvicorn(monkeypatc
     else:
         monkeypatch.setenv("PORT", raw_port)
         argv = []
-    monkeypatch.setattr(cli, "_load_uvicorn", fail_load_uvicorn)
+    monkeypatch.setattr(cli, "_run_server", fail_run_server)
 
     with pytest.raises(SystemExit, match=r"--port/PORT must be between 0 and 65535 inclusive"):
         cli.main(argv)
@@ -167,11 +215,171 @@ def test_main_forwards_server_port_boundaries(monkeypatch, source, raw_port):
     else:
         monkeypatch.setenv("PORT", raw_port)
         argv = []
-    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(cli, "_run_server", fake_run)
 
     cli.main(argv)
 
     assert captured["kwargs"]["port"] == int(raw_port)
+
+
+def test_run_server_uses_graceful_server_and_shared_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeConfig:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured["config_args"] = args
+            captured["config_kwargs"] = kwargs
+            self.workers = 1
+
+        def load_app(self) -> None:
+            captured["loaded"] = True
+
+    class FakeServer:
+        started = True
+
+        def __init__(self, config: FakeConfig, *, drain_timeout_seconds: float) -> None:
+            captured["config"] = config
+            captured["drain_timeout_seconds"] = drain_timeout_seconds
+
+        def run(self) -> None:
+            captured["ran"] = True
+
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(Config=FakeConfig))
+    monkeypatch.setattr(cli, "_load_graceful_drain_server", lambda: FakeServer)
+    monkeypatch.setattr(cli, "_load_shutdown_drain_timeout_seconds", lambda: 17)
+
+    cli._run_server("app.main:app", host="127.0.0.1", port=2455)
+
+    assert captured["config_args"] == ("app.main:app",)
+    assert captured["config_kwargs"] == {
+        "host": "127.0.0.1",
+        "port": 2455,
+        "workers": 1,
+        "timeout_graceful_shutdown": 17,
+    }
+    assert captured["drain_timeout_seconds"] == 17
+    assert captured["loaded"] is True
+    assert captured["ran"] is True
+
+
+def test_run_server_pins_one_worker_despite_ambient_web_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeConfig:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            workers = kwargs["workers"]
+            assert isinstance(workers, int)
+            captured["workers"] = workers
+            self.workers = workers
+
+        def load_app(self) -> None:
+            captured["loaded"] = True
+
+    class FakeServer:
+        started = True
+
+        def __init__(self, _config: FakeConfig, *, drain_timeout_seconds: float) -> None:
+            assert drain_timeout_seconds == 17
+
+        def run(self) -> None:
+            captured["server_ran"] = True
+
+    monkeypatch.setenv("WEB_CONCURRENCY", "3")
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(Config=FakeConfig))
+    monkeypatch.setattr(cli, "_load_graceful_drain_server", lambda: FakeServer)
+    monkeypatch.setattr(cli, "_load_shutdown_drain_timeout_seconds", lambda: 17)
+
+    cli._run_server("app.main:app", host="127.0.0.1", port=2455)
+
+    assert captured["loaded"] is True
+    assert captured["workers"] == 1
+    assert captured["server_ran"] is True
+
+
+def test_run_server_reports_uvicorn_startup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConfig:
+        workers = 1
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def load_app(self) -> None:
+            return None
+
+    class FakeServer:
+        started = False
+
+        def __init__(self, _config: FakeConfig, *, drain_timeout_seconds: float) -> None:
+            assert drain_timeout_seconds == 17
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(Config=FakeConfig))
+    monkeypatch.setattr(cli, "_load_graceful_drain_server", lambda: FakeServer)
+    monkeypatch.setattr(cli, "_load_shutdown_drain_timeout_seconds", lambda: 17)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_server("app.main:app", host="127.0.0.1", port=2455)
+
+    assert exc_info.value.code == 3
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_run_server_handles_keyboard_interrupt_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    started: bool,
+) -> None:
+    class FakeConfig:
+        workers = 1
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def load_app(self) -> None:
+            return None
+
+    class FakeServer:
+        def __init__(self, _config: FakeConfig, *, drain_timeout_seconds: float) -> None:
+            assert drain_timeout_seconds == 17
+            self.started = started
+
+        def run(self) -> None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(Config=FakeConfig))
+    monkeypatch.setattr(cli, "_load_graceful_drain_server", lambda: FakeServer)
+    monkeypatch.setattr(cli, "_load_shutdown_drain_timeout_seconds", lambda: 17)
+
+    cli._run_server("app.main:app", host="127.0.0.1", port=2455)
+
+
+def test_run_server_handles_keyboard_interrupt_during_app_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConfig:
+        workers = 1
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def load_app(self) -> None:
+            raise KeyboardInterrupt
+
+    def fail_load_server() -> None:
+        pytest.fail("The server must not be constructed after interrupted app loading")
+
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(Config=FakeConfig))
+    monkeypatch.setattr(cli, "_load_graceful_drain_server", fail_load_server)
+    monkeypatch.setattr(cli, "_load_shutdown_drain_timeout_seconds", lambda: 17)
+
+    cli._run_server("app.main:app", host="127.0.0.1", port=2455)
 
 
 def test_main_reports_invalid_keep_alive_timeout_env(monkeypatch):

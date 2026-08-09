@@ -13,23 +13,22 @@ services:
       - "2455:2455"
       - "1455:1455"
     command:
-      # uvicorn directly (not `fastapi run`) so --ws-max-size matches the
-      # websocket ingress budget that app.cli applies in production.
-      - uvicorn
-      - app.main:app
-      - --no-proxy-headers
+      # Keep development on the same pre-connection drain launcher as
+      # production. Compose watch restarts the service after source sync.
+      - python
+      - -m
+      - app.cli
       - --host
       - 0.0.0.0
       - --port
       - "2455"
-      - --reload
       - --ws-max-size
       - "134217728"
     volumes:
       - codex-lb-data:/var/lib/codex-lb
     develop:
       watch:
-        - action: sync
+        - action: sync+restart
           path: ./app
           target: /app/app
         - action: rebuild
@@ -109,7 +108,7 @@ services:
     restart: unless-stopped
 
   postgres-upgrade:
-    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:01136fdc26ce0234df32e09f1dd7a43e9a1012c5055c9d04a2f7c789c833ba90
+    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:19f988b90c8d0ad9c7edd70cf23c83e069abd8a57f0fdce0373588ddaf189894
     profiles: ["postgres-upgrade"]
     environment:
       POSTGRES_USER: codex_lb

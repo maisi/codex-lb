@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 119 settings. Every setting is an environment
+codex-lb currently exposes 121 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -82,6 +82,7 @@ the host side of the compose `ports` mapping instead.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL` | `str \| None` | `None` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS` | `float` | `2.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS` | `float` | `900.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` | `bool` | `False` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED` | `bool` | `True` |
@@ -107,6 +108,7 @@ the host side of the compose `ports` mapping instead.
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT` | `int` | `8` |
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` | `int` | `1` |
 | `CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS` | `float` | `10.0` |
+| `CODEX_LB_PROXY_API_KEY_FAIR_SHARE_CONGESTION_THRESHOLD_PCT` | `int` | `0` |
 | `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT` | `int` | `64` |
 | `CODEX_LB_PROXY_DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT_SECONDS` | `float` | `120.0` |
 | `CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS` | `float` | `5.0` |

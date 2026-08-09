@@ -4,8 +4,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
-from sqlalchemy import BigInteger, Integer, cast, delete, func, select, true, update
+from sqlalchemy import BigInteger, Integer, cast, delete, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 
@@ -24,9 +25,12 @@ from app.db.models import (
     LimitWindow,
     ModelSource,
     RequestLog,
+    RequestUsageHourlyRollup,
 )
-from app.db.session import sqlite_writer_section
+from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read_api_key_rollup_state
+from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, to_dimension
+from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_hourly_window
 from app.modules.api_keys.limit_windows import advance_limit_reset
 
 
@@ -381,11 +385,6 @@ class ApiKeysRepository:
         await self._session.commit()
         return True
 
-    async def update_last_used(self, key_id: str, *, commit: bool = True) -> None:
-        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
-        if commit:
-            await self._session.commit()
-
     async def commit(self) -> None:
         await self._session.commit()
 
@@ -480,7 +479,6 @@ class ApiKeysRepository:
                     .where(ApiKeyLimit.id == limit.id)
                     .values(current_value=ApiKeyLimit.current_value + increment)
                 )
-        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
         await self._session.commit()
 
     async def reset_limit(self, limit_id: int, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool:
@@ -605,6 +603,10 @@ class ApiKeysRepository:
         model: str,
         items: list[UsageReservationItemData],
     ) -> None:
+        # Telemetry write: reservation creation (and the limit counters it
+        # rides with) is per-request usage accounting, so the enclosing
+        # transaction's commit may skip the synchronous WAL flush.
+        await relax_commit_durability(self._session)
         reservation = ApiKeyUsageReservation(
             id=reservation_id,
             api_key_id=key_id,
@@ -737,6 +739,11 @@ class ApiKeysRepository:
         cached_input_tokens: int | None,
         cost_microdollars: int | None,
     ) -> None:
+        # Telemetry write: reservation settlement (finalize/fail/release,
+        # including the last_used_at touch that rides the same transaction)
+        # is per-request usage accounting, so the enclosing transaction's
+        # commit may skip the synchronous WAL flush.
+        await relax_commit_durability(self._session)
         await self._session.execute(
             update(ApiKeyUsageReservation)
             .where(ApiKeyUsageReservation.id == reservation_id)
@@ -763,23 +770,43 @@ class ApiKeysRepository:
         self,
         *,
         cutoff: datetime,
+        max_age_cutoff: datetime | None = None,
         batch_size: int = _STALE_USAGE_RESERVATION_RELEASE_BATCH_SIZE,
     ) -> int:
         released_count = 0
+
+        # ``cutoff`` reclaims reservations whose heartbeat stopped refreshing
+        # ``updated_at``. ``max_age_cutoff`` is the backstop for orphaned
+        # heartbeats (issue #1594): a leaked heartbeat task keeps touching
+        # ``updated_at`` forever, so reservations older than this hard ceiling
+        # on ``created_at`` are reclaimed regardless of heartbeat activity.
+        def _stale_clause(query: Any) -> Any:
+            stale = ApiKeyUsageReservation.updated_at < cutoff
+            if max_age_cutoff is not None:
+                stale = or_(stale, ApiKeyUsageReservation.created_at < max_age_cutoff)
+            return query.where(stale)
 
         try:
             while True:
                 async with sqlite_writer_section():
                     result = await self._session.execute(
-                        select(ApiKeyUsageReservation.id)
-                        .where(ApiKeyUsageReservation.status == "reserved")
-                        .where(ApiKeyUsageReservation.updated_at < cutoff)
+                        _stale_clause(
+                            select(ApiKeyUsageReservation.id).where(ApiKeyUsageReservation.status == "reserved")
+                        )
                         .order_by(ApiKeyUsageReservation.updated_at.asc())
                         .limit(batch_size)
                     )
                     reservation_ids = list(result.scalars().all())
                     if not reservation_ids:
                         break
+
+                    # Telemetry write: stale-reservation release settles the
+                    # same per-request accounting rows as the request-path
+                    # settlement (reservation status flip plus limit-counter
+                    # adjustments), and a crash-lost batch is simply reclaimed
+                    # by the next scheduler run. Each batch commits its own
+                    # transaction, so relax every batch individually.
+                    await relax_commit_durability(self._session)
 
                     item_result = await self._session.execute(
                         select(
@@ -807,10 +834,11 @@ class ApiKeysRepository:
 
                     for reservation_id in reservation_ids:
                         claimed = await self._session.execute(
-                            update(ApiKeyUsageReservation)
-                            .where(ApiKeyUsageReservation.id == reservation_id)
-                            .where(ApiKeyUsageReservation.status == "reserved")
-                            .where(ApiKeyUsageReservation.updated_at < cutoff)
+                            _stale_clause(
+                                update(ApiKeyUsageReservation)
+                                .where(ApiKeyUsageReservation.id == reservation_id)
+                                .where(ApiKeyUsageReservation.status == "reserved")
+                            )
                             .values(
                                 status="released",
                                 input_tokens=None,
@@ -881,42 +909,79 @@ class ApiKeysRepository:
         until: datetime,
         bucket_seconds: int = 3600,
     ) -> list[ApiKeyTrendBucket]:
-        bind = self._session.get_bind()
-        dialect = bind.dialect.name if bind else "sqlite"
-        if dialect == "postgresql":
-            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
-        else:
-            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
-            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
-        bucket_col = bucket_expr.label("bucket_epoch")
+        # Folded history from the hourly rollups (the api_key_id dimension
+        # and the output-or-reasoning measure were folded for exactly this
+        # read); raw only covers the un-folded complement. Non-hour-multiple
+        # bucket sizes degrade to the full raw scan.
+        merged: dict[int, list[float]] = {}
 
-        stmt = (
-            select(
-                bucket_col,
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
-                func.coalesce(
-                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
-                    0,
-                ).label("total_output_tokens"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+        def _add(bucket_epoch: int, input_tokens: int, output_tokens: int, cost_usd: float) -> None:
+            entry = merged.setdefault(bucket_epoch, [0, 0, 0.0])
+            entry[0] += input_tokens
+            entry[1] += output_tokens
+            entry[2] += cost_usd
+
+        raw_windows: list[RawWindow] = [(since, until)]
+        if bucket_seconds > 0 and bucket_seconds % HOURLY_BUCKET_SECONDS == 0:
+            rollup_rows, raw_windows = await read_hourly_window(
+                self._session,
+                since,
+                until,
+                filters=(
+                    RequestUsageHourlyRollup.api_key_id == to_dimension(key_id),
+                    RequestUsageHourlyRollup.request_kind.not_in(WARMUP_REQUEST_KINDS),
+                ),
             )
-            .where(
-                RequestLog.api_key_id == key_id,
-                RequestLog.requested_at >= since,
-                RequestLog.requested_at < until,
-                self._exclude_warmup_clause(),
+            for rollup in rollup_rows:
+                _add(
+                    rollup.bucket_epoch // bucket_seconds * bucket_seconds,
+                    rollup.input_tokens,
+                    rollup.output_or_reasoning_tokens,
+                    rollup.cost_usd,
+                )
+        if raw_windows:
+            bind = self._session.get_bind()
+            dialect = bind.dialect.name if bind else "sqlite"
+            if dialect == "postgresql":
+                bucket_expr = (
+                    func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+                )
+            else:
+                epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+                bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+            bucket_col = bucket_expr.label("bucket_epoch")
+
+            stmt = (
+                select(
+                    bucket_col,
+                    func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
+                    func.coalesce(
+                        func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                        0,
+                    ).label("total_output_tokens"),
+                    func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+                )
+                .where(
+                    RequestLog.api_key_id == key_id,
+                    raw_windows_clause(raw_windows),
+                    self._exclude_warmup_clause(),
+                )
+                .group_by(bucket_col)
             )
-            .group_by(bucket_col)
-            .order_by(bucket_col)
-        )
-        result = await self._session.execute(stmt)
+            for row in (await self._session.execute(stmt)).all():
+                _add(
+                    int(row.bucket_epoch),
+                    int(row.total_input_tokens or 0),
+                    int(row.total_output_tokens or 0),
+                    float(row.total_cost_usd or 0.0),
+                )
         return [
             ApiKeyTrendBucket(
-                bucket_epoch=int(row.bucket_epoch),
-                total_tokens=int((row.total_input_tokens or 0) + (row.total_output_tokens or 0)),
-                total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
+                bucket_epoch=bucket_epoch,
+                total_tokens=int(entry[0] + entry[1]),
+                total_cost_usd=round(float(entry[2]), 6),
             )
-            for row in result.all()
+            for bucket_epoch, entry in sorted(merged.items())
         ]
 
     async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:

@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +27,9 @@ from app.db.models import (
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
     RequestLog,
+    RuntimeSentinel,
     StickySession,
+    StickySessionKind,
     UsageHistory,
 )
 from app.db.session import sqlite_writer_section
@@ -35,12 +39,22 @@ from app.modules.accounts.usage_rollup import (
     lock_fold_state,
     merge_rollups_into,
 )
+from app.modules.accounts.usage_time_rollup import (
+    merge_time_rollups_into,
+    mirror_account_hard_delete_into_time_rollups,
+    mirror_account_soft_delete_into_time_rollups,
+)
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
+from app.modules.usage.plan_downgrade_observations import discard_plan_downgrade_observations
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 _UNSET = object()
+_HARD_STICKY_UNAVAILABLE_STATUSES = frozenset(
+    (AccountStatus.PAUSED, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
+)
+_HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL = "hard_sticky_outage_grace_seeded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +252,7 @@ class AccountsRepository:
                 email=account.email,
             )
             if canonical is not None:
-                _apply_account_updates(canonical, account)
+                await self._apply_account_replacement(canonical, account)
                 usage_cache_dirty = await self._reconcile_chatgpt_identity_duplicates(
                     canonical=canonical,
                     chatgpt_account_id=account.chatgpt_account_id,
@@ -263,7 +277,7 @@ class AccountsRepository:
                 account,
                 merge_by_chatgpt_identity=merge_by_chatgpt_identity,
             ):
-                _apply_account_updates(existing, account)
+                await self._apply_account_replacement(existing, account)
                 await self._session.commit()
                 await self._session.refresh(existing)
                 return existing
@@ -272,7 +286,7 @@ class AccountsRepository:
         if merge_by_email:
             existing_by_email = await self._single_account_by_email(account.email)
             if existing_by_email:
-                _apply_account_updates(existing_by_email, account)
+                await self._apply_account_replacement(existing_by_email, account)
                 await self._session.commit()
                 await self._session.refresh(existing_by_email)
                 return existing_by_email
@@ -291,10 +305,24 @@ class AccountsRepository:
             existing = await self._session.get(Account, account_id)
             if existing is None:
                 return None
-            _apply_account_updates(existing, account)
+            await self._apply_account_replacement(existing, account)
             await self._session.commit()
             await self._session.refresh(existing)
             return existing
+
+    async def _apply_account_replacement(self, target: Account, source: Account) -> None:
+        """Apply freshly imported or reauthorized material onto an existing row.
+
+        Every in-place credential replacement goes through here rather than
+        calling :func:`_apply_account_updates` directly, so replacing a
+        credential always discards the account's pending plan-downgrade
+        evidence in the same transaction: evidence gathered under the previous
+        credential must not count toward a downgrade for the new one (#1456).
+        Routine token rotation is a different event with its own path
+        (:meth:`rotate_tokens`) and deliberately does not discard evidence.
+        """
+        _apply_account_updates(target, source)
+        await discard_plan_downgrade_observations(self._session, target.id)
 
     async def upsert_account_slot(
         self,
@@ -333,7 +361,7 @@ class AccountsRepository:
 
         existing = await self._account_by_slot_identity(account)
         if existing:
-            _apply_account_updates(existing, account)
+            await self._apply_account_replacement(existing, account)
             await self._session.commit()
             await self._session.refresh(existing)
             return existing
@@ -341,7 +369,7 @@ class AccountsRepository:
         existing_by_id = await self._session.get(Account, account.id)
         if existing_by_id:
             if _same_unknown_workspace_identity(existing_by_id, account) and not preserve_unknown_workspace_duplicates:
-                _apply_account_updates(existing_by_id, account)
+                await self._apply_account_replacement(existing_by_id, account)
                 await self._session.commit()
                 await self._session.refresh(existing_by_id)
                 return existing_by_id
@@ -356,7 +384,7 @@ class AccountsRepository:
             if existing_by_email and not _can_reuse_email_fallback(existing_by_email, account):
                 existing_by_email = None
             if existing_by_email:
-                _apply_account_updates(existing_by_email, account)
+                await self._apply_account_replacement(existing_by_email, account)
                 await self._session.commit()
                 await self._session.refresh(existing_by_email)
                 return existing_by_email
@@ -485,6 +513,10 @@ class AccountsRepository:
         # canonical account silently loses the duplicates' pre-watermark
         # history from its lifetime totals.
         await merge_rollups_into(self._session, canonical.id, duplicate_ids)
+        # Folded time-axis buckets follow the reassigned request logs too:
+        # bucket-wise merge-add onto the canonical account, duplicates
+        # removed, in this same fold-state-locked transaction.
+        await merge_time_rollups_into(self._session, canonical.id, duplicate_ids)
         await self._session.execute(delete(Account).where(Account.id.in_(duplicate_ids)))
         return True
 
@@ -525,6 +557,9 @@ class AccountsRepository:
         blocked_at: int | None | object = _UNSET,
     ) -> bool:
         async with sqlite_writer_section():
+            previous_status = await self._session.scalar(
+                select(Account.status).where(Account.id == account_id).with_for_update()
+            )
             values: dict[str, object | None] = {
                 "status": status,
                 "deactivation_reason": deactivation_reason,
@@ -535,11 +570,14 @@ class AccountsRepository:
             result = await self._session.execute(
                 update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
             )
-            if status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            updated_id = result.scalar_one_or_none()
+            if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
+                await self._refresh_hard_sticky_outage_grace(account_id)
+            if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return updated_id is not None
 
     async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
         async with sqlite_writer_section():
@@ -601,11 +639,91 @@ class AccountsRepository:
                 stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
             result = await self._session.execute(stmt)
             updated_id = result.scalar_one_or_none()
+            if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):
+                await self._refresh_hard_sticky_outage_grace(account_id)
             if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
             return updated_id is not None
+
+    @staticmethod
+    def _hard_sticky_outage_started(
+        previous_status: AccountStatus | None,
+        status: AccountStatus,
+    ) -> bool:
+        return (
+            previous_status is not None
+            and previous_status not in _HARD_STICKY_UNAVAILABLE_STATUSES
+            and status in _HARD_STICKY_UNAVAILABLE_STATUSES
+        )
+
+    async def _refresh_hard_sticky_outage_grace(self, account_id: str) -> None:
+        """Start a fresh purge grace period when a hard owner goes unavailable."""
+
+        await self._session.execute(
+            update(StickySession)
+            .where(
+                StickySession.account_id == account_id,
+                StickySession.kind == StickySessionKind.CODEX_SESSION,
+            )
+            .values(updated_at=utcnow())
+        )
+
+    async def seed_hard_sticky_outage_grace_on_startup(self) -> int:
+        """Backfill, exactly once ever, a grace window for already-unavailable owners.
+
+        ``_refresh_hard_sticky_outage_grace`` only fires on a live status
+        transition into PAUSED/RATE_LIMITED/QUOTA_EXCEEDED, so it never runs
+        for an account that was already sitting in one of those statuses
+        before this process started (e.g. an outage that began minutes
+        before a deploy). Without this, the purge scheduler's very first
+        cleanup cycle after this feature ships could treat that mapping's
+        stale ``updated_at`` as proof of a long-dead owner and purge it, even
+        though the outage is brand new — violating the "merely transient
+        outage is never purged" invariant for the upgrade window.
+
+        That backfill only needs to happen once per database, not once per
+        process start. All replicas share one database, and reseeding on
+        every boot resets the grace clock for accounts that are still
+        (correctly) unavailable; if deploys or autoscaling cycle faster than
+        the purge cutoff, a durably-dead mapping's grace clock would never
+        run out and it would never be purged. ``runtime_sentinels`` gives
+        every replica a shared, durable "has this ever run" marker: the
+        first replica to atomically stamp
+        ``_HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL`` performs the backfill;
+        every later boot, on this or any other replica, finds the sentinel
+        already stamped and skips it, leaving the live per-transition hook
+        as the sole grace-clock source from then on.
+        """
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            insert_fn = pg_insert
+        elif dialect == "sqlite":
+            insert_fn = sqlite_insert
+        else:
+            raise RuntimeError(f"Hard-sticky outage grace seeding sentinel unsupported for dialect={dialect!r}")
+        stamp_stmt = (
+            insert_fn(RuntimeSentinel)
+            .values(name=_HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL, value=utcnow().isoformat())
+            .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
+            .returning(RuntimeSentinel.name)
+        )
+        async with sqlite_writer_section():
+            stamp_result = await self._session.execute(stamp_stmt)
+            stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
+            if not stamped_by_this_boot:
+                await self._session.commit()
+                return 0
+            account_ids = (
+                await self._session.scalars(
+                    select(Account.id).where(Account.status.in_(_HARD_STICKY_UNAVAILABLE_STATUSES))
+                )
+            ).all()
+            for account_id in account_ids:
+                await self._refresh_hard_sticky_outage_grace(account_id)
+            await self._session.commit()
+        return len(account_ids)
 
     async def _close_http_bridge_sessions_for_account(self, account_id: str) -> None:
         session_ids = select(HttpBridgeSessionRecord.id).where(HttpBridgeSessionRecord.account_id == account_id)
@@ -625,6 +743,7 @@ class AccountsRepository:
                 latest_response_id=None,
                 latest_input_item_count=None,
                 latest_input_full_fingerprint=None,
+                latest_pending_tool_calls_json=None,
             )
         )
 
@@ -660,15 +779,29 @@ class AccountsRepository:
 
     async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         async with sqlite_writer_section():
+            # Serialize against fold passes before touching the account's
+            # request logs: without the fold-state lock an in-flight hourly
+            # slice could aggregate the pre-delete attribution but commit
+            # after this transaction, resurrecting the account's folded rows
+            # the mirrors below just moved or removed.
+            await lock_fold_state(self._session)
             await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
             if delete_history:
                 await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
+                # Mirror the raw DELETE into the folded time-axis buckets;
+                # raw below the watermark may already be pruned, so folded
+                # rows can never be recomputed and must be removed directly.
+                await mirror_account_hard_delete_into_time_rollups(self._session, account_id)
             else:
                 await self._session.execute(
                     update(RequestLog)
                     .where(RequestLog.account_id == account_id)
                     .values(account_id=None, deleted_at=utcnow()),
                 )
+                # Mirror the retroactive detach (account_id=NULL, deleted_at
+                # set) into the folded buckets: move them to the orphaned
+                # deleted dimension so time-series totals are preserved.
+                await mirror_account_soft_delete_into_time_rollups(self._session, account_id)
             await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
             await self._session.execute(delete(AccountUsageRollup).where(AccountUsageRollup.account_id == account_id))
             result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))

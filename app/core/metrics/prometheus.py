@@ -172,6 +172,18 @@ if PROMETHEUS_AVAILABLE:
         ["strength"],
         registry=REGISTRY,
     )
+    bridge_handoff_compatibility_rejection_total = Counter(
+        "codex_lb_bridge_handoff_compatibility_rejection_total",
+        "Total closed HTTP bridge admission handoffs rejected for incompatible request context",
+        ["continuity_anchor", "preferred_account", "service_tier", "api_key_scope"],
+        registry=REGISTRY,
+    )
+    bridge_unanchored_handoff_recovery_total = Counter(
+        "codex_lb_bridge_unanchored_handoff_recovery_total",
+        "Total stale closed HTTP bridge admission handoffs recovered without a continuity anchor",
+        ["reason"],
+        registry=REGISTRY,
+    )
     bridge_local_rebind_total = Counter(
         "codex_lb_bridge_local_rebind_total",
         "Total bridge local rebinds by reason",
@@ -232,6 +244,17 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    api_key_fair_share_rejections_total = Counter(
+        "codex_lb_api_key_fair_share_rejections_total",
+        "Total stream selections denied by the per-API-key fair-share gate",
+        registry=REGISTRY,
+    )
+    stream_pool_inflight = Gauge(
+        "codex_lb_stream_pool_inflight",
+        "In-flight stream leases over the fair-share gate's last candidate pool",
+        registry=REGISTRY,
+        **_gauge_kwargs,
+    )
     _replica_gauge_kwargs: dict[str, str] = {}
     if MULTIPROCESS_MODE:
         # Sibling workers share one instance identity and compute the same
@@ -245,6 +268,15 @@ if PROMETHEUS_AVAILABLE:
         "Live replica count currently used for account cap partitioning",
         registry=REGISTRY,
         **_replica_gauge_kwargs,
+    )
+    # Sibling workers enforce independent lease counters, so each worker can
+    # admit its own pool capacity. Sum capacity across live workers (like the
+    # inflight gauge) so the exported utilization ratio stays comparable.
+    stream_pool_capacity = Gauge(
+        "codex_lb_stream_pool_capacity",
+        "Stream capacity of the fair-share gate's last candidate pool",
+        registry=REGISTRY,
+        **_gauge_kwargs,
     )
     proxy_phase_latency_seconds = Histogram(
         "codex_lb_proxy_phase_latency_seconds",
@@ -274,6 +306,24 @@ if PROMETHEUS_AVAILABLE:
         "codex_lb_account_status_transition_total",
         "Total account flips to a non-routable auth status by target status, upstream error code, and source",
         ["status", "error_code", "source"],
+        registry=REGISTRY,
+    )
+    http_bridge_retry_circuit_total = Counter(
+        "codex_lb_http_bridge_retry_circuit_total",
+        "Total HTTP bridge automatic retry circuit outcomes",
+        ["outcome"],
+        registry=REGISTRY,
+    )
+    stream_keepalive_sent_total = Counter(
+        "codex_lb_stream_keepalive_sent_total",
+        "Total downstream SSE keepalive frames emitted by surface",
+        ["surface"],
+        registry=REGISTRY,
+    )
+    stream_idle_timeout_total = Counter(
+        "codex_lb_stream_idle_timeout_total",
+        "Total streams terminated after exceeding the configured idle window",
+        ["surface"],
         registry=REGISTRY,
     )
     cache_invalidation_bump_failures_total = Counter(
@@ -327,6 +377,8 @@ else:
     bridge_first_turn_timeout_total: CounterLike | None = None
     bridge_drain_recovery_allowed_total: CounterLike | None = None
     bridge_owner_mismatch_total: CounterLike | None = None
+    bridge_handoff_compatibility_rejection_total: CounterLike | None = None
+    bridge_unanchored_handoff_recovery_total: CounterLike | None = None
     bridge_local_rebind_total: CounterLike | None = None
     bridge_forward_latency_seconds: HistogramLike | None = None
     bridge_public_contract_error_total: CounterLike | None = None
@@ -337,12 +389,18 @@ else:
     account_lease_stale_reclaimed_total: CounterLike | None = None
     account_inflight_leases: GaugeLike | None = None
     account_cap_rejections_total: CounterLike | None = None
+    api_key_fair_share_rejections_total: CounterLike | None = None
+    stream_pool_capacity: GaugeLike | None = None
+    stream_pool_inflight: GaugeLike | None = None
     cap_partition_replicas: GaugeLike | None = None
     proxy_phase_latency_seconds: HistogramLike | None = None
     http_bridge_prewarm_total: CounterLike | None = None
     prompt_cache_continuation_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
     account_status_transition_total: CounterLike | None = None
+    http_bridge_retry_circuit_total: CounterLike | None = None
+    stream_keepalive_sent_total: CounterLike | None = None
+    stream_idle_timeout_total: CounterLike | None = None
     cache_invalidation_bump_failures_total: CounterLike | None = None
     cache_invalidation_poll_failures_total: CounterLike | None = None
 
@@ -365,11 +423,13 @@ __all__ = [
     "account_lease_released_total",
     "account_lease_stale_reclaimed_total",
     "accounts_total",
+    "api_key_fair_share_rejections_total",
     "bridge_instance_mismatch_total",
     "bridge_forward_latency_seconds",
     "bridge_durable_recover_total",
     "bridge_drain_recovery_allowed_total",
     "bridge_first_turn_timeout_total",
+    "bridge_handoff_compatibility_rejection_total",
     "bridge_local_rebind_total",
     "bridge_owner_forward_total",
     "bridge_owner_mismatch_total",
@@ -378,6 +438,7 @@ __all__ = [
     "bridge_reattach_total",
     "bridge_same_account_takeover_total",
     "bridge_soft_local_rebind_total",
+    "bridge_unanchored_handoff_recovery_total",
     "cache_invalidation_bump_failures_total",
     "cache_invalidation_poll_failures_total",
     "cap_partition_replicas",
@@ -386,7 +447,10 @@ __all__ = [
     "continuity_owner_resolution_total",
     "http_bridge_prewarm_total",
     "prompt_cache_continuation_total",
+    "http_bridge_retry_circuit_total",
     "http_bridge_stuck_retire_total",
+    "stream_keepalive_sent_total",
+    "stream_idle_timeout_total",
     "image_request_duration_seconds",
     "image_requests_total",
     "make_scrape_registry",
@@ -396,6 +460,8 @@ __all__ = [
     "rate_limit_hits_total",
     "request_duration_seconds",
     "requests_total",
+    "stream_pool_capacity",
+    "stream_pool_inflight",
     "upstream_request_duration_seconds",
     "upstream_requests_total",
     "upstream_transport_decisions_total",

@@ -23,7 +23,9 @@ describe("ApiKeyCacheUsage", () => {
 
     expect(screen.getByText("Cache usage by API key")).toBeInTheDocument();
     expect(screen.getByText("Reports key (sk-reports...)")).toBeInTheDocument();
-    expect(screen.getByText("1,000")).toBeInTheDocument();
+    expect(
+      screen.getByText((1000).toLocaleString(), { normalizer: (text) => text }),
+    ).toBeInTheDocument();
     expect(screen.getByText("250")).toBeInTheDocument();
     expect(screen.getByText("25.0%")).toBeInTheDocument();
     expect(screen.getByText(/no saved tokens are inferred/i)).toBeInTheDocument();

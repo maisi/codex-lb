@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import re
 from typing import Iterable
 
 from pydantic import ValidationError
 
 from app.core import usage as usage_core
 from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope
+from app.core.clients.proxy import ProxyResponseError
+from app.core.errors import (
+    OpenAIErrorDetail,
+    OpenAIErrorEnvelope,
+    is_previous_response_not_found_error,
+    previous_response_stream_incomplete_error,
+)
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
 from app.core.types import JsonValue
@@ -307,6 +314,95 @@ def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
             resets_at=_coerce_number(error.get("resets_at")),
             resets_in_seconds=_coerce_number(error.get("resets_in_seconds")),
         )
+
+
+def _message_mentions_previous_response_id(message: str | None, previous_response_id: str | None) -> bool:
+    if message is None or previous_response_id is None:
+        return False
+    normalized_message = " ".join(message.split())
+    normalized_previous_response_id = previous_response_id.strip()
+    if not normalized_previous_response_id:
+        return False
+    identifier_pattern = re.escape(normalized_previous_response_id)
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_-]){identifier_pattern}(?![A-Za-z0-9_-])",
+            normalized_message,
+        )
+        is not None
+    )
+
+
+def _normalize_session_id(session_id: str | None) -> str | None:
+    if not isinstance(session_id, str):
+        return None
+    stripped = session_id.strip()
+    return stripped or None
+
+
+_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES = (
+    "no tool output found for function call call_",
+    "no tool output found for custom tool call call_",
+    "no tool output found for apply patch call call_",
+    "no tool output found for tool search call call_",
+)
+
+
+def _is_missing_tool_output_message(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized = " ".join(message.lower().split())
+    return normalized.startswith(_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES)
+
+
+def _is_missing_tool_output_error(
+    *,
+    code: str | None,
+    param: str | None,
+    message: str | None,
+) -> bool:
+    if code != "invalid_request_error" or param != "input":
+        return False
+    return _is_missing_tool_output_message(message)
+
+
+def _is_previous_response_not_found_error(
+    *,
+    code: str | None,
+    param: str | None,
+    message: str | None,
+) -> bool:
+    return is_previous_response_not_found_error(code=code, param=param, message=message)
+
+
+def _compact_previous_response_not_found_error(exc: ProxyResponseError) -> ProxyResponseError | None:
+    error = _parse_openai_error(exc.payload)
+    if error is None:
+        return None
+    code = _normalize_error_code(error.code, error.type)
+    if not _is_previous_response_not_found_error(
+        code=code,
+        param=error.param,
+        message=error.message,
+    ):
+        return None
+    return ProxyResponseError(
+        502,
+        previous_response_stream_incomplete_error(),
+        failure_phase=exc.failure_phase,
+        retryable_same_contract=False,
+        failure_detail="previous_response_not_found",
+        failure_exception_type=exc.failure_exception_type,
+        upstream_status_code=exc.upstream_status_code if exc.upstream_status_code is not None else exc.status_code,
+        upstream_error_code=code,
+    )
+
+
+def _proxy_response_error_code(exc: ProxyResponseError) -> str | None:
+    error = _parse_openai_error(exc.payload)
+    if error is None:
+        return None
+    return _normalize_error_code(error.code, error.type)
 
 
 def _coerce_str(value: JsonValue) -> str | None:

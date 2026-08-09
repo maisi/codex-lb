@@ -16,8 +16,9 @@ import anyio
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
-from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
+from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
@@ -77,11 +78,14 @@ _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
     }
 )
 _ACCOUNT_SELECTION_RECOVERY_MIN_SLEEP_SECONDS = 1.0
+_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS = 2.0
 _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
-_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset(
+    {"account_response_create_cap", "account_stream_cap", "api_key_stream_fair_share"}
+)
 _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",
@@ -321,6 +325,13 @@ def _account_selection_recovery_sleep_seconds_from_message(
     if "hit your spend cap set by the owner of your workspace" in lowered:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
 
+    # A hard affinity row is an ownership constraint, so it must not spill to
+    # another account. Capacity/health transitions can nevertheless make the
+    # owner briefly unavailable; give that owner a short recovery window before
+    # surfacing a 503 rather than rebinding the logical session.
+    if error_code == "hard_affinity_saturated":
+        return _HARD_AFFINITY_RECOVERY_SLEEP_SECONDS
+
     if error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
 
@@ -524,7 +535,13 @@ _CLAIM_CONTENTION_UNPENALIZED_ATTR = "_codex_lb_claim_contention_unpenalized"
 
 class _RefreshFailoverProxy(Protocol):
     async def _handle_stream_error(
-        self, account: Account, error: Any, code: str, http_status: int | None = None
+        self,
+        account: Account,
+        error: Any,
+        code: str,
+        http_status: int | None = None,
+        *,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Any: ...
 
 
@@ -563,6 +580,7 @@ async def failover_after_previsible_refresh_error(
     select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
     request_id: str,
     kind: str,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
 ) -> Account:
     """Pick the next account after a previsible-unary freshness/connect failure.
 
@@ -598,8 +616,8 @@ async def failover_after_previsible_refresh_error(
             kind,
             getattr(exc, "code", None),
             request_id,
-            current.id,
-            exc_info=True,
+            "<redacted>" if privacy_policy.redacts_sensitive_details else current.id,
+            exc_info=None if privacy_policy.redacts_sensitive_details else True,
         )
     else:
         logger.warning(
@@ -607,8 +625,8 @@ async def failover_after_previsible_refresh_error(
             kind,
             "claim contention" if claim else "failed",
             request_id,
-            current.id,
-            exc_info=True,
+            "<redacted>" if privacy_policy.redacts_sensitive_details else current.id,
+            exc_info=None if privacy_policy.redacts_sensitive_details else True,
         )
     if not claim and not _should_retry_transient_stream_error("upstream_unavailable", message):
         _raise_proxy_unavailable_for_account(message, current)
@@ -629,7 +647,15 @@ async def failover_after_previsible_refresh_error(
     if not claim:
         # Genuine transport / connect failure: penalize the skipped account so a
         # persistently broken account backs off. Claim contention never penalizes.
-        await proxy._handle_stream_error(current, {"message": message}, "upstream_unavailable")
+        if privacy_policy.redacts_sensitive_details:
+            await proxy._handle_stream_error(
+                current,
+                {"message": message},
+                "upstream_unavailable",
+                privacy_policy=privacy_policy,
+            )
+        else:
+            await proxy._handle_stream_error(current, {"message": message}, "upstream_unavailable")
     return selected_account
 
 
@@ -724,6 +750,25 @@ class _RequestLogFailureMetadata:
     bridge_stage: str | None = None
 
 
+@dataclass(slots=True)
+class _HTTPBridgeCompletedDeliveryScope:
+    active: bool = False
+    terminal_enqueued: bool = False
+
+
+@dataclass(slots=True)
+class _DeferredAccountBackoffLifecycle:
+    reservation: ApiKeyUsageReservationData | None
+    pending_backoffs: dict[str, Account] = field(default_factory=dict)
+    settlement_owned: bool = False
+    settlement_confirmed: bool = False
+
+
+@dataclass(slots=True)
+class _DeferredAccountBackoffTracker:
+    current_lifecycle: _DeferredAccountBackoffLifecycle | None = None
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -764,12 +809,21 @@ class _WebSocketRequestState:
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True
+    propagate_http_errors: bool = False
     request_kind: str = "normal"
+    connection_request_kind: str | None = None
     generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
+    # Counts only the one extra replay permitted after the initial recovery
+    # replay when the replacement upstream socket also closes cleanly before
+    # producing any response event.
+    clean_close_replay_count: int = 0
+    clean_close_retry_in_progress: bool = False
+    clean_close_retry_result: bool | None = None
+    clean_close_retry_close_generation: int | None = None
     auth_replay_count: int = 0
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
@@ -783,12 +837,27 @@ class _WebSocketRequestState:
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
+    # Session headers provide locality, but only a previous response or
+    # explicit turn-state header guarantees continuity for stale recovery.
+    hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
     prompt_cache_continuation_attempted: bool = False
     prompt_cache_continuation_success_recorded: bool = False
     # Soft-capacity reroute permission as it stood before an anchor was
     # injected, so dropping the anchor can restore the pre-continuation value.
     prompt_cache_continuation_prior_soft_capacity_reroute: bool | None = None
+    # True only when the client's own incoming payload (before this anchor was
+    # injected or trimmed) already looked like a full conversation resend
+    # (``_http_bridge_payload_looks_like_full_resend``). Deliberately weaker
+    # than ``fresh_upstream_request_is_retry_safe``: it does not require the
+    # exact-manifest/retained-output proof that field needs for an in-place
+    # same-request replay, only that the client is a resend-capable client at
+    # all. Used to decide whether it is safe to invalidate a durable session's
+    # stored anchor after this request proves eventless -- a client that
+    # already resends full history on its own can recover unanchored; a
+    # genuine delta-only client has no other way to convey prior context and
+    # must stay anchored.
+    proxy_injected_anchor_had_full_resend_payload: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
@@ -800,6 +869,19 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Stable fingerprint used by the durable recovery-attempt journal. It is
+    # populated only for a proof-gated fresh replay candidate.
+    recovery_attempt_fingerprint: str | None = None
+    recovery_attempt_session_id: str | None = None
+    recovery_attempt_owner_epoch: int | None = None
+    # True when recovery already atomically claimed the journal row as
+    # REPLAYED. Claimed replays must not be re-journaled at dispatch.
+    recovery_attempt_claimed: bool = False
+    # Set once the upstream send is attempted, including an ambiguous send
+    # failure. Pre-dispatch admission/setup failures may safely roll back a
+    # claimed recovery journal; an attempted send must remain consumed.
+    recovery_attempt_dispatched: bool = False
+    recovery_attempt_event_observed: bool = False
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved
     # marker stripped, so swapping to the fresh body must also swap this onto
@@ -809,6 +891,7 @@ class _WebSocketRequestState:
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
+    durable_capability_lineage_required: bool = False
     file_required_preferred_account: bool = False
     bridge_soft_capacity_reroute_allowed: bool = False
     error_code_override: str | None = None
@@ -820,6 +903,7 @@ class _WebSocketRequestState:
     upstream_error_code_override: str | None = None
     error_http_status_override: int | None = None
     response_event_count: int = 0
+    last_upstream_activity_at: float | None = None
     upstream_model_output_seen: bool = False
     previous_response_not_found_rewritten: bool = False
     previous_response_owner_lookup_source: str | None = None
@@ -829,6 +913,7 @@ class _WebSocketRequestState:
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
+    response_create_admission_reacquire_required: bool = False
     account_response_create_lease: AccountLease | None = None
     account_response_create_release: Callable[[AccountLease | None], Coroutine[Any, Any, None]] | None = None
     websocket_stream_lease: AccountLease | None = None
@@ -837,6 +922,8 @@ class _WebSocketRequestState:
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
+    added_tool_call_types: dict[str, str] = field(default_factory=dict)
+    tool_call_manifest_invalid: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -854,14 +941,32 @@ class _WebSocketRequestState:
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None
+    # Confirmed pre-dispatch account-route failures must not mutate account
+    # health while this request's API-key reservation is still live. The
+    # account objects are keyed by id so repeated connect attempts cannot
+    # stack the same backoff floor more than once before settlement.
+    deferred_account_error_backoffs: dict[str, Account] = field(default_factory=dict)
+    deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None
+    deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
+    completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
+    # Exactly-once reservation settlement for terminal HTTP bridge events
+    # (issue #1594). "claimed" marks a request popped from pending ownership
+    # whose in-flight terminal bookkeeping continuation exclusively owns
+    # settlement; "abandoned" marks a claim whose continuation aborted and
+    # whose shielded abort settlement also failed, allowing a later detach to
+    # reclaim settlement; None means unclaimed or settled.
+    terminal_settlement_phase: Literal["claimed", "abandoned"] | None = None
     account_capacity_waiting: bool = False
+    account_capacity_wait_suppress_keepalive: bool = False
     account_capacity_wait_reason: str | None = None
     account_capacity_wait_started_at: float | None = None
     account_capacity_wait_retry_after_seconds: float | None = None
+    capacity_startup_wait_event: asyncio.Event | None = None
+    capacity_startup_ready_event: asyncio.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -892,7 +997,7 @@ class _HTTPBridgeSession:
     affinity: _AffinityPolicy
     request_model: str | None
     account: Account
-    upstream: UpstreamResponsesWebSocket
+    upstream: UpstreamWebSocket
     upstream_control: _WebSocketUpstreamControl
     pending_requests: deque[_WebSocketRequestState]
     pending_lock: anyio.Lock
@@ -936,7 +1041,18 @@ class _HTTPBridgeSession:
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
+    last_upstream_close_generation: int = 0
     closed: bool = False
+    # Set when the session proved silent/wedged (reattached stream with
+    # response events but no ``response.created``, or repeated eventless
+    # timeouts). A quarantined session must never be selected for reuse or
+    # re-attach; later requests take the fresh session/no-anchor path.
+    quarantined: bool = False
+    # Set while a reader handoff is replacing the socket. Idle pruning must
+    # retain the registered session during this short transition even though
+    # ``closed`` is fail-closed for normal request reuse.
+    handoff_in_progress: bool = False
+    handoff_future: asyncio.Future["_HTTPBridgeSession"] | None = None
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
@@ -945,6 +1061,19 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+
+
+def _complete_http_bridge_handoff(
+    session: _HTTPBridgeSession,
+    inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]],
+) -> None:
+    session.handoff_in_progress = False
+    future = session.handoff_future
+    session.handoff_future = None
+    if future is not None and not future.done():
+        future.set_result(session)
+    if inflight_sessions.get(session.key) is future:
+        inflight_sessions.pop(session.key, None)
 
 
 def _http_bridge_session_supports_service_tier(
@@ -1050,6 +1179,7 @@ class _WebSocketUpstreamControl:
     downstream_sequence_request_state: _WebSocketRequestState | None = None
     downstream_sequence_number: int | None = None
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
+    terminal_message_task: asyncio.Task[bool] | None = None
 
 
 @dataclass(slots=True)
@@ -1140,15 +1270,27 @@ def _clear_websocket_deferred_reasoning_downstream_texts(request_state: _WebSock
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
+    request_state.last_upstream_activity_at = time.monotonic()
     if event_type in {"response.failed", "response.incomplete"}:
         return
     request_state.response_event_count += 1
 
 
-def _websocket_request_can_replay_before_visible_output(request_state: _WebSocketRequestState) -> bool:
+def _websocket_request_can_replay_before_visible_output(
+    request_state: _WebSocketRequestState,
+    *,
+    allow_clean_close_retry: bool = False,
+) -> bool:
     if not request_state.request_text:
         return False
-    if request_state.replay_count >= 1:
+    if request_state.transport == _REQUEST_TRANSPORT_WEBSOCKET and request_state.response_create_sent_at is None:
+        return False
+    if request_state.replay_count >= 1 and not (
+        allow_clean_close_retry
+        and request_state.replay_count == 1
+        and request_state.response_event_count == 0
+        and request_state.clean_close_replay_count == 0
+    ):
         return False
     sequenced_created_only_prewarm = (
         request_state.generate_false_prewarm
@@ -1184,7 +1326,7 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
 def _record_websocket_route_metadata(
     request_state: _WebSocketRequestState,
     *,
-    upstream: UpstreamResponsesWebSocket | None = None,
+    upstream: UpstreamWebSocket | None = None,
     route: ResolvedUpstreamRoute | None = None,
     fallback_used: bool | None = None,
 ) -> None:
@@ -1309,7 +1451,37 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
 
 
 def _is_local_account_cap_code(code: str | None) -> bool:
-    return code in {"account_response_create_cap", "account_stream_cap"}
+    return code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
+
+
+def _api_key_fair_share_threshold_pct_from_settings(settings: object) -> int:
+    """Resolve the fair-share congestion threshold, tolerating stale snapshots.
+
+    Cached settings snapshots taken before the field existed lack it; fall
+    back to the live settings object the same way the stream recovery reserve
+    resolution in ``ProxyService`` does.
+    """
+    threshold = getattr(settings, "proxy_api_key_fair_share_congestion_threshold_pct", None)
+    if threshold is None:
+        return get_settings().proxy_api_key_fair_share_congestion_threshold_pct
+    return int(threshold)
+
+
+def _selection_api_key_fair_share_threshold_pct(
+    settings: object,
+    *,
+    lease_kind: str | None,
+    request_stage: str,
+) -> int:
+    """Fair-share threshold for one account selection; 0 disables the gate.
+
+    Only stream leases are fair-share gated. Reattach resumes an existing
+    in-flight response; denying it would strand running work, so it bypasses
+    the fair-share gate the same way it bypasses the recovery reserve.
+    """
+    if lease_kind != "stream" or request_stage == "reattach":
+        return 0
+    return _api_key_fair_share_threshold_pct_from_settings(settings)
 
 
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
