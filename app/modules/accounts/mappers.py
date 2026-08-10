@@ -22,6 +22,7 @@ from app.modules.accounts.schemas import (
     AccountUsageTrend,
     UsageTrendPoint,
 )
+from app.modules.accounts.token_vending import vend_authority_for_account
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsSnapshot,
     RateLimitResetCreditsStore,
@@ -265,6 +266,7 @@ def _account_to_summary(
         status=effective_status.value,
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
         security_work_authorized=bool(account.security_work_authorized),
+        remote=vend_authority_for_account(account, config_settings.get_settings()) is not None,
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,

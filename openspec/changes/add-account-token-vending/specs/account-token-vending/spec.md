@@ -114,3 +114,20 @@ Per-account maintenance passes (auth guardian, usage refresh, limit warm-up, res
 - **WHEN** the model-registry refresh runs
 - **THEN** it vends a fresh access token for that account and fetches its plan's model catalog
 - **AND** the plan's models are registered so the load balancer can select the borrowed account for live requests
+
+### Requirement: A borrowed account is recovered via Force Probe, never re-authentication on the follower
+
+A borrowed account whose follower-side status is `REAUTH_REQUIRED` or `DEACTIVATED` MUST be recoverable by an operator action that vends a fresh token to validate the owner, WITHOUT re-authenticating on the follower (re-auth on a follower creates a second rotating owner and the reuse-detection collision this design prevents). Force Probe MUST accept a borrowed account in those states: it forces a live vend; on a successful vend and upstream probe it transitions the account to `ACTIVE` and clears the deactivation reason; if the vend fails (the owner itself needs re-authentication) it leaves the follower status unchanged and reports the probe as failed. The account API MUST expose whether an account is `remote` (borrowed), and the dashboard MUST NOT offer a re-authenticate action for a remote account.
+
+#### Scenario: Force Probe recovers a borrowed account once its owner is healthy
+
+- **GIVEN** a borrowed account stuck at `REAUTH_REQUIRED` on the follower and a healthy owner
+- **WHEN** an operator triggers Force Probe
+- **THEN** the follower forces a fresh vend, the upstream probe succeeds, and the account becomes `ACTIVE`
+- **AND** no refresh-token rotation or follower re-authentication occurs
+
+#### Scenario: Force Probe leaves a borrowed account untouched when the owner still needs re-auth
+
+- **GIVEN** a borrowed account at `REAUTH_REQUIRED` and an owner that cannot mint a token
+- **WHEN** an operator triggers Force Probe
+- **THEN** the vend fails, the account stays `REAUTH_REQUIRED`, and the result signals that the owner (not the follower) needs re-authentication

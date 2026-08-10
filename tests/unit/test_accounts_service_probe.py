@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from sqlalchemy.exc import OperationalError
 
+from app.core.auth.refresh import RefreshError
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountsRepository
@@ -162,6 +163,76 @@ async def test_probe_account_rejects_reauth_required_account():
     service = _build_service(account=account)
     with pytest.raises(AccountNotProbableError):
         await service.probe_account(_ACCOUNT_ID)
+
+
+class _RemoteVendingSettings:
+    # Makes the probe account "borrowed": vend_authority_for_account resolves a
+    # peer URL by the account's email.
+    account_token_vending_remote_accounts = {"probe@example.com": "https://peer.example"}
+    account_token_vending_authority_base_url = None
+
+
+@pytest.mark.asyncio
+async def test_probe_account_recovers_remote_reauth_required_via_vend(monkeypatch):
+    # A borrowed/remote account stuck at reauth_required is recovered by Force
+    # Probe: it force-vends a fresh token (success) and flips to active. No
+    # refresh-token rotation, no re-auth on the follower.
+    account = _make_account(status=AccountStatus.REAUTH_REQUIRED)
+    account.deactivation_reason = "Authentication token invalidated - re-login required"
+    encryptor = TokenEncryptor()
+    vended = _make_account(status=AccountStatus.REAUTH_REQUIRED)
+    vended.access_token_encrypted = encryptor.encrypt("vended-access-token")
+    auth_manager = SimpleNamespace(ensure_fresh=AsyncMock(return_value=vended))
+    service = _build_service(account=account, primary_pct=50.0, secondary_pct=0.0, auth_manager=auth_manager)
+    monkeypatch.setattr("app.modules.accounts.service.get_settings", lambda: _RemoteVendingSettings())
+
+    async def _fake_probe(**kwargs):
+        return 200
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    result = await service.probe_account(_ACCOUNT_ID)
+
+    assert result is not None
+    assert result.probe_status_code == 200
+    assert result.account_status_before == "reauth_required"
+    assert result.account_status_after == "active"
+    assert account.status == AccountStatus.ACTIVE
+    assert account.deactivation_reason is None
+    # Recovery forces a live vend to confirm the owner can mint a token now.
+    auth_manager.ensure_fresh.assert_awaited_once_with(account, force=True)
+    cast(AsyncMock, service._repo.update_status_if_current).assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_probe_account_remote_recovery_vend_failure_keeps_reauth(monkeypatch):
+    # If the owner still cannot mint a token (needs re-auth on the OWNER side),
+    # the vend fails: the follower's status is left untouched, no upstream probe
+    # is sent, and probe_status_code=0 signals "still needs owner re-auth".
+    account = _make_account(status=AccountStatus.REAUTH_REQUIRED)
+    auth_manager = SimpleNamespace(
+        ensure_fresh=AsyncMock(side_effect=RefreshError("vend_unavailable", "owner down", False, transport_error=True))
+    )
+    service = _build_service(account=account, primary_pct=50.0, secondary_pct=0.0, auth_manager=auth_manager)
+    monkeypatch.setattr("app.modules.accounts.service.get_settings", lambda: _RemoteVendingSettings())
+
+    probe_sent = {"value": False}
+
+    async def _fake_probe(**kwargs):
+        probe_sent["value"] = True
+        return 200
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    result = await service.probe_account(_ACCOUNT_ID)
+
+    assert result is not None
+    assert result.probe_status_code == 0
+    assert result.account_status_before == "reauth_required"
+    assert result.account_status_after == "reauth_required"
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert probe_sent["value"] is False
+    cast(AsyncMock, service._repo.update_status_if_current).assert_not_awaited()
 
 
 @pytest.mark.asyncio

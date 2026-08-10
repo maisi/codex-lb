@@ -92,6 +92,12 @@ class AccountSummary(DashboardModel):
     routing_policy: str = Field(default="normal", pattern=r"^(normal|burn_first|preserve)$")
     status: str
     security_work_authorized: bool = False
+    # True when this instance BORROWS the account's tokens from a peer (token
+    # vending) rather than owning/rotating them. Operators must not
+    # re-authenticate a remote account on the follower (that creates a second
+    # rotating owner); recovery from a stale reauth_required/deactivated is a
+    # vend check via Force Probe. See app.modules.accounts.token_vending.
+    remote: bool = False
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None

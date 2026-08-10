@@ -67,14 +67,21 @@ export function AccountActions({
   onRoutingPolicyChange,
 }: AccountActionsProps) {
   const { t } = useTranslation();
+  const isRemote = account.remote === true;
   const showOperatorRecoveryAction =
     account.status === "reauth_required" || account.status === "deactivated";
   const canProbeUsage404Deactivation = isUsage404Deactivation(account);
+  // A remote (borrowed) account recovers from a stale reauth_required/deactivated
+  // via a vend check (Force Probe), never by re-authenticating on the follower
+  // (that would create a second rotating owner).
+  const canProbeRemoteRecovery = isRemote && showOperatorRecoveryAction;
   const probeDisabled =
     busy ||
     readOnly ||
     account.status === "paused" ||
-    (showOperatorRecoveryAction && !canProbeUsage404Deactivation);
+    (showOperatorRecoveryAction &&
+      !canProbeUsage404Deactivation &&
+      !canProbeRemoteRecovery);
   const resetCountdown = showResetCreditExpiryBadge && account.resetCreditNearestExpiresAt
     ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
     : null;
@@ -165,7 +172,7 @@ export function AccountActions({
           </Button>
         )}
 
-        {showOperatorRecoveryAction ? (
+        {showOperatorRecoveryAction && !isRemote ? (
           <Button
             type="button"
             size="sm"
@@ -188,7 +195,9 @@ export function AccountActions({
           disabled={probeDisabled}
         >
           <Activity className="h-3.5 w-3.5" />
-          {t("accounts.actions.forceProbe")}
+          {canProbeRemoteRecovery
+            ? t("accounts.actions.recover")
+            : t("accounts.actions.forceProbe")}
         </Button>
 
         <Button

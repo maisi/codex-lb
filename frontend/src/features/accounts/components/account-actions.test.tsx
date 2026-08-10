@@ -67,6 +67,69 @@ describe("AccountActions", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("recovers a remote reauth_required account via Force Probe (labeled Recover) and hides Re-authenticate", async () => {
+    const user = userEvent.setup();
+    const onProbe = vi.fn();
+    const onReauth = vi.fn();
+    const account = createAccountSummary({ status: "reauth_required", remote: true });
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={onProbe}
+        onWarmup={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={onReauth}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    // Re-authenticate is hidden for a remote account (it would create a second
+    // rotating token owner); recovery is a vend check via Force Probe.
+    expect(
+      screen.queryByRole("button", { name: "Re-authenticate" }),
+    ).not.toBeInTheDocument();
+    const recover = screen.getByRole("button", { name: "Recover" });
+    expect(recover).toBeEnabled();
+    await user.click(recover);
+    expect(onProbe).toHaveBeenCalledWith(account.accountId);
+    expect(onReauth).not.toHaveBeenCalled();
+  });
+
+  it("enables Recover for a remote deactivated account", () => {
+    const account = createAccountSummary({ status: "deactivated", remote: true });
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onWarmup={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Recover" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Re-authenticate" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("fires the per-account probe callback for active accounts", async () => {
     const user = userEvent.setup();
     const account = createAccountSummary();

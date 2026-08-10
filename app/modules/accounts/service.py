@@ -63,6 +63,7 @@ from app.modules.accounts.schemas import (
     OpenCodeAuthJson,
     OpenCodeOAuthAuth,
 )
+from app.modules.accounts.token_vending import vend_authority_for_account
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import (
     clear_account_routing_unavailable,
@@ -727,8 +728,20 @@ class AccountsService:
         if account is None:
             return None
         usage_404_recovery = _is_usage_404_deactivated(account)
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED) or (
-            account.status == AccountStatus.DEACTIVATED and not usage_404_recovery
+        # A borrowed (remote) account's REAUTH_REQUIRED / DEACTIVATED is a stale
+        # follower-side flag: the refresh token is owned by the peer, so the
+        # follower can validate the account by VENDING a fresh token rather than
+        # re-authenticating (which would create a second rotating owner). Let
+        # Force Probe recover it via the vend check below.
+        borrowed_recovery = vend_authority_for_account(
+            account, get_settings()
+        ) is not None and account.status in (
+            AccountStatus.REAUTH_REQUIRED,
+            AccountStatus.DEACTIVATED,
+        )
+        if not borrowed_recovery and (
+            account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED)
+            or (account.status == AccountStatus.DEACTIVATED and not usage_404_recovery)
         ):
             logger.info(
                 "Account force probe rejected account_id=%s account_status=%s usage_404_recovery=%s",
@@ -750,7 +763,33 @@ class AccountsService:
 
         probe_account = account
         if self._auth_manager is not None:
-            probe_account = await self._auth_manager.ensure_fresh(account, force=False)
+            try:
+                # Force a live vend for a remote recovery so the probe reflects
+                # whether the owner can mint a token right now (bypass any cache).
+                probe_account = await self._auth_manager.ensure_fresh(account, force=borrowed_recovery)
+            except RefreshError as exc:
+                if not borrowed_recovery:
+                    raise
+                # The owner still cannot mint a token — it needs re-authentication
+                # on the OWNER side, not here. Leave the follower's status
+                # untouched and report the probe as failed.
+                logger.info(
+                    "Remote account recovery probe could not vend a token account_id=%s error=%s",
+                    account_id,
+                    exc,
+                )
+                primary_after, secondary_after = await self._latest_usage_percents(account_id)
+                return AccountProbeResponse(
+                    status="probed",
+                    account_id=account_id,
+                    probe_status_code=0,
+                    primary_used_percent_before=primary_before,
+                    primary_used_percent_after=primary_after,
+                    secondary_used_percent_before=secondary_before,
+                    secondary_used_percent_after=secondary_after,
+                    account_status_before=status_before,
+                    account_status_after=account.status.value,
+                )
 
         access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
         probe_model = model or DEFAULT_PROBE_MODEL
@@ -765,7 +804,7 @@ class AccountsService:
             probe_status,
             usage_404_recovery,
         )
-        if usage_404_recovery and _probe_status_is_success(probe_status):
+        if (usage_404_recovery or borrowed_recovery) and _probe_status_is_success(probe_status):
             updated = await self._repo.update_status_if_current(
                 account_id,
                 AccountStatus.ACTIVE,

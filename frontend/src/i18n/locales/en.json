@@ -2,6 +2,7 @@
   "accounts.actions.disableWarmup": "Disable Warmup",
   "accounts.actions.enableWarmup": "Enable Warmup",
   "accounts.actions.forceProbe": "Force probe",
+  "accounts.actions.recover": "Recover",
   "accounts.actions.warmNow": "Warm now",
   "accounts.actions.resetWithCount": "Reset ({{count}})",
   "accounts.actions.routingPolicy": "Routing policy",

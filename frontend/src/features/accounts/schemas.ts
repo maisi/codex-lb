@@ -78,6 +78,10 @@ export const AccountSummarySchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
   status: z.string(),
   securityWorkAuthorized: z.boolean().optional(),
+  // True when this instance borrows the account's tokens from a peer (token
+  // vending). Remote accounts are recovered via Force Probe (a vend check),
+  // never re-authenticated on the follower.
+  remote: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.iso.datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.iso.datetime({ offset: true }).nullable().optional(),
