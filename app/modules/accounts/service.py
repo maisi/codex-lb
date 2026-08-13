@@ -733,9 +733,7 @@ class AccountsService:
         # follower can validate the account by VENDING a fresh token rather than
         # re-authenticating (which would create a second rotating owner). Let
         # Force Probe recover it via the vend check below.
-        borrowed_recovery = vend_authority_for_account(
-            account, get_settings()
-        ) is not None and account.status in (
+        borrowed_recovery = vend_authority_for_account(account, get_settings()) is not None and account.status in (
             AccountStatus.REAUTH_REQUIRED,
             AccountStatus.DEACTIVATED,
         )
