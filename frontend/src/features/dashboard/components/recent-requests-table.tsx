@@ -42,15 +42,16 @@ import {
   useDashboardPreferencesStore,
   type RequestLogColumnId,
 } from "@/hooks/use-dashboard-preferences";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatDateTimeInline,
+  formatDateTimeLines,
   formatCompactNumber,
   formatCurrency,
   formatModelLabel,
   formatElapsed,
   formatSlug,
-  formatTimeLong,
 } from "@/utils/formatters";
 
 const STATUS_CLASS_MAP: Record<string, string> = {
@@ -211,6 +212,7 @@ export function RecentRequestsTable({
   const visibleColumnSet = new Set(visibleColumns);
   const tableMinWidth = visibleColumns.reduce((width, column) => width + REQUEST_LOG_COLUMN_WIDTHS[column], 0);
   const isAdmin = useAuthStore((state) => state.role === "admin");
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest, t);
 
   const columnLabels: Record<RequestLogColumnId, string> = {
@@ -318,7 +320,7 @@ export function RecentRequestsTable({
           </TableHeader>
           <TableBody>
             {requests.map((request) => {
-              const time = formatTimeLong(request.requestedAt);
+              const time = formatDateTimeLines(request.requestedAt, dateDisplayFormat);
               const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : t("dashboard.requests.unassigned");
               const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
               const errorPreview = request.errorMessage || request.errorCode || "-";
@@ -335,8 +337,8 @@ export function RecentRequestsTable({
                 <TableRow key={request.requestId}>
                   {visibleColumnSet.has("time") ? <TableCell className="pl-4 align-top">
                     <div className="leading-tight">
-                      <div className="text-sm font-medium">{time.time}</div>
-                      <div className="text-xs text-muted-foreground">{time.date}</div>
+                      <div className="text-sm font-medium">{time.primary}</div>
+                      <div className="text-xs text-muted-foreground">{time.secondary}</div>
                     </div>
                   </TableCell> : null}
                   {visibleColumnSet.has("account") ? <TableCell className="truncate align-top text-sm">
@@ -516,7 +518,7 @@ export function RecentRequestsTable({
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label={t("dashboard.requests.columns.transport")} value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
-                <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt) : "—"} />
+                <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt, dateDisplayFormat) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.errorCode")} value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
               {isAdmin ? (

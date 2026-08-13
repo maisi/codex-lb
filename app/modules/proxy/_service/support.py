@@ -846,6 +846,10 @@ class _WebSocketRequestState:
     # Soft-capacity reroute permission as it stood before an anchor was
     # injected, so dropping the anchor can restore the pre-continuation value.
     prompt_cache_continuation_prior_soft_capacity_reroute: bool | None = None
+    # The durable lookup carried an anchor, but its owner was already stale,
+    # ownerless, or lease-expired when this request arrived.  Such a request
+    # must not be presented to the client as a retryable upstream timeout.
+    durable_owner_dead: bool = False
     # True only when the client's own incoming payload (before this anchor was
     # injected or trimmed) already looked like a full conversation resend
     # (``_http_bridge_payload_looks_like_full_resend``). Deliberately weaker
@@ -1027,6 +1031,12 @@ class _HTTPBridgeSession:
     previous_response_alias_registration_generations: dict[str, int] = field(default_factory=dict)
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
+    # Account that owns ``last_completed_response_id``. A previous_response_id
+    # anchor is account-scoped upstream, so it may only be replayed on the same
+    # account; when the session fails over to a different account this diverges
+    # from ``account.id`` and the anchor must NOT be injected. Kept in sync with
+    # ``last_completed_response_id`` at every setter.
+    last_completed_response_account_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     last_completed_account_id: str | None = None
     # True while an upstream event for this session is being settled. The
@@ -1043,6 +1053,13 @@ class _HTTPBridgeSession:
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0
     closed: bool = False
+    # ``closed`` rejects new admissions but is written by many unrelated
+    # retirement paths; it never proves that a sender owns pending settlement.
+    # Only the submitter may claim this, while holding ``lifecycle_lock``, when
+    # its own send reports a liveness timeout. The reader remains the default
+    # settlement owner for every other close, including an already-closed
+    # session whose still-running transport later loses heartbeat liveness.
+    liveness_settlement_owner: Literal["send"] | None = None
     # Set when the session proved silent/wedged (reattached stream with
     # response events but no ``response.created``, or repeated eventless
     # timeouts). A quarantined session must never be selected for reuse or
@@ -1061,6 +1078,17 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+
+    def claim_liveness_settlement(self) -> bool:
+        """Claim whole-deque settlement for a liveness-failed submitter.
+
+        The caller must hold ``lifecycle_lock`` across the failing send and
+        this synchronous claim so the reader cannot settle the same deque.
+        """
+
+        if self.liveness_settlement_owner is None:
+            self.liveness_settlement_owner = "send"
+        return self.liveness_settlement_owner == "send"
 
 
 def _complete_http_bridge_handoff(
