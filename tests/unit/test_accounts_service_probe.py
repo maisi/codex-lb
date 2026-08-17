@@ -186,19 +186,26 @@ async def test_probe_account_recovers_remote_reauth_required_via_vend(monkeypatc
     service = _build_service(account=account, primary_pct=50.0, secondary_pct=0.0, auth_manager=auth_manager)
     monkeypatch.setattr("app.modules.accounts.service.get_settings", lambda: _RemoteVendingSettings())
 
+    # Recovery must NOT depend on the upstream probe request: it uses a hardcoded
+    # probe model that can be stale/unavailable and 400. The successful vend is
+    # the recovery signal, so the upstream probe is skipped entirely.
+    probe_sent = {"value": False}
+
     async def _fake_probe(**kwargs):
-        return 200
+        probe_sent["value"] = True
+        return 400
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
 
     result = await service.probe_account(_ACCOUNT_ID)
 
     assert result is not None
-    assert result.probe_status_code == 200
+    assert result.probe_status_code == 200  # vend-success sentinel, not the upstream probe
     assert result.account_status_before == "reauth_required"
     assert result.account_status_after == "active"
     assert account.status == AccountStatus.ACTIVE
     assert account.deactivation_reason is None
+    assert probe_sent["value"] is False  # no upstream probe for a borrowed recovery
     # Recovery forces a live vend to confirm the owner can mint a token now.
     auth_manager.ensure_fresh.assert_awaited_once_with(account, force=True)
     cast(AsyncMock, service._repo.update_status_if_current).assert_awaited_once()

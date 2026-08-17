@@ -789,18 +789,28 @@ class AccountsService:
                     account_status_after=account.status.value,
                 )
 
-        access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
-        probe_model = model or DEFAULT_PROBE_MODEL
-        probe_status = await self._send_probe_request(
-            access_token=access_token,
-            chatgpt_account_id=probe_account.chatgpt_account_id,
-            model=probe_model,
-        )
+        if borrowed_recovery:
+            # For a borrowed account the successful vend above IS the recovery
+            # signal: the owner can mint a token, so the account is usable. Do NOT
+            # send an upstream probe — it would only exercise DEFAULT_PROBE_MODEL
+            # (counting against the owner's usage), and a stale/unavailable probe
+            # model returns 400 and would wrongly block recovery.
+            probe_status = 200
+        else:
+            access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
+            probe_model = model or DEFAULT_PROBE_MODEL
+            probe_status = await self._send_probe_request(
+                access_token=access_token,
+                chatgpt_account_id=probe_account.chatgpt_account_id,
+                model=probe_model,
+            )
         logger.info(
-            "Account force probe upstream result account_id=%s probe_status_code=%s usage_404_recovery=%s",
+            "Account force probe upstream result account_id=%s probe_status_code=%s "
+            "usage_404_recovery=%s borrowed_recovery=%s",
             account_id,
             probe_status,
             usage_404_recovery,
+            borrowed_recovery,
         )
         if (usage_404_recovery or borrowed_recovery) and _probe_status_is_success(probe_status):
             updated = await self._repo.update_status_if_current(
