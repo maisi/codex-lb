@@ -84,7 +84,10 @@ logger = logging.getLogger(__name__)
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
 
-DEFAULT_PROBE_MODEL = "gpt-5.5"
+# Current, widely-available model for the operator Force Probe. Must be a model
+# real accounts can serve, or the upstream probe 400s and usage-404 / rate-limit
+# recovery silently no-ops (the old "gpt-5.5" default went stale — see #probe).
+DEFAULT_PROBE_MODEL = "gpt-5.6-luna"
 PROBE_REQUEST_TIMEOUT_SECONDS = 30.0
 PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
 # Network/upstream failure sentinel for ``probe_status_code`` — kept as ``0`` so
