@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.db.models import Account, ApiKey, RequestLog
 from app.modules.accounts.usage_time_rollup import conversation_id_expr
 from app.modules.accounts.usage_time_rollup_read import (
@@ -33,6 +34,7 @@ class DailyReportAggregateRow:
     requests: int
     input_tokens: int
     output_tokens: int
+    reasoning_tokens: int | None
     cached_input_tokens: int
     cost_usd: float
     active_accounts: int
@@ -41,6 +43,7 @@ class DailyReportAggregateRow:
     median_tps: float
     median_queue_ms: float
     conversation_count: int = 0
+    cancelled_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -48,11 +51,14 @@ class SummaryAggregateRow:
     total_cost_usd: float
     total_input_tokens: int
     total_output_tokens: int
+    total_reasoning_tokens: int
+    reasoning_usage_known_requests: int
     total_cached_tokens: int
     total_requests: int
     total_errors: int
     active_accounts: int
     conversation_count: int = 0
+    total_cancelled: int = 0
 
 
 @dataclass(frozen=True)
@@ -161,10 +167,12 @@ class ReportsRepository:
                     requests=int(row.requests or 0),
                     input_tokens=int(row.input_tokens or 0),
                     output_tokens=int(row.output_tokens or 0),
+                    reasoning_tokens=int(row.reasoning_tokens) if row.reasoning_tokens is not None else None,
                     cached_input_tokens=int(row.cached_input_tokens or 0),
                     cost_usd=float(row.cost_usd or 0.0),
                     active_accounts=int(row.active_accounts or 0),
                     error_count=int(row.error_count or 0),
+                    cancelled_count=int(row.cancelled_count or 0),
                     median_ttft_ms=speed_values.get(row.report_date, (0.0, 0.0, 0.0))[0],
                     median_tps=speed_values.get(row.report_date, (0.0, 0.0, 0.0))[1],
                     median_queue_ms=speed_values.get(row.report_date, (0.0, 0.0, 0.0))[2],
@@ -196,13 +204,22 @@ class ReportsRepository:
         columns = [
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
             func.coalesce(func.sum(_input_tokens_expr()), 0).label("total_input_tokens"),
-            func.coalesce(func.sum(RequestLog.output_tokens), 0).label("total_output_tokens"),
+            func.coalesce(
+                func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                0,
+            ).label("total_output_tokens"),
+            func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("total_reasoning_tokens"),
+            func.count(RequestLog.reasoning_tokens).label("reasoning_usage_known_requests"),
             func.coalesce(func.sum(_cached_input_tokens_expr()), 0).label("total_cached_tokens"),
             func.count().label("total_requests"),
             func.coalesce(
-                func.sum(case((RequestLog.status != "success", 1), else_=0)),
+                func.sum(case((RequestLog.status.not_in(NON_ERROR_STATUSES), 1), else_=0)),
                 0,
             ).label("total_errors"),
+            func.coalesce(
+                func.sum(case((RequestLog.status == CANCELLED_STATUS, 1), else_=0)),
+                0,
+            ).label("total_cancelled"),
             func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
         ]
         if not use_rollup:
@@ -225,11 +242,14 @@ class ReportsRepository:
             total_cost_usd=float(row.total_cost_usd),
             total_input_tokens=int(row.total_input_tokens),
             total_output_tokens=int(row.total_output_tokens),
+            total_reasoning_tokens=int(row.total_reasoning_tokens),
+            reasoning_usage_known_requests=int(row.reasoning_usage_known_requests),
             total_cached_tokens=int(row.total_cached_tokens),
             total_requests=int(row.total_requests),
             total_errors=int(row.total_errors),
             active_accounts=int(row.active_accounts),
             conversation_count=int(conversation_count or 0),
+            total_cancelled=int(row.total_cancelled),
         )
 
     async def aggregate_by_model(
@@ -422,6 +442,8 @@ class ReportsRepository:
         useragent_group_clause = _useragent_group_filter_clause(useragent_group)
         if useragent_group_clause is not None:
             conditions.append(useragent_group_clause)
+        if api_key_ids:
+            conditions.append(RequestLog.api_key_id.in_(api_key_ids))
 
         result = await self._session.execute(select(func.min(RequestLog.requested_at)).where(and_(*conditions)))
         value = result.scalar_one_or_none()
@@ -450,6 +472,8 @@ def _report_conditions(
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     if useragent_group_clause is not None:
         conditions.append(useragent_group_clause)
+    if api_key_ids:
+        conditions.append(RequestLog.api_key_id.in_(api_key_ids))
     return conditions
 
 
@@ -528,6 +552,7 @@ def _daily_speed_medians_stmt(
             *([RequestLog.model == model] if model else []),
             *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
             *([useragent_group_clause] if useragent_group_clause is not None else []),
+            *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
         ),
     )
     token_count = RequestLog.output_tokens - func.coalesce(RequestLog.reasoning_tokens, 0)
@@ -670,14 +695,22 @@ def _daily_rows_stmt(
         day_ranges_cte.c.report_date,
         func.count(RequestLog.id).label("requests"),
         func.coalesce(func.sum(_input_tokens_expr()), 0).label("input_tokens"),
-        func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
+        func.coalesce(
+            func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+            0,
+        ).label("output_tokens"),
+        func.sum(RequestLog.reasoning_tokens).label("reasoning_tokens"),
         func.coalesce(func.sum(_cached_input_tokens_expr()), 0).label("cached_input_tokens"),
         func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
         func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
         func.coalesce(
-            func.sum(case((RequestLog.status != "success", 1), else_=0)),
+            func.sum(case((RequestLog.status.not_in(NON_ERROR_STATUSES), 1), else_=0)),
             0,
         ).label("error_count"),
+        func.coalesce(
+            func.sum(case((RequestLog.status == CANCELLED_STATUS, 1), else_=0)),
+            0,
+        ).label("cancelled_count"),
     ]
     if include_conversations:
         columns.append(func.count(func.distinct(ReportsRepository._conversation_id_expr())).label("conversation_count"))
@@ -694,6 +727,7 @@ def _daily_rows_stmt(
                     *([RequestLog.model == model] if model else []),
                     *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
                     *([useragent_group_clause] if useragent_group_clause is not None else []),
+                    *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
                 ),
             )
         )

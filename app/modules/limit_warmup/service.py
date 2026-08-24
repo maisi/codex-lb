@@ -17,7 +17,7 @@ from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIError, ResponseUsage
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
-from app.core.plan_types import account_plan_matches_allowed
+from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.pricing import get_pricing_for_model
 from app.core.utils.time import naive_utc_to_epoch, utcnow
@@ -43,9 +43,9 @@ _IDLE_PRIMARY_WINDOW = "primary_idle"
 # Minimum reset_at forward jump (in seconds) to confirm a real quota window reset.
 # Upstream timestamp jitter of ~1 second must not trigger a warm-up.
 _RESET_CONFIRMED_MIN_JUMP_SECONDS = 60
-# Persist the upstream value, but treat nearby values as the same staggered-idle
-# cycle. This avoids every boundary inherent in stateless timestamp bucketing.
-_IDLE_RESET_AT_JITTER_TOLERANCE_SECONDS = 5
+# Persist the upstream value, but treat nearby values as the same reset. This
+# avoids duplicate attempts when reset_at jitters between refresh cycles.
+_RESET_AT_JITTER_TOLERANCE_SECONDS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +166,24 @@ class StreamingLimitWarmupSender:
         try:
             async with self._auth_lock:
                 fresh_account = await self._ensure_fresh(account)
+                if (
+                    fresh_account is None
+                    or not _account_is_safe_candidate(fresh_account)
+                    or not fresh_account.limit_warmup_enabled
+                ):
+                    if fresh_account is None:
+                        error_message = "Account no longer exists"
+                    elif not fresh_account.limit_warmup_enabled:
+                        error_message = "Limit warm-up is disabled for this account"
+                    else:
+                        error_message = f"Account status is {fresh_account.status.value}"
+                    return LimitWarmupSendResult(
+                        request_id=request_id,
+                        success=False,
+                        latency_ms=_elapsed_ms(started),
+                        error_code="account_not_active",
+                        error_message=error_message,
+                    )
                 access_token = self._encryptor.decrypt(fresh_account.access_token_encrypted)
                 chatgpt_account_id = fresh_account.chatgpt_account_id
         except RefreshError as exc:
@@ -177,14 +195,6 @@ class StreamingLimitWarmupSender:
                 error_message=exc.message,
             )
 
-        if fresh_account.status != AccountStatus.ACTIVE:
-            return LimitWarmupSendResult(
-                request_id=request_id,
-                success=False,
-                latency_ms=_elapsed_ms(started),
-                error_code="account_not_active",
-                error_message=f"Account status is {fresh_account.status.value}",
-            )
         try:
             route = await self._resolve_upstream_route(fresh_account)
         except UpstreamProxyRouteError as exc:
@@ -276,16 +286,25 @@ class StreamingLimitWarmupSender:
             upstream_proxy_fallback_used=route_trace.fallback_used,
         )
 
-    async def _ensure_fresh(self, account: Account) -> Account:
+    async def _ensure_fresh(self, account: Account) -> Account | None:
         # Warm-up is a background/maintenance pass; borrowed accounts must not be
         # vended here (only on the live request path), so pass background=True.
         if self._accounts_repo_factory is None:
-            return await self._auth_manager.ensure_fresh(account, background=True)
+            current = await self._accounts_repo.get_by_id_fresh(account.id)
+            if current is None or not _account_is_safe_candidate(current) or not current.limit_warmup_enabled:
+                return current
+            await self._auth_manager.ensure_fresh(current, background=True)
+            return await self._accounts_repo.get_by_id_fresh(account.id)
         async with self._accounts_repo_factory() as accounts_repo:
-            return await AuthManager(
+            current = await accounts_repo.get_by_id_fresh(account.id)
+            if current is None or not _account_is_safe_candidate(current) or not current.limit_warmup_enabled:
+                return current
+            await AuthManager(
                 accounts_repo,
                 refresh_repo_factory=self._accounts_repo_factory,
-            ).ensure_fresh(account, background=True)
+            ).ensure_fresh(current, background=True)
+        async with self._accounts_repo_factory() as accounts_repo:
+            return await accounts_repo.get_by_id_fresh(account.id)
 
     async def _resolve_upstream_route(self, account: Account) -> ResolvedUpstreamRoute | None:
         if self._accounts_repo_factory is not None:
@@ -328,6 +347,7 @@ class LimitWarmupService:
         before_secondary: dict[str, UsageHistory],
         after_primary: dict[str, UsageHistory],
         after_secondary: dict[str, UsageHistory],
+        previous_plan_types: dict[str, str | None] | None = None,
         refresh_started_at: datetime | None = None,
         usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
     ) -> None:
@@ -358,11 +378,6 @@ class LimitWarmupService:
             if not account.limit_warmup_enabled:
                 continue
             latest_attempt = latest_attempts.get(account.id)
-            if _in_cooldown(
-                latest_attempt,
-                cooldown_seconds=settings.limit_warmup_cooldown_seconds,
-            ):
-                continue
 
             windows_to_evaluate = list(selected_windows)
             if settings.limit_warmup_staggered_idle_enabled and "primary" not in windows_to_evaluate:
@@ -380,7 +395,20 @@ class LimitWarmupService:
                         exhausted_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
                         min_available_percent=settings.limit_warmup_min_available_percent,
                     )
-                if candidate is None and settings.limit_warmup_staggered_idle_enabled and window == "primary":
+                if candidate is None and window == "secondary":
+                    candidate = _build_paid_to_free_transition_candidate(
+                        account=account,
+                        previous_plan_type=(previous_plan_types or {}).get(account.id),
+                        after_secondary=after_secondary,
+                        refresh_started_at=refresh_started_at,
+                        min_available_percent=settings.limit_warmup_min_available_percent,
+                    )
+                if (
+                    candidate is None
+                    and _account_is_safe_candidate(account)
+                    and settings.limit_warmup_staggered_idle_enabled
+                    and window == "primary"
+                ):
                     candidate = _build_staggered_idle_candidate(
                         account=account,
                         accounts=staggered_accounts,
@@ -391,6 +419,11 @@ class LimitWarmupService:
                         idle_threshold_percent=settings.limit_warmup_idle_threshold_percent,
                     )
                 if candidate is None:
+                    continue
+                if candidate.window == _IDLE_PRIMARY_WINDOW and _in_cooldown(
+                    latest_attempt,
+                    cooldown_seconds=settings.limit_warmup_cooldown_seconds,
+                ):
                     continue
 
                 model = self._resolve_model(settings.limit_warmup_model, account)
@@ -646,6 +679,11 @@ class _WarmupCandidate:
     reset_at: int
     window: str
     transition_key: str
+    # A forward-jump reset can be reported with sub-second deadline jitter, so
+    # near-equal deadlines must collapse into one attempt. An unplanned
+    # replenishment can legitimately repeat on the *same* deadline, so those
+    # candidates are deduplicated by transition key alone.
+    dedupe_on_reset_at: bool = True
 
 
 def _selected_windows(value: str) -> tuple[str, ...]:
@@ -697,30 +735,125 @@ def _build_candidate(
     )
     if before is None or after is None:
         return None
-    if before.reset_at is None or after.reset_at is None:
-        return None
-    if (before.window or "primary") != (after.window or "primary"):
-        return None
-    if before.used_percent < exhausted_threshold_percent:
-        return None
-    if after.used_percent >= 100.0:
-        return None
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None
-    if before.recorded_at is None or after.recorded_at is None or after.recorded_at <= before.recorded_at:
+    forward_jump_confirmed = usage_reset_confirmed(before=before, after=after)
+    if not (
+        forward_jump_confirmed
+        or _unplanned_reset_confirmed(
+            before=before,
+            after=after,
+            exhausted_threshold_percent=exhausted_threshold_percent,
+        )
+    ):
         return None
-    # Reject small forward deadline jitter, but allow an unchanged or earlier
-    # deadline when a newer usage sample confirms an unplanned replenishment.
-    reset_at_delta = after.reset_at - before.reset_at
-    if 0 < reset_at_delta < _RESET_CONFIRMED_MIN_JUMP_SECONDS:
-        return None
+    assert after.reset_at is not None
     if after.id is None:
         return None
     candidate_window = "monthly" if after.window == "monthly" else window
     return _WarmupCandidate(
         reset_at=after.reset_at,
         window=candidate_window,
+        transition_key=f"usage-history:{after.id}",
+        dedupe_on_reset_at=forward_jump_confirmed,
+    )
+
+
+def _unplanned_reset_confirmed(
+    *,
+    before: UsageHistory,
+    after: UsageHistory,
+    exhausted_threshold_percent: float,
+) -> bool:
+    """Return whether quota was replenished without the deadline moving forward.
+
+    ``usage_reset_confirmed`` proves a reset from a forward ``reset_at`` jump that
+    crosses the previous boundary or reanchors a whole window. Upstream can also
+    replenish a weekly/monthly allowance while keeping the deadline unchanged or
+    pulling it earlier, which that evidence cannot see. Those transitions get a
+    stricter substitute instead: the prior sample must be exhausted and the newer
+    sample must be strictly later in time, so a single stale or reordered sample
+    cannot masquerade as a reset.
+    """
+
+    if before.reset_at is None or after.reset_at is None:
+        return False
+    if (before.window or "primary") != (after.window or "primary"):
+        return False
+    # Forward jumps (including sub-minute jitter) belong to usage_reset_confirmed().
+    if after.reset_at > before.reset_at:
+        return False
+    if before.used_percent < exhausted_threshold_percent:
+        return False
+    if after.used_percent >= 100.0:
+        return False
+    if before.recorded_at is None or after.recorded_at is None:
+        return False
+    return after.recorded_at > before.recorded_at
+
+
+def usage_reset_confirmed(*, before: UsageHistory | None, after: UsageHistory | None) -> bool:
+    """Return whether consecutive samples prove a real, newly available quota window."""
+    if before is None or after is None:
+        return False
+    if before.reset_at is None or after.reset_at is None:
+        return False
+    if (before.window or "primary") != (after.window or "primary"):
+        return False
+    if after.used_percent >= 100.0:
+        return False
+    reset_at_jump = after.reset_at - before.reset_at
+    if reset_at_jump < _RESET_CONFIRMED_MIN_JUMP_SECONDS:
+        return False
+    before_observed_at = naive_utc_to_epoch(before.recorded_at)
+    observed_at = naive_utc_to_epoch(after.recorded_at)
+    window_started_at = after.reset_at - _rolling_window_seconds(after)
+    quota_recovered = after.used_percent < before.used_percent
+    crossed_previous_reset = before_observed_at <= before.reset_at <= observed_at < after.reset_at
+    reanchored_between_samples = (
+        quota_recovered and before_observed_at <= window_started_at <= observed_at < after.reset_at
+    )
+    # Scheduled resets cross the previous boundary. Early resets can happen
+    # when upstream restores quota and reanchors a complete window from the
+    # sampling interval. A reset_at update outside that interval is not a reset.
+    if not crossed_previous_reset and not reanchored_between_samples:
+        return False
+    return True
+
+
+def _build_paid_to_free_transition_candidate(
+    *,
+    account: Account,
+    previous_plan_type: str | None,
+    after_secondary: dict[str, UsageHistory],
+    refresh_started_at: datetime | None,
+    min_available_percent: float,
+) -> _WarmupCandidate | None:
+    normalized_previous_plan = normalize_account_plan_type(previous_plan_type)
+    if normalized_previous_plan is None or normalized_previous_plan == "free":
+        return None
+    if normalize_account_plan_type(account.plan_type) != "free":
+        return None
+    if refresh_started_at is None:
+        return None
+    after = after_secondary.get(account.id)
+    if after is None or after.window != "monthly" or after.reset_at is None:
+        return None
+    if after.recorded_at < refresh_started_at:
+        return None
+    if after.used_percent >= 100.0:
+        return None
+    available_percent = 100.0 - after.used_percent
+    if min_available_percent < 100.0 and available_percent < min_available_percent:
+        return None
+    # Transition-driven candidate: key it on the observed usage row so a later
+    # paid-to-free transition sharing this deadline is not deduplicated away.
+    if after.id is None:
+        return None
+    return _WarmupCandidate(
+        reset_at=after.reset_at,
+        window="monthly",
         transition_key=f"usage-history:{after.id}",
     )
 
@@ -892,6 +1025,6 @@ def _truncate(value: str | None, limit: int = 1000) -> str | None:
 
 
 def _attempt_reset_at_tolerance(candidate: _WarmupCandidate) -> int:
-    if candidate.window == _IDLE_PRIMARY_WINDOW:
-        return _IDLE_RESET_AT_JITTER_TOLERANCE_SECONDS
-    return 0
+    if not candidate.dedupe_on_reset_at:
+        return 0
+    return _RESET_AT_JITTER_TOLERANCE_SECONDS

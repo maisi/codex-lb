@@ -36,6 +36,7 @@ describe("ReportsFilters", () => {
         filters={FILTERS}
         selectedPresetDays={7}
         accountOptions={[{ value: "acc_one", label: "Primary account", isEmail: false }]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={ALL_CHART_IDS}
@@ -49,6 +50,30 @@ describe("ReportsFilters", () => {
     await user.click(await screen.findByRole("menuitemcheckbox", { name: /primary account/i }));
 
     expect(onFiltersChange).toHaveBeenCalledWith({ ...FILTERS, accountId: ["acc_one"] });
+  });
+
+  it("updates API key filters from the API key selector", async () => {
+    const user = userEvent.setup();
+    const onFiltersChange = vi.fn();
+    render(
+      <ReportsFilters
+        filters={FILTERS}
+        selectedPresetDays={7}
+        accountOptions={[]}
+        apiKeyOptions={[{ value: "key_one", label: "Dev Key · key-123" }]}
+        modelOptions={[]}
+        useragentOptions={[]}
+        visibleChartIds={ALL_CHART_IDS}
+        onVisibleChartIdsChange={vi.fn()}
+        onPresetSelect={vi.fn()}
+        onFiltersChange={onFiltersChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /api keys/i }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /dev key · key-123/i }));
+
+    expect(onFiltersChange).toHaveBeenCalledWith({ ...FILTERS, apiKeyId: ["key_one"] });
   });
 
   it("keeps multiple API keys selected", async () => {
@@ -89,6 +114,7 @@ describe("ReportsFilters", () => {
         filters={{ ...FILTERS, model: "gpt-5.1" }}
         selectedPresetDays={7}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[
           { value: "gpt-5.1", label: "gpt-5.1" },
           { value: "gpt-5.2", label: "gpt-5.2" },
@@ -118,6 +144,7 @@ describe("ReportsFilters", () => {
         filters={{ ...FILTERS, useragent: "CLI" }}
         selectedPresetDays={7}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[
           { value: "CLI", label: "CLI" },
@@ -148,6 +175,7 @@ describe("ReportsFilters", () => {
         filters={FILTERS}
         selectedPresetDays={30}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={ALL_CHART_IDS}
@@ -179,6 +207,7 @@ describe("ReportsFilters", () => {
         filters={FILTERS}
         selectedPresetDays={30}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={ALL_CHART_IDS}
@@ -204,6 +233,7 @@ describe("ReportsFilters", () => {
         filters={{ ...FILTERS, endDate: "2026-06-13" }}
         selectedPresetDays={null}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={ALL_CHART_IDS}
@@ -223,6 +253,7 @@ describe("ReportsFilters", () => {
         filters={{ ...FILTERS, startDate: "2026-06-08" }}
         selectedPresetDays={null}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={ALL_CHART_IDS}
@@ -250,6 +281,7 @@ describe("ReportsFilters", () => {
         filters={FILTERS}
         selectedPresetDays={7}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={ALL_CHART_IDS}
@@ -268,6 +300,7 @@ describe("ReportsFilters", () => {
         filters={FILTERS}
         selectedPresetDays={7}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={ALL_CHART_IDS}
@@ -293,6 +326,7 @@ describe("ReportsFilters", () => {
         filters={FILTERS}
         selectedPresetDays={7}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={ALL_CHART_IDS}
@@ -317,6 +351,7 @@ describe("ReportsFilters", () => {
         filters={FILTERS}
         selectedPresetDays={7}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={ALL_CHART_IDS}
@@ -341,6 +376,7 @@ describe("ReportsFilters", () => {
         filters={FILTERS}
         selectedPresetDays={7}
         accountOptions={[]}
+        apiKeyOptions={[]}
         modelOptions={[]}
         useragentOptions={[]}
         visibleChartIds={[]}

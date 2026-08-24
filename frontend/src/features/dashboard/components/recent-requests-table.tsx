@@ -1,5 +1,11 @@
-import { Inbox, SlidersHorizontal } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Inbox } from "lucide-react";
+import {
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import { isEmailLabel } from "@/components/blur-email";
@@ -17,14 +23,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
   Table,
   TableBody,
   TableCell,
@@ -34,15 +32,20 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { RequestArchivePanel } from "@/features/conversation-archive/components/request-archive-panel";
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
 import {
   DEFAULT_REQUEST_LOG_COLUMNS,
-  REQUEST_LOG_COLUMN_IDS,
-  useDashboardPreferencesStore,
+  MAX_REQUEST_LOG_COLUMN_WIDTH,
+  MIN_REQUEST_LOG_COLUMN_WIDTH,
+  REQUEST_LOG_COLUMN_DEFAULT_WIDTHS,
+  REQUEST_LOG_COLUMN_WIDTH_STEP,
+  clampRequestLogColumnWidth,
   type RequestLogColumnId,
-} from "@/hooks/use-dashboard-preferences";
+  type RequestLogColumnWidths,
+} from "@/features/dashboard/request-log-columns";
+import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { cn } from "@/lib/utils";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatDateTimeInline,
@@ -56,6 +59,7 @@ import {
 
 const STATUS_CLASS_MAP: Record<string, string> = {
   ok: "bg-emerald-500/15 text-emerald-700 border-emerald-500/20 hover:bg-emerald-500/20 dark:text-emerald-400",
+  cancelled: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-400",
   rate_limit: "bg-orange-500/15 text-orange-700 border-orange-500/20 hover:bg-orange-500/20 dark:text-orange-400",
   quota: "bg-red-500/15 text-red-700 border-red-500/20 hover:bg-red-500/20 dark:text-red-400",
   error: "bg-zinc-500/15 text-zinc-700 border-zinc-500/20 hover:bg-zinc-500/20 dark:text-zinc-400",
@@ -89,22 +93,6 @@ const REQUEST_KIND_LABELS: Record<string, string> = {
   limit_warmup: "Warmup",
 };
 
-const REQUEST_LOG_COLUMN_WIDTHS: Record<RequestLogColumnId, number> = {
-  time: 112,
-  account: 160,
-  plan: 96,
-  apiKey: 128,
-  model: 176,
-  effort: 96,
-  transport: 128,
-  status: 96,
-  ttft: 80,
-  tps: 80,
-  tokens: 96,
-  cost: 80,
-  details: 288,
-};
-
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
   accounts: AccountSummary[];
@@ -112,10 +100,132 @@ export type RecentRequestsTableProps = {
   limit: number;
   offset: number;
   hasMore: boolean;
+  filtersApplied?: boolean;
+  visibleColumns?: readonly RequestLogColumnId[];
+  columnWidths?: RequestLogColumnWidths;
+  onColumnWidthChange?: (column: RequestLogColumnId, width: number) => void;
   onLimitChange: (limit: number) => void;
   onOffsetChange: (offset: number) => void;
   onConversationClick?: (conversationId: string) => void;
 };
+
+type RequestLogTableHeadProps = {
+  column: RequestLogColumnId;
+  label: string;
+  resizeLabel: string;
+  className?: string;
+  width?: number;
+  onWidthChange?: (column: RequestLogColumnId, width: number) => void;
+};
+
+function RequestLogTableHead({
+  column,
+  label,
+  resizeLabel,
+  className,
+  width,
+  onWidthChange,
+}: RequestLogTableHeadProps) {
+  const resizeState = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null>(null);
+  const resolvedWidth = clampRequestLogColumnWidth(
+    width ?? REQUEST_LOG_COLUMN_DEFAULT_WIDTHS[column],
+  );
+
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (!onWidthChange) {
+      return;
+    }
+
+    event.preventDefault();
+    const measuredWidth = event.currentTarget.parentElement?.getBoundingClientRect().width;
+    resizeState.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: measuredWidth && measuredWidth > 0 ? measuredWidth : resolvedWidth,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const state = resizeState.current;
+    if (!state || state.pointerId !== event.pointerId || !onWidthChange) {
+      return;
+    }
+
+    onWidthChange(
+      column,
+      clampRequestLogColumnWidth(state.startWidth + event.clientX - state.startX),
+    );
+  };
+
+  const handlePointerEnd = (event: PointerEvent<HTMLDivElement>) => {
+    if (resizeState.current?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    resizeState.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!onWidthChange || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) {
+      return;
+    }
+
+    event.preventDefault();
+    const direction = event.key === "ArrowLeft" ? -1 : 1;
+    onWidthChange(
+      column,
+      clampRequestLogColumnWidth(
+        resolvedWidth + direction * REQUEST_LOG_COLUMN_WIDTH_STEP,
+      ),
+    );
+  };
+
+  return (
+    <TableHead
+      aria-label={label}
+      className={cn(
+        "relative text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80",
+        className,
+      )}
+      style={onWidthChange ? { width: resolvedWidth } : undefined}
+    >
+      {label}
+      {onWidthChange ? (
+        <div
+          role="separator"
+          aria-label={resizeLabel}
+          aria-orientation="vertical"
+          aria-valuemin={MIN_REQUEST_LOG_COLUMN_WIDTH}
+          aria-valuemax={MAX_REQUEST_LOG_COLUMN_WIDTH}
+          aria-valuenow={resolvedWidth}
+          tabIndex={0}
+          className="group absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none select-none outline-none"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          onLostPointerCapture={() => {
+            resizeState.current = null;
+          }}
+          onKeyDown={handleKeyDown}
+        >
+          <span
+            aria-hidden="true"
+            className="absolute left-1/2 top-1 h-[calc(100%-0.5rem)] w-px -translate-x-1/2 bg-border transition-colors group-hover:bg-primary group-focus-visible:bg-primary"
+          />
+        </div>
+      ) : null}
+    </TableHead>
+  );
+}
 
 function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
   if (!request || request.status !== "ok") {
@@ -200,6 +310,10 @@ export function RecentRequestsTable({
   limit,
   offset,
   hasMore,
+  filtersApplied = false,
+  visibleColumns: configuredVisibleColumns,
+  columnWidths,
+  onColumnWidthChange,
   onLimitChange,
   onOffsetChange,
   onConversationClick,
@@ -207,37 +321,28 @@ export function RecentRequestsTable({
   const { t } = useTranslation();
   const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
   const blurred = usePrivacyStore((s) => s.blurred);
-  const visibleColumns = useDashboardPreferencesStore((s) => s.requestLogColumns);
-  const setVisibleColumns = useDashboardPreferencesStore((s) => s.setRequestLogColumns);
-  const visibleColumnSet = new Set(visibleColumns);
-  const tableMinWidth = visibleColumns.reduce((width, column) => width + REQUEST_LOG_COLUMN_WIDTHS[column], 0);
   const isAdmin = useAuthStore((state) => state.role === "admin");
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest, t);
-
-  const columnLabels: Record<RequestLogColumnId, string> = {
-    time: t("dashboard.requests.columns.time"),
-    account: t("dashboard.requests.columns.account"),
-    plan: t("dashboard.requests.columns.plan"),
-    apiKey: t("dashboard.requests.columns.apiKey"),
-    model: t("dashboard.requests.columns.model"),
-    effort: t("dashboard.requests.columns.effort"),
-    transport: t("dashboard.requests.columns.transport"),
-    status: t("dashboard.requests.columns.status"),
-    ttft: "TTFT",
-    tps: "TPS",
-    tokens: t("dashboard.requests.columns.tokens"),
-    cost: t("dashboard.requests.columns.cost"),
-    details: t("dashboard.requests.columns.details"),
-  };
-
-  function toggleColumn(column: RequestLogColumnId): void {
-    if (visibleColumnSet.has(column)) {
-      setVisibleColumns(visibleColumns.filter((current) => current !== column));
-      return;
-    }
-    setVisibleColumns(REQUEST_LOG_COLUMN_IDS.filter((current) => visibleColumnSet.has(current) || current === column));
-  }
+  const visibleColumns = configuredVisibleColumns ?? DEFAULT_REQUEST_LOG_COLUMNS;
+  const visibleColumnSet = useMemo(() => new Set(visibleColumns), [visibleColumns]);
+  const hasConfiguredLayout =
+    configuredVisibleColumns !== undefined ||
+    columnWidths !== undefined ||
+    onColumnWidthChange !== undefined;
+  const tableWidth = hasConfiguredLayout
+    ? visibleColumns.reduce(
+        (totalWidth, column) =>
+          totalWidth +
+          clampRequestLogColumnWidth(
+            columnWidths?.[column] ?? REQUEST_LOG_COLUMN_DEFAULT_WIDTHS[column],
+          ),
+        0,
+      )
+    : undefined;
+  const isColumnVisible = (column: RequestLogColumnId) => visibleColumnSet.has(column);
+  const resizeLabel = (label: string) =>
+    t("dashboard.requests.resizeColumn", { column: label });
 
   const accountLabelMap = useMemo(() => {
     const index = new Map<string, string>();
@@ -260,62 +365,47 @@ export function RecentRequestsTable({
   }, [accounts]);
 
   if (requests.length === 0) {
+    const emptyFromExistingLogs = filtersApplied || total > 0;
     return (
       <EmptyState
         icon={Inbox}
-        title={t("dashboard.requests.emptyTitle")}
-        description={t("dashboard.requests.emptyDescription")}
+        title={
+          emptyFromExistingLogs
+            ? t("dashboard.requests.emptyFilteredTitle")
+            : t("dashboard.requests.emptyTitle")
+        }
+        description={
+          emptyFromExistingLogs
+            ? t("dashboard.requests.emptyFilteredDescription")
+            : t("dashboard.requests.emptyDescription")
+        }
       />
     );
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex justify-end">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button type="button" variant="outline" size="sm" className="gap-2">
-              <SlidersHorizontal className="size-4" />
-              {t("dashboard.requests.columns.choose")}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48">
-            {REQUEST_LOG_COLUMN_IDS.map((column) => (
-              <DropdownMenuCheckboxItem
-                key={column}
-                checked={visibleColumnSet.has(column)}
-                disabled={visibleColumns.length === 1 && visibleColumnSet.has(column)}
-                onCheckedChange={() => toggleColumn(column)}
-                onSelect={(event) => event.preventDefault()}
-              >
-                {columnLabels[column]}
-              </DropdownMenuCheckboxItem>
-            ))}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => setVisibleColumns(DEFAULT_REQUEST_LOG_COLUMNS)}>
-              {t("dashboard.requests.columns.reset")}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-      <div className="rounded-xl border bg-card">
-        <div className="relative overflow-x-auto">
-        <Table className="w-full table-fixed" style={{ minWidth: `${tableMinWidth}px` }}>
+    <div className="rounded-xl border bg-card">
+      <div className="relative overflow-x-auto">
+        <Table
+          className="w-full table-fixed"
+          style={tableWidth === undefined ? undefined : { width: tableWidth, minWidth: tableWidth }}
+        >
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              {visibleColumnSet.has("time") ? <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.time}</TableHead> : null}
-              {visibleColumnSet.has("account") ? <TableHead className="w-40 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.account}</TableHead> : null}
-              {visibleColumnSet.has("plan") ? <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.plan}</TableHead> : null}
-              {visibleColumnSet.has("apiKey") ? <TableHead className="w-32 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.apiKey}</TableHead> : null}
-              {visibleColumnSet.has("model") ? <TableHead className="w-44 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.model}</TableHead> : null}
-              {visibleColumnSet.has("effort") ? <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.effort}</TableHead> : null}
-              {visibleColumnSet.has("transport") ? <TableHead className="w-32 pr-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.transport}</TableHead> : null}
-              {visibleColumnSet.has("status") ? <TableHead className="w-24 pl-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.status}</TableHead> : null}
-              {visibleColumnSet.has("ttft") ? <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.ttft}</TableHead> : null}
-              {visibleColumnSet.has("tps") ? <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.tps}</TableHead> : null}
-              {visibleColumnSet.has("tokens") ? <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.tokens}</TableHead> : null}
-              {visibleColumnSet.has("cost") ? <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.cost}</TableHead> : null}
-              {visibleColumnSet.has("details") ? <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{columnLabels.details}</TableHead> : null}
+              {isColumnVisible("time") ? <RequestLogTableHead column="time" label={t("dashboard.requests.columns.time")} resizeLabel={resizeLabel(t("dashboard.requests.columns.time"))} className="pl-4" width={columnWidths?.time} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("account") ? <RequestLogTableHead column="account" label={t("dashboard.requests.columns.account")} resizeLabel={resizeLabel(t("dashboard.requests.columns.account"))} width={columnWidths?.account} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("plan") ? <RequestLogTableHead column="plan" label={t("dashboard.requests.columns.plan")} resizeLabel={resizeLabel(t("dashboard.requests.columns.plan"))} width={columnWidths?.plan} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("apiKey") ? <RequestLogTableHead column="apiKey" label={t("dashboard.requests.columns.apiKey")} resizeLabel={resizeLabel(t("dashboard.requests.columns.apiKey"))} width={columnWidths?.apiKey} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("model") ? <RequestLogTableHead column="model" label={t("dashboard.requests.columns.model")} resizeLabel={resizeLabel(t("dashboard.requests.columns.model"))} width={columnWidths?.model} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("effort") ? <RequestLogTableHead column="effort" label={t("dashboard.requests.columns.effort")} resizeLabel={resizeLabel(t("dashboard.requests.columns.effort"))} width={columnWidths?.effort} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("transport") ? <RequestLogTableHead column="transport" label={t("dashboard.requests.columns.transport")} resizeLabel={resizeLabel(t("dashboard.requests.columns.transport"))} className="pr-3" width={columnWidths?.transport} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("status") ? <RequestLogTableHead column="status" label={t("dashboard.requests.columns.status")} resizeLabel={resizeLabel(t("dashboard.requests.columns.status"))} className="pl-3" width={columnWidths?.status} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("ttft") ? <RequestLogTableHead column="ttft" label={t("dashboard.requests.columns.ttft")} resizeLabel={resizeLabel(t("dashboard.requests.columns.ttft"))} className="text-right" width={columnWidths?.ttft} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("tps") ? <RequestLogTableHead column="tps" label={t("dashboard.requests.columns.tps")} resizeLabel={resizeLabel(t("dashboard.requests.columns.tps"))} className="text-right" width={columnWidths?.tps} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("tokens") ? <RequestLogTableHead column="tokens" label={t("dashboard.requests.columns.tokens")} resizeLabel={resizeLabel(t("dashboard.requests.columns.tokens"))} className="text-right" width={columnWidths?.tokens} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("cost") ? <RequestLogTableHead column="cost" label={t("dashboard.requests.columns.cost")} resizeLabel={resizeLabel(t("dashboard.requests.columns.cost"))} className="text-right" width={columnWidths?.cost} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("details") ? <RequestLogTableHead column="details" label={t("dashboard.requests.columns.details")} resizeLabel={resizeLabel(t("dashboard.requests.columns.details"))} className="pr-4" width={columnWidths?.details} onWidthChange={onColumnWidthChange} /> : null}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -335,20 +425,20 @@ export function RecentRequestsTable({
 
               return (
                 <TableRow key={request.requestId}>
-                  {visibleColumnSet.has("time") ? <TableCell className="pl-4 align-top">
+                  {isColumnVisible("time") ? <TableCell className="pl-4 align-top">
                     <div className="leading-tight">
                       <div className="text-sm font-medium">{time.primary}</div>
                       <div className="text-xs text-muted-foreground">{time.secondary}</div>
                     </div>
                   </TableCell> : null}
-                  {visibleColumnSet.has("account") ? <TableCell className="truncate align-top text-sm">
+                  {isColumnVisible("account") ? <TableCell className="truncate align-top text-sm">
                     {isEmailLabel && blurred ? (
                       <span className="privacy-blur">{accountLabel}</span>
                     ) : (
                       accountLabel
                     )}
                   </TableCell> : null}
-                  {visibleColumnSet.has("plan") ? <TableCell className="align-top">
+                  {isColumnVisible("plan") ? <TableCell className="align-top">
                     {planType ? (
                       <Badge
                         variant="outline"
@@ -360,17 +450,13 @@ export function RecentRequestsTable({
                       <span className="text-xs text-muted-foreground">--</span>
                     )}
                   </TableCell> : null}
-                  {visibleColumnSet.has("apiKey") ? <TableCell className="truncate align-top text-xs text-muted-foreground">
+                  {isColumnVisible("apiKey") ? <TableCell className="truncate align-top text-xs text-muted-foreground">
                     {request.apiKeyName || "--"}
                   </TableCell> : null}
-                  {visibleColumnSet.has("model") ? <TableCell className="truncate align-top">
+                  {isColumnVisible("model") ? <TableCell className="truncate align-top">
                     <div className="leading-tight">
                       <span className="font-mono text-xs">
-                        {formatModelLabel(
-                          request.model,
-                          visibleColumnSet.has("effort") ? null : request.reasoningEffort,
-                          visibleServiceTier,
-                        )}
+                        {formatModelLabel(request.model, isColumnVisible("effort") ? null : request.reasoningEffort, visibleServiceTier)}
                       </span>
                       {request.requestKind === "warmup" || request.requestKind === "limit_warmup" ? (
                         <div className="mt-1 text-xs text-muted-foreground">
@@ -384,12 +470,12 @@ export function RecentRequestsTable({
                       ) : null}
                     </div>
                   </TableCell> : null}
-                  {visibleColumnSet.has("effort") ? (
+                  {isColumnVisible("effort") ? (
                     <TableCell className="align-top font-mono text-xs">
                       {request.reasoningEffort ? formatSlug(request.reasoningEffort) : "--"}
                     </TableCell>
                   ) : null}
-                  {visibleColumnSet.has("transport") ? <TableCell className="pr-3 align-top">
+                  {isColumnVisible("transport") ? <TableCell className="pr-3 align-top">
                     {request.transport ? (
                       <div className="space-y-1">
                         <Badge
@@ -409,7 +495,7 @@ export function RecentRequestsTable({
                       <span className="text-xs text-muted-foreground">--</span>
                     )}
                   </TableCell> : null}
-                  {visibleColumnSet.has("status") ? <TableCell className="pl-3 align-top">
+                  {isColumnVisible("status") ? <TableCell className="pl-3 align-top">
                     <Badge
                       variant="outline"
                       className={STATUS_CLASS_MAP[request.status] ?? STATUS_CLASS_MAP.error}
@@ -417,13 +503,13 @@ export function RecentRequestsTable({
                       {t(`dashboard.requestStatus.${request.status}`, { defaultValue: REQUEST_STATUS_LABELS[request.status] ?? request.status })}
                     </Badge>
                   </TableCell> : null}
-                  {visibleColumnSet.has("ttft") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  {isColumnVisible("ttft") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {formatCompactElapsed(request.latencyFirstTokenMs) ?? "--"}
                   </TableCell> : null}
-                  {visibleColumnSet.has("tps") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  {isColumnVisible("tps") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {generationSpeed ?? "--"}
                   </TableCell> : null}
-                  {visibleColumnSet.has("tokens") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  {isColumnVisible("tokens") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     <div className="leading-tight">
                       <div>{formatCompactNumber(request.tokens)}</div>
                       {request.cachedInputTokens != null && request.cachedInputTokens > 0 && (
@@ -431,12 +517,19 @@ export function RecentRequestsTable({
                           {t("common.units.cachedShort", { count: formatCompactNumber(request.cachedInputTokens) })}
                         </div>
                       )}
+                      {request.reasoningTokens != null ? (
+                        <div className="text-[11px] text-muted-foreground">
+                          {t("dashboard.requests.reasoningTokensShort", {
+                            count: formatCompactNumber(request.reasoningTokens),
+                          })}
+                        </div>
+                      ) : null}
                     </div>
                   </TableCell> : null}
-                  {visibleColumnSet.has("cost") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  {isColumnVisible("cost") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {formatCurrency(request.costUsd)}
                   </TableCell> : null}
-                  {visibleColumnSet.has("details") ? <TableCell className="pr-4 align-top whitespace-normal">
+                  {isColumnVisible("details") ? <TableCell className="pr-4 align-top whitespace-normal">
                     {hasError ? (
                       <div className="space-y-2">
                         {request.errorCode ? (
@@ -476,8 +569,8 @@ export function RecentRequestsTable({
             })}
           </TableBody>
         </Table>
-        </div>
       </div>
+    </div>
 
       <div className="flex justify-end">
         <PaginationControls
@@ -491,12 +584,12 @@ export function RecentRequestsTable({
       </div>
 
       <Dialog open={selectedRequest !== null} onOpenChange={(open) => { if (!open) setSelectedRequest(null); }}>
-        <DialogContent className="max-h-[85vh] sm:max-w-2xl">
+        <DialogContent className="max-h-[85vh] grid-rows-[auto_minmax(0,1fr)] sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>{t("dashboard.requestDetails.title")}</DialogTitle>
             <DialogDescription>{t("dashboard.requestDetails.description")}</DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 overflow-y-auto">
+          <div className="grid min-h-0 gap-4 overflow-y-auto">
             <div className="space-y-3 rounded-md border bg-muted/30 p-4">
               <RequestDetailField
                 label={t("dashboard.requestDetails.requestId")}
@@ -515,12 +608,53 @@ export function RecentRequestsTable({
                 <RequestDetailField label="TTFT" value={formatElapsed(selectedRequest?.latencyFirstTokenMs ?? null)} />
                 <RequestDetailField label={t("dashboard.requestDetails.queue")} value={formatElapsed(selectedRequest?.latencyQueueMs ?? null)} />
                 <RequestDetailField label="TPS" value={selectedRequest ? (formatGenerationSpeed(selectedRequest) ?? "—") : "—"} />
+                {selectedRequest?.reasoningTokens != null ? (
+                  <RequestDetailField
+                    label={t("dashboard.requestDetails.reasoningTokensIncluded")}
+                    value={String(selectedRequest.reasoningTokens)}
+                    mono
+                  />
+                ) : null}
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label={t("dashboard.requests.columns.transport")} value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
                 <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt, dateDisplayFormat) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.errorCode")} value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
+              {selectedRequest?.upstreamProxyRouteMode ||
+              selectedRequest?.upstreamProxyPoolId ||
+              selectedRequest?.upstreamProxyEndpointId ||
+              selectedRequest?.upstreamProxyFallbackUsed != null ||
+              selectedRequest?.upstreamProxyFailClosedReason ? (
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {selectedRequest.upstreamProxyRouteMode ? (
+                    <RequestDetailField label={t("dashboard.requestDetails.routeMode")} value={selectedRequest.upstreamProxyRouteMode} mono />
+                  ) : null}
+                  {selectedRequest.upstreamProxyPoolId ? (
+                    <RequestDetailField label={t("dashboard.requestDetails.routePool")} value={selectedRequest.upstreamProxyPoolId} mono />
+                  ) : null}
+                  {selectedRequest.upstreamProxyEndpointId ? (
+                    <RequestDetailField label={t("dashboard.requestDetails.routeEndpoint")} value={selectedRequest.upstreamProxyEndpointId} mono />
+                  ) : null}
+                  {selectedRequest.upstreamProxyFallbackUsed != null ? (
+                    <RequestDetailField
+                      label={t("dashboard.requestDetails.routeFallback")}
+                      value={t(
+                        selectedRequest.upstreamProxyFallbackUsed
+                          ? "dashboard.requestDetails.routeFallbackUsed"
+                          : "dashboard.requestDetails.routeFallbackNotUsed",
+                      )}
+                    />
+                  ) : null}
+                  {selectedRequest.upstreamProxyFailClosedReason ? (
+                    <RequestDetailField
+                      label={t("dashboard.requestDetails.routeFailClosedReason")}
+                      value={selectedRequest.upstreamProxyFailClosedReason}
+                      mono
+                    />
+                  ) : null}
+                </div>
+              ) : null}
               {isAdmin ? (
                 <RequestDetailField
                   label={t("dashboard.requestDetails.userAgent")}

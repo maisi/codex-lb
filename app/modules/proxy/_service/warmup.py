@@ -201,7 +201,6 @@ class _WarmupMixin:
             headers=filter_inbound_headers(headers),
             warmup_model=model,
             prohibit_fast_mode=dashboard_settings.prohibit_fast_mode,
-            allow_pre_submit_errors_as_result=True,
         )
         return WarmupAccountResultData(
             account_id=account.id,
@@ -292,7 +291,6 @@ class _WarmupMixin:
                     headers=filtered_headers,
                     warmup_model=effective_model,
                     prohibit_fast_mode=prohibit_fast_mode,
-                    allow_pre_submit_errors_as_result=len(accounts_to_submit) > 1,
                 )
 
         submission_results = await asyncio.gather(*(_submit_account_warmup(account) for account in accounts_to_submit))
@@ -344,7 +342,6 @@ class _WarmupMixin:
         headers: Mapping[str, str],
         warmup_model: str,
         prohibit_fast_mode: bool,
-        allow_pre_submit_errors_as_result: bool = False,
     ) -> _WarmupSubmitResult:
         started_at = time.monotonic()
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
@@ -467,13 +464,9 @@ class _WarmupMixin:
         except ProxyAuthError as exc:
             error_code = "auth_error"
             error_message = str(exc) or "Warmup authentication failed"
-            if not allow_pre_submit_errors_as_result:
-                raise
         except ProxyRateLimitError as exc:
             error_code = "rate_limit_exceeded"
             error_message = str(exc) or "Warmup request was rate limited"
-            if not allow_pre_submit_errors_as_result:
-                raise
         except Exception as exc:
             error_code = "upstream_error"
             error_message = str(exc) or "Warmup request failed"
