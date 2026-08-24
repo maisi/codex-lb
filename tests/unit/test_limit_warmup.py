@@ -2052,9 +2052,7 @@ async def test_unplanned_weekly_reset_with_earlier_deadline_sends_warmup() -> No
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
-    assert [(row.reset_at, row.transition_key) for row in repo.rows] == [
-        (_WEEKLY_RESET_AT - 500, "usage-history:11")
-    ]
+    assert [(row.reset_at, row.transition_key) for row in repo.rows] == [(_WEEKLY_RESET_AT - 500, "usage-history:11")]
 
 
 @pytest.mark.asyncio
