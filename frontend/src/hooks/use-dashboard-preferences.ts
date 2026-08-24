@@ -5,53 +5,32 @@ import type { AccountListSort, AccountListSortKey } from "@/features/dashboard/c
 const ACCOUNT_BURNRATE_STORAGE_KEY = "codex-lb-account-burnrate-enabled";
 const ACCOUNT_VIEW_MODE_STORAGE_KEY = "codex-lb-dashboard-account-view-mode";
 const ACCOUNT_LIST_SORT_STORAGE_KEY = "codex-lb-dashboard-account-list-sort";
-const REQUEST_LOG_COLUMNS_STORAGE_KEY = "codex-lb-dashboard-request-log-columns-v1";
 
 export type DashboardAccountViewMode = "cards" | "list";
-
-export const REQUEST_LOG_COLUMN_IDS = [
-  "time",
-  "account",
-  "plan",
-  "apiKey",
-  "model",
-  "effort",
-  "transport",
-  "status",
-  "ttft",
-  "tps",
-  "tokens",
-  "cost",
-  "details",
-] as const;
-
-export type RequestLogColumnId = (typeof REQUEST_LOG_COLUMN_IDS)[number];
-
-export const DEFAULT_REQUEST_LOG_COLUMNS: RequestLogColumnId[] = REQUEST_LOG_COLUMN_IDS.filter(
-  (column) => column !== "effort",
-);
 
 type DashboardPreferencesState = {
   accountBurnrateEnabled: boolean;
   accountViewMode: DashboardAccountViewMode;
   accountListSort: AccountListSort;
-  requestLogColumns: RequestLogColumnId[];
   initialized: boolean;
   initializePreferences: () => void;
   setAccountBurnrateEnabled: (enabled: boolean) => void;
   setAccountViewMode: (mode: DashboardAccountViewMode) => void;
   setAccountListSort: (sort: AccountListSort) => void;
-  setRequestLogColumns: (columns: RequestLogColumnId[]) => void;
 };
 
-const ACCOUNT_LIST_SORT_KEYS: AccountListSortKey[] = ["account", "status", "plan", "quota", "credits", "warmup"];
+const ACCOUNT_LIST_SORT_KEYS: AccountListSortKey[] = [
+  "account",
+  "status",
+  "plan",
+  "quota",
+  "subscriptionCredits",
+  "purchasedCredits",
+  "warmup",
+];
 
 function isAccountListSortKey(value: unknown): value is AccountListSortKey {
   return typeof value === "string" && ACCOUNT_LIST_SORT_KEYS.includes(value as AccountListSortKey);
-}
-
-function isRequestLogColumnId(value: unknown): value is RequestLogColumnId {
-  return typeof value === "string" && REQUEST_LOG_COLUMN_IDS.includes(value as RequestLogColumnId);
 }
 
 function readStoredAccountBurnrateEnabled(): boolean | null {
@@ -86,6 +65,9 @@ function readStoredAccountListSort(): AccountListSort {
   }
   try {
     const parsed = JSON.parse(stored) as { key?: unknown; direction?: unknown };
+    if (parsed.key === "credits") {
+      parsed.key = "purchasedCredits";
+    }
     if (
       isAccountListSortKey(parsed.key) &&
       (parsed.direction === "asc" || parsed.direction === "desc")
@@ -123,53 +105,19 @@ function persistAccountListSort(sort: AccountListSort): void {
   window.localStorage.setItem(ACCOUNT_LIST_SORT_STORAGE_KEY, JSON.stringify(sort));
 }
 
-function readStoredRequestLogColumns(): RequestLogColumnId[] | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  try {
-    const stored = window.localStorage.getItem(REQUEST_LOG_COLUMNS_STORAGE_KEY);
-    if (!stored) {
-      return null;
-    }
-    const parsed: unknown = JSON.parse(stored);
-    if (!Array.isArray(parsed)) {
-      return null;
-    }
-    const columns = [...new Set(parsed.filter(isRequestLogColumnId))];
-    return columns.length > 0 ? columns : null;
-  } catch {
-    return null;
-  }
-}
-
-function persistRequestLogColumns(columns: RequestLogColumnId[]): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-  try {
-    window.localStorage.setItem(REQUEST_LOG_COLUMNS_STORAGE_KEY, JSON.stringify(columns));
-  } catch {
-    // Storage can be unavailable in restricted browser contexts; keep the in-memory preference usable.
-  }
-}
-
 export const useDashboardPreferencesStore = create<DashboardPreferencesState>((set) => ({
   accountBurnrateEnabled: true,
   accountViewMode: "cards",
   accountListSort: null,
-  requestLogColumns: DEFAULT_REQUEST_LOG_COLUMNS,
   initialized: false,
   initializePreferences: () => {
     const accountBurnrateEnabled = readStoredAccountBurnrateEnabled() ?? true;
     const accountViewMode = readStoredAccountViewMode() ?? "cards";
     const accountListSort = readStoredAccountListSort();
-    const requestLogColumns = readStoredRequestLogColumns() ?? DEFAULT_REQUEST_LOG_COLUMNS;
     persistAccountBurnrateEnabled(accountBurnrateEnabled);
     persistAccountViewMode(accountViewMode);
     persistAccountListSort(accountListSort);
-    persistRequestLogColumns(requestLogColumns);
-    set({ accountBurnrateEnabled, accountViewMode, accountListSort, requestLogColumns, initialized: true });
+    set({ accountBurnrateEnabled, accountViewMode, accountListSort, initialized: true });
   },
   setAccountBurnrateEnabled: (enabled) => {
     persistAccountBurnrateEnabled(enabled);
@@ -182,10 +130,5 @@ export const useDashboardPreferencesStore = create<DashboardPreferencesState>((s
   setAccountListSort: (sort) => {
     persistAccountListSort(sort);
     set({ accountListSort: sort, initialized: true });
-  },
-  setRequestLogColumns: (columns) => {
-    const requestLogColumns = columns.length > 0 ? columns : DEFAULT_REQUEST_LOG_COLUMNS;
-    persistRequestLogColumns(requestLogColumns);
-    set({ requestLogColumns, initialized: true });
   },
 }));

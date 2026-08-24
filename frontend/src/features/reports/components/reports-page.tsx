@@ -131,7 +131,6 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     queryKey: ["accounts", "reports-filter"],
     queryFn: listAccounts,
   });
-
   const accountOptions = useMemo(
     () =>
       (accountsData?.accounts ?? []).map((account) => ({
@@ -189,7 +188,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const handleRetry = async () => {
     if (!isReportDateRangeValid(filters.startDate, filters.endDate)) {
-      await refetchAccounts();
+      await Promise.allSettled([refetchAccounts()]);
       return;
     }
 
@@ -249,14 +248,38 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         </AlertMessage>
       ) : null}
       {sharedOptionsError ? (
-        <AlertMessage variant="error">
-          {t("reports.errors.options", { error: sharedOptionsError })}
-        </AlertMessage>
+        <div className="flex items-center justify-between gap-2">
+          <AlertMessage variant="error" className="flex-1">
+            {t("reports.errors.options", { error: sharedOptionsError })}
+          </AlertMessage>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void handleRetry();
+            }}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
       ) : null}
       {accountOptionsError ? (
-        <AlertMessage variant="error">
-          {t("reports.errors.accounts", { error: accountOptionsError })}
-        </AlertMessage>
+        <div className="flex items-center justify-between gap-2">
+          <AlertMessage variant="error" className="flex-1">
+            {t("reports.errors.accounts", { error: accountOptionsError })}
+          </AlertMessage>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void handleRetry();
+            }}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
       ) : null}
 
       {reportsQuery.isLoading ? (

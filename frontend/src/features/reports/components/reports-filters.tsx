@@ -24,7 +24,7 @@ export type ReportsFiltersProps = {
   filters: ReportsFiltersState;
   selectedPresetDays: number | null;
   accountOptions: MultiSelectOption[];
-  apiKeyOptions?: MultiSelectOption[];
+  apiKeyOptions: MultiSelectOption[];
   modelOptions: MultiSelectOption[];
   useragentOptions: MultiSelectOption[];
   visibleChartIds: ReportChartId[];
@@ -43,7 +43,7 @@ export function ReportsFilters({
   filters,
   selectedPresetDays,
   accountOptions,
-  apiKeyOptions = [],
+  apiKeyOptions,
   modelOptions,
   useragentOptions,
   visibleChartIds,

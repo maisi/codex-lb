@@ -1,13 +1,15 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 import {
   DEFAULT_REQUEST_LOG_COLUMNS,
-  useDashboardPreferencesStore,
-} from "@/hooks/use-dashboard-preferences";
+  MAX_REQUEST_LOG_COLUMN_WIDTH,
+  MIN_REQUEST_LOG_COLUMN_WIDTH,
+  REQUEST_LOG_COLUMN_WIDTH_STEP,
+} from "@/features/dashboard/request-log-columns";
+import type { RequestLog } from "@/features/dashboard/schemas";
 
 const ISO = "2026-01-01T12:00:00+00:00";
 const NULL_FAILURE_METADATA = {
@@ -53,6 +55,41 @@ const PAGINATION_PROPS = {
   onOffsetChange: vi.fn(),
 };
 
+const LAYOUT_REQUEST = {
+  requestedAt: ISO,
+  accountId: "acc-layout",
+  planType: "plus",
+  apiKeyName: "Layout Key",
+  apiKeyId: "key-layout",
+  requestId: "req-layout",
+  conversationId: null,
+  requestKind: "normal",
+  model: "gpt-5.1",
+  source: null,
+  serviceTier: null,
+  requestedServiceTier: null,
+  actualServiceTier: null,
+  transport: "http",
+  upstreamTransport: "http",
+  status: "ok",
+  errorCode: null,
+  errorMessage: null,
+  ...NULL_FAILURE_METADATA,
+  ...NULL_USERAGENT_METADATA,
+  tokens: 1200,
+  inputTokens: 1000,
+  outputTokens: 200,
+  outputTokensRaw: 200,
+  reasoningTokens: 0,
+  latencyFirstTokenMs: 200,
+  latencyQueueMs: null,
+  cachedInputTokens: 0,
+  reasoningEffort: null,
+  costUsd: 0.01,
+  costBreakdown: null,
+  latencyMs: 1000,
+} satisfies RequestLog;
+
 function openRequestDetails() {
   fireEvent.click(screen.getByRole("button", { name: "View Details" }));
   return screen.getByRole("dialog");
@@ -62,7 +99,6 @@ describe("RecentRequestsTable", () => {
   beforeEach(() => {
     toastSuccess.mockReset();
     toastError.mockReset();
-    useDashboardPreferencesStore.getState().setRequestLogColumns(DEFAULT_REQUEST_LOG_COLUMNS);
     useAuthStore.setState({
       role: "admin",
       permissions: ["read", "write"],
@@ -78,6 +114,157 @@ describe("RecentRequestsTable", () => {
     if (originalIsSecureContext) {
       Object.defineProperty(window, "isSecureContext", originalIsSecureContext);
     }
+  });
+
+  it("renders the default column layout when layout props are omitted", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+      />,
+    );
+
+    expect(screen.getAllByRole("columnheader")).toHaveLength(DEFAULT_REQUEST_LOG_COLUMNS.length);
+    expect(screen.getByText("Layout Key")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View Details" })).toBeInTheDocument();
+  });
+
+  it("renders only selected headers and matching row cells", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "model"]}
+      />,
+    );
+
+    expect(screen.getAllByRole("columnheader")).toHaveLength(2);
+    expect(screen.getByRole("columnheader", { name: "Time" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Model" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "API Key" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Layout Key")).not.toBeInTheDocument();
+    expect(screen.getByText("gpt-5.1")).toBeInTheDocument();
+  });
+
+  it("moves reasoning effort out of the model label into a dedicated effort column", () => {
+    const requests = [{ ...LAYOUT_REQUEST, reasoningEffort: "high" }];
+    const { rerender } = render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={requests}
+        visibleColumns={["time", "model"]}
+      />,
+    );
+
+    // Without the dedicated column the effort stays as a model-label suffix.
+    expect(screen.queryByRole("columnheader", { name: "Effort" })).not.toBeInTheDocument();
+    expect(screen.getByText("gpt-5.1 (high)")).toBeInTheDocument();
+
+    rerender(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={requests}
+        visibleColumns={["time", "model", "effort"]}
+      />,
+    );
+
+    expect(screen.getByRole("columnheader", { name: "Effort" })).toBeInTheDocument();
+    expect(screen.getByText("gpt-5.1")).toBeInTheDocument();
+    expect(screen.queryByText("gpt-5.1 (high)")).not.toBeInTheDocument();
+    expect(screen.getByText("High")).toBeInTheDocument();
+  });
+
+  it("resizes only the selected column by pointer and clamps it to bounds", () => {
+    const onColumnWidthChange = vi.fn();
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: 112, account: 160 }}
+        onColumnWidthChange={onColumnWidthChange}
+      />,
+    );
+
+    const accountSeparator = screen.getByRole("separator", {
+      name: "Resize Account column",
+    });
+    fireEvent.pointerDown(accountSeparator, { pointerId: 7, clientX: 100 });
+    fireEvent.pointerMove(accountSeparator, { pointerId: 7, clientX: 164 });
+    fireEvent.pointerUp(accountSeparator, { pointerId: 7, clientX: 164 });
+
+    expect(onColumnWidthChange).toHaveBeenCalledWith("account", 224);
+    expect(onColumnWidthChange).not.toHaveBeenCalledWith("time", expect.any(Number));
+
+    onColumnWidthChange.mockClear();
+    fireEvent.pointerDown(accountSeparator, { pointerId: 8, clientX: 100 });
+    fireEvent.pointerMove(accountSeparator, { pointerId: 8, clientX: 10_000 });
+    expect(onColumnWidthChange).toHaveBeenLastCalledWith(
+      "account",
+      MAX_REQUEST_LOG_COLUMN_WIDTH,
+    );
+  });
+
+  it("resizes with arrow keys within bounds and sums visible widths", () => {
+    const onColumnWidthChange = vi.fn();
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: MIN_REQUEST_LOG_COLUMN_WIDTH, account: 200 }}
+        onColumnWidthChange={onColumnWidthChange}
+      />,
+    );
+
+    expect(screen.getByRole("table")).toHaveStyle({
+      width: `${MIN_REQUEST_LOG_COLUMN_WIDTH + 200}px`,
+      minWidth: `${MIN_REQUEST_LOG_COLUMN_WIDTH + 200}px`,
+    });
+
+    const timeSeparator = screen.getByRole("separator", {
+      name: "Resize Time column",
+    });
+    fireEvent.keyDown(timeSeparator, { key: "ArrowLeft" });
+    expect(onColumnWidthChange).toHaveBeenLastCalledWith(
+      "time",
+      MIN_REQUEST_LOG_COLUMN_WIDTH,
+    );
+
+    const accountSeparator = screen.getByRole("separator", {
+      name: "Resize Account column",
+    });
+    fireEvent.keyDown(accountSeparator, { key: "ArrowRight" });
+    expect(onColumnWidthChange).toHaveBeenLastCalledWith(
+      "account",
+      200 + REQUEST_LOG_COLUMN_WIDTH_STEP,
+    );
+  });
+
+  it("pins the table to the configured width sum so surplus space is not redistributed", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: 112, account: 160 }}
+        onColumnWidthChange={vi.fn()}
+      />,
+    );
+
+    // An explicit width (not merely a minimum) keeps configured column widths
+    // independent when their sum is smaller than the container.
+    expect(screen.getByRole("table")).toHaveStyle({
+      width: "272px",
+      minWidth: "272px",
+    });
   });
 
   it("renders rows with status badges and supports request details and copy actions", async () => {
@@ -130,6 +317,11 @@ describe("RecentRequestsTable", () => {
             ...NULL_FAILURE_METADATA,
             ...NULL_USERAGENT_METADATA,
             upstreamTransport: "auto",
+            upstreamProxyRouteMode: "account_bound",
+            upstreamProxyPoolId: "pool-1",
+            upstreamProxyEndpointId: "endpoint-1",
+            upstreamProxyFallbackUsed: true,
+            upstreamProxyFailClosedReason: "no_healthy_endpoint",
              tokens: 1200,
              inputTokens: 1000,
              outputTokens: 200,
@@ -169,6 +361,16 @@ describe("RecentRequestsTable", () => {
     expect(within(dialog).getByText("rate_limit_exceeded")).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");
     expect(within(dialog).getByText("1.0 s")).toBeInTheDocument();
+    expect(within(dialog).getByText("Route mode")).toBeInTheDocument();
+    expect(within(dialog).getByText("account_bound")).toBeInTheDocument();
+    expect(within(dialog).getByText("Proxy pool")).toBeInTheDocument();
+    expect(within(dialog).getByText("pool-1")).toBeInTheDocument();
+    expect(within(dialog).getByText("Proxy endpoint")).toBeInTheDocument();
+    expect(within(dialog).getByText("endpoint-1")).toBeInTheDocument();
+    expect(within(dialog).getByText("Same-pool fallback")).toBeInTheDocument();
+    expect(within(dialog).getByText("Used")).toBeInTheDocument();
+    expect(within(dialog).getByText("Fail-closed reason")).toBeInTheDocument();
+    expect(within(dialog).getByText("no_healthy_endpoint")).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Copy Request ID" }));
@@ -187,8 +389,7 @@ describe("RecentRequestsTable", () => {
     expect(writeText).toHaveBeenCalledWith(longError);
   });
 
-  it("lets the device replace transport with a dedicated effort column", async () => {
-    const user = userEvent.setup();
+  it("renders cancelled requests with a distinct non-error badge", () => {
     render(
       <RecentRequestsTable
         {...PAGINATION_PROPS}
@@ -196,74 +397,11 @@ describe("RecentRequestsTable", () => {
         requests={[
           {
             requestedAt: ISO,
-            accountId: "acc-columns",
+            accountId: "acc-cancelled",
             planType: "plus",
-            apiKeyName: "Key Columns",
-            apiKeyId: "key-columns",
-            requestId: "req-columns",
-            conversationId: null,
-            requestKind: "normal",
-            model: "gpt-5.1",
-            source: null,
-            serviceTier: "default",
-            requestedServiceTier: null,
-            actualServiceTier: "default",
-            transport: "websocket",
-            upstreamTransport: "http",
-            status: "ok",
-            errorCode: null,
-            errorMessage: null,
-            ...NULL_FAILURE_METADATA,
-            ...NULL_USERAGENT_METADATA,
-            tokens: 1200,
-            inputTokens: 1000,
-            outputTokens: 200,
-            outputTokensRaw: 200,
-            reasoningTokens: 40,
-            cachedInputTokens: 0,
-            reasoningEffort: "high",
-            costUsd: 0.01,
-            costBreakdown: null,
-            latencyMs: 1000,
-            latencyFirstTokenMs: 200,
-            latencyQueueMs: null,
-          },
-        ]}
-      />,
-    );
-
-    const table = screen.getByRole("table");
-    const defaultMinWidth = table.style.minWidth;
-    await user.click(screen.getByRole("button", { name: "Columns" }));
-    await user.click(await screen.findByRole("menuitemcheckbox", { name: "Effort" }));
-    await user.click(screen.getByRole("menuitemcheckbox", { name: "Transport" }));
-    await user.keyboard("{Escape}");
-
-    expect(screen.getByRole("columnheader", { name: "Effort" })).toBeInTheDocument();
-    expect(screen.queryByRole("columnheader", { name: "Transport" })).not.toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "High" })).toBeInTheDocument();
-    expect(screen.getByText("gpt-5.1 (default)")).toBeInTheDocument();
-    expect(table.style.minWidth).not.toBe(defaultMinWidth);
-    expect(window.localStorage.getItem("codex-lb-dashboard-request-log-columns-v1")).toContain("effort");
-    expect(window.localStorage.getItem("codex-lb-dashboard-request-log-columns-v1")).not.toContain("transport");
-  });
-
-  it("keeps the final visible column selected and can reset the layout", async () => {
-    const user = userEvent.setup();
-    useDashboardPreferencesStore.getState().setRequestLogColumns(["effort"]);
-
-    render(
-      <RecentRequestsTable
-        {...PAGINATION_PROPS}
-        accounts={[]}
-        requests={[
-          {
-            requestedAt: ISO,
-            accountId: null,
-            planType: null,
-            apiKeyName: null,
-            apiKeyId: null,
-            requestId: "req-single-column",
+            apiKeyName: "Key Cancelled",
+            apiKeyId: "key-cancelled",
+            requestId: "req-cancelled",
             conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
@@ -272,20 +410,21 @@ describe("RecentRequestsTable", () => {
             requestedServiceTier: null,
             actualServiceTier: null,
             transport: "http",
-            status: "ok",
-            errorCode: null,
+            ...NULL_USERAGENT_METADATA,
+            status: "cancelled",
+            errorCode: "client_disconnected",
             errorMessage: null,
             ...NULL_FAILURE_METADATA,
-            ...NULL_USERAGENT_METADATA,
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
             outputTokensRaw: 0,
+            reasoningTokens: null,
             cachedInputTokens: 0,
-            reasoningEffort: "medium",
+            reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
-            latencyMs: 1,
+            latencyMs: 10,
             latencyFirstTokenMs: null,
             latencyQueueMs: null,
           },
@@ -293,15 +432,10 @@ describe("RecentRequestsTable", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Columns" }));
+    const badge = screen.getByText("Cancelled");
 
-    expect(await screen.findByRole("menuitemcheckbox", { name: "Effort" })).toHaveAttribute(
-      "aria-disabled",
-      "true",
-    );
-    await user.click(screen.getByRole("menuitem", { name: "Reset columns" }));
-    expect(screen.getByRole("columnheader", { name: "Time" })).toBeInTheDocument();
-    expect(screen.queryByRole("columnheader", { name: "Effort" })).not.toBeInTheDocument();
+    expect(badge).toHaveClass("bg-sky-500/15");
+    expect(badge).not.toHaveClass("bg-zinc-500/15");
   });
 
   it("shows TTFT and output-token TPS beside tokens", () => {
@@ -354,6 +488,76 @@ describe("RecentRequestsTable", () => {
     expect(within(row as HTMLElement).getByText("200.0")).toBeInTheDocument();
   });
 
+  it("shows reasoning as secondary token metadata and an included-output detail", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-reasoning",
+            reasoningTokens: 80,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("1.2K")).toBeInTheDocument();
+    expect(screen.getByText("80 reasoning")).toBeInTheDocument();
+
+    const dialog = openRequestDetails();
+    const reasoningLabel = within(dialog).getByText(
+      "Reasoning tokens (included in output)",
+    );
+    expect(reasoningLabel.parentElement?.parentElement).toHaveTextContent("80");
+  });
+
+  it("renders a known zero reasoning count", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-zero-reasoning",
+            reasoningTokens: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("0 reasoning")).toBeInTheDocument();
+    const dialog = openRequestDetails();
+    const reasoningLabel = within(dialog).getByText(
+      "Reasoning tokens (included in output)",
+    );
+    expect(reasoningLabel.parentElement?.parentElement).toHaveTextContent("0");
+  });
+
+  it("omits unknown reasoning usage instead of estimating it", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-unknown-reasoning",
+            reasoningTokens: null,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/reasoning/i)).not.toBeInTheDocument();
+    const dialog = openRequestDetails();
+    expect(
+      within(dialog).queryByText("Reasoning tokens (included in output)"),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not calculate TPS from fallback output tokens", () => {
     render(
       <RecentRequestsTable
@@ -404,8 +608,41 @@ describe("RecentRequestsTable", () => {
     expect(within(row as HTMLElement).queryByText("250.0")).not.toBeInTheDocument();
   });
 
-  it("renders empty state", () => {
+  it("renders first-run empty copy when no filters are applied", () => {
     render(<RecentRequestsTable {...PAGINATION_PROPS} total={0} accounts={[]} requests={[]} />);
+    expect(screen.getByText("No requests yet")).toBeInTheDocument();
+    expect(
+      screen.getByText("Requests will appear here after clients start using the proxy."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No request logs match the current filters.")).not.toBeInTheDocument();
+  });
+
+  it("renders filter-empty copy when a later page has no rows but logs exist", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={40}
+        offset={25}
+        accounts={[]}
+        requests={[]}
+      />,
+    );
+    expect(screen.getByText("No matching requests")).toBeInTheDocument();
+    expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
+    expect(screen.queryByText("No requests yet")).not.toBeInTheDocument();
+  });
+
+  it("renders filter-empty copy when filters are applied", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={0}
+        accounts={[]}
+        requests={[]}
+        filtersApplied
+      />,
+    );
+    expect(screen.getByText("No matching requests")).toBeInTheDocument();
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 

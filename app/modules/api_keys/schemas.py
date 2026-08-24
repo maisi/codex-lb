@@ -34,7 +34,8 @@ class ApiKeyCreateRequest(DashboardModel):
     enforced_reasoning_effort: str | None = Field(
         default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh|max|ultra)$"
     )
-    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
+    allowed_reasoning_efforts: list[str] | None = None
+    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|(ultra)?fast)$")
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
     transport_policy_override: str | None = None
     usage_sections: str | None = None
@@ -55,7 +56,8 @@ class ApiKeyUpdateRequest(DashboardModel):
     enforced_reasoning_effort: str | None = Field(
         default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh|max|ultra)$"
     )
-    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
+    allowed_reasoning_efforts: list[str] | None = None
+    enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|(ultra)?fast)$")
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
     transport_policy_override: str | None = None
     usage_sections: str | None = None
@@ -85,6 +87,7 @@ class ApiKeyResponse(DashboardModel):
     prompt_cache_affinity_continuation: bool = False
     enforced_model: str | None
     enforced_reasoning_effort: str | None
+    allowed_reasoning_efforts: list[str] | None
     enforced_service_tier: str | None
     traffic_class: str
     transport_policy_override: str | None = None
