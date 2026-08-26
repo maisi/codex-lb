@@ -111,11 +111,7 @@ from app.modules.accounts.token_vending import (
     vend_authority_for_account,
 )
 from app.modules.api_keys.service import (
-    API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
-    API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
-    API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET,
     ApiKeyData,
-    ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,  # noqa: F401
 )
 from app.modules.api_keys.service import (
@@ -128,6 +124,12 @@ from app.modules.proxy._service.api_key_usage import (
     _STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY as _STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY,
 )
 from app.modules.proxy._service.api_key_usage import _ApiKeyUsageMixin
+from app.modules.proxy._service.api_key_usage import (
+    _bounded_lease_token_estimate as _bounded_lease_token_estimate,
+)
+from app.modules.proxy._service.api_key_usage import (
+    _estimated_lease_tokens_from_request_usage_budget as _estimated_lease_tokens_from_request_usage_budget,
+)
 from app.modules.proxy._service.codex_control import _CodexControlMixin
 from app.modules.proxy._service.compact import _CompactMixin
 from app.modules.proxy._service.compact import (
@@ -913,26 +915,6 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
-
-
-def _estimated_lease_tokens_from_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> float:
-    if budget is None:
-        return 0.0
-    input_tokens = _bounded_lease_token_estimate(
-        budget.input_tokens,
-        default=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
-    )
-    output_tokens = _bounded_lease_token_estimate(
-        budget.output_tokens,
-        default=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
-    )
-    return float(input_tokens + output_tokens)
-
-
-def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
-    if value is None:
-        return default
-    return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
 
 
 class ProxyService(
