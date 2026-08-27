@@ -6,7 +6,7 @@ import time
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Generic, Literal, Protocol, TypeVar
+from typing import Generic, Literal, Mapping, Protocol, TypeVar
 
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
@@ -188,6 +188,7 @@ class StickySelectionOwner(Protocol):
         relative_availability_top_k: int,
         sticky_repo: StickySessionsRepository | None,
         routing_costs_by_account_id: RoutingCostsByAccount | None,
+        account_priority: Mapping[str, int] | None,
         sticky_existing_account_id: str | None | object,
         initial_preferred_account_id: str | None,
         preserve_existing_mapping_on_fallback: bool,
@@ -238,6 +239,8 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     allow_usage_exhaustion_error: bool = True
     api_key_id: str | None = None
     api_key_stream_fair_share_threshold_pct: int = 0
+    # Per-API-key account ranks (lower wins); orders fresh selection only.
+    account_priority: Mapping[str, int] | None = None
     # First-iteration owner read performed by the caller inside its shared
     # owner-lookup session (see load_balancer.select_account). Consumed exactly
     # once; retries re-read fresh ownership evidence through a repo bundle.
@@ -303,6 +306,7 @@ async def run_sticky_selection_path(
     budget_threshold_pct = request.budget_threshold_pct
     secondary_budget_threshold_pct = request.secondary_budget_threshold_pct
     routing_costs_by_account_id = request.routing_costs_by_account_id
+    account_priority = request.account_priority
     lease_kind = request.lease_kind
     estimated_lease_tokens = request.estimated_lease_tokens
     stream_reserve_slots = request.stream_reserve_slots
@@ -635,6 +639,7 @@ async def run_sticky_selection_path(
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=routing_strategy,
+                account_priority=account_priority,
                 relative_availability_power=relative_availability_power,
                 relative_availability_top_k=relative_availability_top_k,
                 budget_threshold_pct=budget_threshold_pct,
@@ -685,6 +690,7 @@ async def run_sticky_selection_path(
                         traffic_class=traffic_class,
                         ignore_standard_quota=False,
                         routing_costs_by_account_id=effective_routing_costs,
+                        account_priority=account_priority,
                         allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                         usage_exhaustion_states=states,
                         sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
@@ -1161,6 +1167,7 @@ async def _select_with_stickiness(
     relative_availability_top_k: int = 5,
     sticky_repo: StickySessionsRepository | None,
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
+    account_priority: Mapping[str, int] | None = None,
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
     initial_preferred_account_id: str | None = None,
     preserve_existing_mapping_on_fallback: bool = False,
@@ -1177,6 +1184,7 @@ async def _select_with_stickiness(
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=routing_strategy,
+                account_priority=account_priority,
                 relative_availability_power=relative_availability_power,
                 relative_availability_top_k=relative_availability_top_k,
                 budget_threshold_pct=budget_threshold_pct,
@@ -1348,6 +1356,7 @@ async def _select_with_stickiness(
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
+                        account_priority=account_priority,
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
                         deterministic_probe=True,
@@ -1439,6 +1448,7 @@ async def _select_with_stickiness(
         prefer_earlier_reset=prefer_earlier_reset_accounts,
         prefer_earlier_reset_window=prefer_earlier_reset_window,
         routing_strategy=routing_strategy,
+        account_priority=account_priority,
         relative_availability_power=relative_availability_power,
         relative_availability_top_k=relative_availability_top_k,
         budget_threshold_pct=budget_threshold_pct,
@@ -1696,6 +1706,7 @@ def _select_account_preferring_budget_safe(
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
+    account_priority: Mapping[str, int] | None = None,
 ) -> SelectionResult:
     state_list = list(states)
     if routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
@@ -1706,6 +1717,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            account_priority=account_priority,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             recovery_probe_only=True,
@@ -1740,6 +1752,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            account_priority=account_priority,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
@@ -1759,6 +1772,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            account_priority=account_priority,
             allow_backoff_fallback=False,
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
@@ -1784,6 +1798,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            account_priority=account_priority,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
@@ -1804,6 +1819,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            account_priority=account_priority,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             usage_weighted_order="primary_first",
@@ -1818,6 +1834,7 @@ def _select_account_preferring_budget_safe(
         prefer_earlier_reset=prefer_earlier_reset,
         prefer_earlier_reset_window=prefer_earlier_reset_window,
         routing_strategy=routing_strategy,
+        account_priority=account_priority,
         allow_backoff_fallback=allow_backoff_fallback,
         deterministic_probe=deterministic_probe,
         relative_availability_power=relative_availability_power,

@@ -285,6 +285,7 @@ class ApiKeyCreateData:
     usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
+    account_assignment_scope_enabled: bool | None = None
     assigned_source_ids: list[str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
@@ -321,6 +322,8 @@ class ApiKeyUpdateData:
     is_active_set: bool = False
     assigned_account_ids: list[str] | None = None
     assigned_account_ids_set: bool = False
+    account_assignment_scope_enabled: bool | None = None
+    account_assignment_scope_enabled_set: bool = False
     assigned_source_ids: list[str] | None = None
     assigned_source_ids_set: bool = False
     limits: list[LimitRuleInput] | None = None
@@ -509,7 +512,11 @@ class ApiKeysService:
             enforced_reasoning_effort=enforced_reasoning_effort,
             allowed_reasoning_efforts=_serialize_allowed_reasoning_efforts(allowed_reasoning_efforts),
             enforced_service_tier=enforced_service_tier,
-            account_assignment_scope_enabled=bool(assigned_account_ids),
+            account_assignment_scope_enabled=(
+                payload.account_assignment_scope_enabled
+                if payload.account_assignment_scope_enabled is not None
+                else bool(assigned_account_ids)
+            ),
             source_assignment_scope_enabled=bool(assigned_source_ids),
             traffic_class=traffic_class,
             transport_policy_override=transport_policy_override,
@@ -605,12 +612,19 @@ class ApiKeysService:
             allowed_models = _normalize_allowed_models(payload.allowed_models)
         else:
             allowed_models = None
+        explicit_account_scope = (
+            payload.account_assignment_scope_enabled
+            if payload.account_assignment_scope_enabled_set and payload.account_assignment_scope_enabled is not None
+            else None
+        )
         if payload.assigned_account_ids_set:
             assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
-            account_assignment_scope_enabled: bool | _Unset = bool(assigned_account_ids)
+            account_assignment_scope_enabled: bool | _Unset = (
+                explicit_account_scope if explicit_account_scope is not None else bool(assigned_account_ids)
+            )
         else:
             assigned_account_ids = None
-            account_assignment_scope_enabled = _UNSET
+            account_assignment_scope_enabled = explicit_account_scope if explicit_account_scope is not None else _UNSET
         if payload.assigned_source_ids_set:
             assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
             source_assignment_scope_enabled: bool | _Unset = bool(assigned_source_ids)
