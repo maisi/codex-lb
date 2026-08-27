@@ -193,7 +193,12 @@ describe("AccountMultiSelect priority order", () => {
       />,
     );
 
-    expect(await screen.findByText("Selection priority")).toBeInTheDocument();
+    // Wait on a resolved email, not the static heading: the heading renders as
+    // soon as something is selected, while the rows fall back to raw account ids
+    // until the accounts query settles.
+    expect(await screen.findByText("secondary@example.com")).toBeInTheDocument();
+    expect(screen.getByText("Selection priority")).toBeInTheDocument();
+
     const rows = screen.getAllByRole("listitem");
     expect(rows).toHaveLength(2);
     // Rank follows the value order, not the account list order.
