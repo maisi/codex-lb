@@ -7,7 +7,7 @@ import random
 import socket
 import time
 from dataclasses import dataclass
-from typing import Collection, Iterable, Literal
+from typing import Collection, Iterable, Literal, Mapping
 
 from app.core.balancer.types import FailureClass, UpstreamError
 from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
@@ -271,6 +271,29 @@ def _primary_usage_sort_key(state: AccountState) -> tuple[float, float, float, s
     return primary_used, secondary_used, last_selected, state.account_id
 
 
+def _best_priority_group(
+    states: Iterable[AccountState],
+    account_priority: Mapping[str, int] | None,
+) -> list[AccountState]:
+    """Narrow an eligible pool to its highest-priority (lowest-rank) accounts.
+
+    Per-key account priority is a strict waterfall: a lower-ranked account only
+    becomes a candidate once every better-ranked one has left the eligible pool,
+    so ordinary quota/cooldown/error filtering upstream is what drives failover.
+    Unranked accounts are treated as ranking after every ranked one, which keeps
+    priority an ordering concern rather than a restriction -- a key may still
+    reach an unranked account, but only as a last resort.
+    """
+    pool = list(states)
+    if not account_priority or len(pool) <= 1:
+        return pool
+    ranked = [account_priority[state.account_id] for state in pool if state.account_id in account_priority]
+    if not ranked:
+        return pool
+    best = min(ranked)
+    return [state for state in pool if account_priority.get(state.account_id) == best] or pool
+
+
 def _routing_policy(state: AccountState) -> str:
     if state.routing_policy in {
         ROUTING_POLICY_BURN_FIRST,
@@ -471,6 +494,7 @@ def select_account(
     replica_salt: str | None = None,
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
+    account_priority: Mapping[str, int] | None = None,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -522,6 +546,12 @@ def select_account(
             rank by primary-window pressure before secondary-window pressure.
         routing_costs: Optional request-scoped planner costs. Lower cost wins
             after hard eligibility, health tier, and reset-bucket filtering.
+        account_priority: Optional per-API-key account ranks (lower wins).
+            Applied as a strict waterfall: a ranked account is only skipped
+            once it leaves the eligible pool. Outranks burn/preserve routing
+            policy but never overrides recovery admission or hard eligibility.
+            Accounts absent from the mapping rank after every ranked one, so
+            priority orders the pool without restricting it.
         replica_salt: Optional per-replica salt mixed into the final
             ``round_robin`` tie-break so peer replicas break exact ties toward
             different accounts. When ``None``, the process-wide salt configured
@@ -708,16 +738,18 @@ def select_account(
             _decorrelated_tie_breaker(state.account_id, round_robin_salt),
         )
 
+    priority_pool = _best_priority_group(available, account_priority)
+
     if routing_strategy == "single_account":
-        selected = min(available, key=lambda state: state.account_id)
+        selected = min(priority_pool, key=lambda state: state.account_id)
         return SelectionResult(selected, None)
 
     if routing_strategy == "sequential_drain":
-        selected = min(available, key=_sequential_drain_sort_key)
+        selected = min(priority_pool, key=_sequential_drain_sort_key)
         return SelectionResult(selected, None)
 
     if routing_strategy == "reset_drain":
-        selected = min(available, key=lambda state: _reset_drain_sort_key(state, current))
+        selected = min(priority_pool, key=lambda state: _reset_drain_sort_key(state, current))
         return SelectionResult(selected, None)
 
     healthy = [s for s in available if s.health_tier == HEALTH_TIER_HEALTHY]
@@ -729,7 +761,13 @@ def select_account(
     due_probe = _oldest_due_probing_account(probing, current=current) if healthy or recovery_probe_only else None
     if recovery_probe_only and due_probe is None:
         return SelectionResult(None, None)
-    health_pool = [due_probe] if due_probe is not None else healthy or probing or draining or available
+    if due_probe is not None:
+        health_pool = [due_probe]
+    else:
+        # Per-key account priority is a strict waterfall and outranks burn/
+        # preserve policy, so narrow to the best still-eligible rank before the
+        # policy partition below. Recovery admission above still wins over both.
+        health_pool = _best_priority_group(healthy or probing or draining or available, account_priority)
     burn_first = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
     normal = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_NORMAL]
     preserve = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_PRESERVE]

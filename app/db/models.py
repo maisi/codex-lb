@@ -1222,6 +1222,9 @@ class ApiKey(Base):
         back_populates="api_key",
         cascade="all, delete-orphan",
         lazy="selectin",
+        # Most-preferred first, so readers can treat the list as the key's
+        # selection order without re-sorting.
+        order_by="(ApiKeyAccountAssignment.priority, ApiKeyAccountAssignment.created_at)",
     )
     source_assignments: Mapped[list["ApiKeyModelSourceAssignment"]] = relationship(
         "ApiKeyModelSourceAssignment",
@@ -1244,6 +1247,9 @@ class ApiKeyAccountAssignment(Base):
         ForeignKey("accounts.id", ondelete="CASCADE"),
         primary_key=True,
     )
+    # Selection rank within this key's pool; lower wins. Ties fall back to the
+    # balancer's usual usage-based ordering.
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="account_assignments")

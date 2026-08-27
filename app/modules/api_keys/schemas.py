@@ -42,6 +42,10 @@ class ApiKeyCreateRequest(DashboardModel):
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
+    # Ordering the accounts above sets selection priority. Restriction is a
+    # separate switch: omit this and it defaults to "restrict when accounts are
+    # assigned", preserving the previous behavior.
+    account_assignment_scope_enabled: bool | None = None
     assigned_source_ids: list[str] | None = None
     limits: list[LimitRuleCreate] | None = None
 
@@ -65,6 +69,10 @@ class ApiKeyUpdateRequest(DashboardModel):
     expires_at: datetime | None = None
     is_active: bool | None = None
     assigned_account_ids: list[str] | None = None
+    # Ordering the accounts above sets selection priority. Restriction is a
+    # separate switch: omit this and it defaults to "restrict when accounts are
+    # assigned", preserving the previous behavior.
+    account_assignment_scope_enabled: bool | None = None
     assigned_source_ids: list[str] | None = None
     limits: list[LimitRuleCreate] | None = None
     reset_usage: bool | None = None

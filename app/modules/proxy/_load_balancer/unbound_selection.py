@@ -5,7 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, Mapping, Protocol, TypeVar
 
 from app.core.balancer import (
     ResetPreferenceWindow,
@@ -77,6 +77,8 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     allow_usage_exhaustion_error: bool = True
     api_key_id: str | None = None
     api_key_stream_fair_share_threshold_pct: int = 0
+    # Per-API-key account ranks (lower wins); orders fresh selection only.
+    account_priority: Mapping[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +107,7 @@ async def run_unbound_selection_path(
     budget_threshold_pct = request.budget_threshold_pct
     secondary_budget_threshold_pct = request.secondary_budget_threshold_pct
     routing_costs_by_account_id = request.routing_costs_by_account_id
+    account_priority = request.account_priority
     lease_kind = request.lease_kind
     estimated_lease_tokens = request.estimated_lease_tokens
     stream_reserve_slots = request.stream_reserve_slots
@@ -213,6 +216,7 @@ async def run_unbound_selection_path(
                     traffic_class=traffic_class,
                     ignore_standard_quota=False,
                     routing_costs_by_account_id=effective_routing_costs,
+                    account_priority=account_priority,
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                     usage_exhaustion_states=states,
                 )

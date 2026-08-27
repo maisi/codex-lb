@@ -151,6 +151,7 @@ async def create_api_key(
                 ),
                 expires_at=payload.expires_at,
                 assigned_account_ids=payload.assigned_account_ids,
+                account_assignment_scope_enabled=payload.account_assignment_scope_enabled,
                 assigned_source_ids=payload.assigned_source_ids,
                 limits=limit_inputs,
             )
@@ -221,6 +222,8 @@ async def update_api_key(
         is_active_set="is_active" in fields,
         assigned_account_ids=payload.assigned_account_ids,
         assigned_account_ids_set="assigned_account_ids" in fields,
+        account_assignment_scope_enabled=payload.account_assignment_scope_enabled,
+        account_assignment_scope_enabled_set="account_assignment_scope_enabled" in fields,
         assigned_source_ids=payload.assigned_source_ids,
         assigned_source_ids_set="assigned_source_ids" in fields,
         limits=limit_inputs,
