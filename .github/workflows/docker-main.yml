@@ -52,10 +52,17 @@ jobs:
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf
         with:
           images: ghcr.io/${{ github.repository }}
+          # Rolling tags must only ever point at main. Without the guard, a
+          # manual workflow_dispatch from any branch republishes latest/main from
+          # that branch, so a deployment tracking latest can silently land on a
+          # topic-branch build. That has happened: two dispatch runs from
+          # hotfix/prev-response-classify-pre-sync took over latest on 2026-08-24.
+          # sha-<short> stays unguarded so any branch can still be deployed by
+          # its immutable tag.
           tags: |
             type=edge,branch=main
-            type=raw,value=latest
-            type=raw,value=main
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=main,enable={{is_default_branch}}
             type=sha,format=short
 
       - name: Build and push Docker image
