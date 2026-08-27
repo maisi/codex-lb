@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { ChevronsUpDown, X } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, ChevronUp, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +28,11 @@ export type AccountMultiSelectProps = {
   ariaDescribedBy?: string;
   triggerClassName?: string;
   allowPausedAccounts?: boolean;
+  /**
+   * Render the selection as an ordered priority list. Opt-in: other callers
+   * (automation jobs) treat the selection as an unordered set.
+   */
+  showPriorityOrder?: boolean;
 };
 type LimitChip = {
   key: string;
@@ -142,6 +147,7 @@ export function AccountMultiSelect({
   ariaDescribedBy,
   triggerClassName,
   allowPausedAccounts = false,
+  showPriorityOrder = false,
 }: AccountMultiSelectProps) {
   const { t } = useTranslation();
   const placeholderLabel = placeholder ?? t("apiKeys.accountSelect.all");
@@ -175,6 +181,28 @@ export function AccountMultiSelect({
         .map((accountId) => accounts.find((account) => account.accountId === accountId))
         .filter((account): account is (typeof accounts)[number] => account !== undefined),
     [accounts, value],
+  );
+
+  const orderedSelection = useMemo(
+    () =>
+      value.map((accountId) => ({
+        accountId,
+        account: accounts.find((account) => account.accountId === accountId),
+      })),
+    [accounts, value],
+  );
+
+  const move = useCallback(
+    (index: number, delta: number) => {
+      const target = index + delta;
+      if (target < 0 || target >= value.length) {
+        return;
+      }
+      const next = [...value];
+      [next[index], next[target]] = [next[target], next[index]];
+      onChange(next);
+    },
+    [onChange, value],
   );
 
   const toggle = useCallback(
@@ -258,7 +286,59 @@ export function AccountMultiSelect({
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {selectedAccounts.length > 0 ? (
+      {value.length > 0 && showPriorityOrder ? (
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium">{t("apiKeys.accountSelect.priorityTitle")}</p>
+          <ol className="space-y-1">
+            {orderedSelection.map(({ accountId, account }, index) => (
+              <li
+                key={accountId}
+                className="flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1"
+              >
+                <span className="w-4 shrink-0 text-center text-xs font-semibold tabular-nums text-muted-foreground">
+                  {index + 1}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-xs" title={accountId}>
+                  {account?.email ?? accountId}
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-6"
+                  disabled={index === 0}
+                  aria-label={t("apiKeys.accountSelect.moveUp", { name: account?.email ?? accountId })}
+                  onClick={() => move(index, -1)}
+                >
+                  <ChevronUp className="size-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-6"
+                  disabled={index === value.length - 1}
+                  aria-label={t("apiKeys.accountSelect.moveDown", { name: account?.email ?? accountId })}
+                  onClick={() => move(index, 1)}
+                >
+                  <ChevronDown className="size-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-6"
+                  aria-label={t("apiKeys.accountSelect.removeAccount", { name: account?.email ?? accountId })}
+                  onClick={() => remove(accountId)}
+                >
+                  <X className="size-3.5" />
+                </Button>
+              </li>
+            ))}
+          </ol>
+          <p className="text-[11px] text-muted-foreground">{t("apiKeys.accountSelect.priorityHint")}</p>
+        </div>
+      ) : selectedAccounts.length > 0 ? (
         <div className="flex flex-wrap gap-1">
           {selectedAccounts.map((account) => (
             <Badge key={account.accountId} variant="secondary" className="gap-1 text-xs">

@@ -577,3 +577,84 @@ describe("hasLimitRuleChanges", () => {
     expect(hasLimitRuleChanges(initial, reordered)).toBe(false);
   });
 });
+
+describe("ApiKeyEditDialog account priority", () => {
+  const scopedKey = () =>
+    createApiKey({
+      assignedAccountIds: ["acc_primary", "acc_secondary"],
+      accountAssignmentScopeEnabled: true,
+    });
+
+  it("submits a reorder even though the account set is unchanged", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog open busy={false} apiKey={scopedKey()} onOpenChange={vi.fn()} onSubmit={onSubmit} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Move secondary@example.com up" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    // A set-based diff would treat this as no change and drop the new order.
+    expect(payload.assignedAccountIds).toEqual(["acc_secondary", "acc_primary"]);
+    expect(payload.accountAssignmentScopeEnabled).toBe(true);
+  });
+
+  it("submits the restriction toggle on its own", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog open busy={false} apiKey={scopedKey()} onOpenChange={vi.fn()} onSubmit={onSubmit} />,
+    );
+
+    await user.click(await screen.findByLabelText("Restrict this key to these accounts"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.accountAssignmentScopeEnabled).toBe(false);
+    // Order did not change, so the assignment list stays out of the payload.
+    expect("assignedAccountIds" in payload).toBe(false);
+  });
+
+  it("keeps ranking from re-enabling a restriction the operator turned off", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({
+          assignedAccountIds: ["acc_primary", "acc_secondary"],
+          accountAssignmentScopeEnabled: false,
+        })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Move secondary@example.com up" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.assignedAccountIds).toEqual(["acc_secondary", "acc_primary"]);
+    // The backend derives the flag from "has assignments" when it is absent,
+    // which would silently restrict this key again.
+    expect(payload.accountAssignmentScopeEnabled).toBe(false);
+  });
+});

@@ -16,4 +16,7 @@
 - [x] Unit tests for the selection semantics (waterfall, failover, preserve
       interaction, unranked last resort, recovery carve-out, no-priority regression).
 - [x] Integration tests for the rank round trip and reordering.
-- [ ] Dashboard: reorderable account list in the API key dialog + i18n.
+- [x] Dashboard: reorderable account list in the API key dialog + i18n
+      (en/ko/zh-CN), plus an explicit "restrict to these accounts" toggle.
+- [x] Make the edit dialog's change detection order-aware, so a pure reorder is
+      submitted instead of being dropped by the set-based diff.

@@ -90,9 +90,17 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
   return nextIds.some((accountId) => !initialIdSet.has(accountId));
 }
 
+function hasOrderedSelectionChange(initialIds: string[], nextIds: string[]): boolean {
+  if (initialIds.length !== nextIds.length) {
+    return true;
+  }
+  return nextIds.some((accountId, index) => initialIds[index] !== accountId);
+}
+
 type ApiKeyEditDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
+  restrictToAssignedAccounts: boolean;
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
   clearSourceScope: boolean;
@@ -113,6 +121,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
   return {
     selectedModels: apiKey.allowedModels || [],
     selectedAccountIds: apiKey.assignedAccountIds,
+    restrictToAssignedAccounts: apiKey.accountAssignmentScopeEnabled,
     selectedSourceIds: apiKey.assignedSourceIds,
     selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
     clearSourceScope: false,
@@ -158,7 +167,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(draft.limitRules);
     const shouldSubmitAssignedAccountIds =
-      hasSelectionChange(apiKey.assignedAccountIds, draft.selectedAccountIds) ||
+      hasOrderedSelectionChange(apiKey.assignedAccountIds, draft.selectedAccountIds) ||
       (apiKey.accountAssignmentScopeEnabled && draft.selectedAccountIds.length === 0);
     // A source-scoped key whose assigned sources were all deleted comes back
     // as scopeEnabled=true with an empty id list (deny-all). Submitting an
@@ -190,6 +199,14 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     };
     if (shouldSubmitAssignedAccountIds) {
       payload.assignedAccountIds = draft.selectedAccountIds;
+      if (draft.selectedAccountIds.length > 0) {
+        payload.accountAssignmentScopeEnabled = draft.restrictToAssignedAccounts;
+      }
+    } else if (
+      draft.selectedAccountIds.length > 0 &&
+      draft.restrictToAssignedAccounts !== apiKey.accountAssignmentScopeEnabled
+    ) {
+      payload.accountAssignmentScopeEnabled = draft.restrictToAssignedAccounts;
     }
     if (shouldSubmitAssignedSourceIds) {
       payload.assignedSourceIds = draft.selectedSourceIds;
@@ -272,7 +289,30 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</div>
-              <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
+              <AccountMultiSelect
+                value={draft.selectedAccountIds}
+                onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })}
+                showPriorityOrder
+              />
+              {draft.selectedAccountIds.length > 0 ? (
+                <div className="space-y-1 rounded-md border p-2 text-sm">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="edit-api-key-restrict-accounts"
+                      checked={draft.restrictToAssignedAccounts}
+                      onCheckedChange={(checked) =>
+                        updateDraft({ restrictToAssignedAccounts: checked === true })
+                      }
+                    />
+                    <label htmlFor="edit-api-key-restrict-accounts" className="cursor-pointer">
+                      {t("apiKeys.form.restrictToAssignedAccounts")}
+                    </label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {t("apiKeys.form.restrictToAssignedAccountsHint")}
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             <div className="space-y-1">

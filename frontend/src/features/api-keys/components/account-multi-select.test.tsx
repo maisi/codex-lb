@@ -182,3 +182,115 @@ describe("AccountMultiSelect", () => {
     expect(screen.queryByText(/7d .* left/i)).not.toBeInTheDocument();
   });
 });
+
+describe("AccountMultiSelect priority order", () => {
+  it("lists the selection as a ranked order", async () => {
+    renderWithProviders(
+      <AccountMultiSelect
+        value={["acc_secondary", "acc_primary"]}
+        onChange={vi.fn()}
+        showPriorityOrder
+      />,
+    );
+
+    expect(await screen.findByText("Selection priority")).toBeInTheDocument();
+    const rows = screen.getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    // Rank follows the value order, not the account list order.
+    expect(rows[0]).toHaveTextContent("1");
+    expect(rows[0]).toHaveTextContent("secondary@example.com");
+    expect(rows[1]).toHaveTextContent("2");
+    expect(rows[1]).toHaveTextContent("primary@example.com");
+  });
+
+  it("moves an account down by swapping it with its successor", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+
+    renderWithProviders(
+      <AccountMultiSelect
+        value={["acc_primary", "acc_secondary"]}
+        onChange={onChange}
+        showPriorityOrder
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Move primary@example.com down" }));
+
+    expect(onChange).toHaveBeenCalledWith(["acc_secondary", "acc_primary"]);
+  });
+
+  it("moves an account up by swapping it with its predecessor", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+
+    renderWithProviders(
+      <AccountMultiSelect
+        value={["acc_primary", "acc_secondary"]}
+        onChange={onChange}
+        showPriorityOrder
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Move secondary@example.com up" }));
+
+    expect(onChange).toHaveBeenCalledWith(["acc_secondary", "acc_primary"]);
+  });
+
+  it("disables the moves that would fall off either end", async () => {
+    renderWithProviders(
+      <AccountMultiSelect
+        value={["acc_primary", "acc_secondary"]}
+        onChange={vi.fn()}
+        showPriorityOrder
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: "Move primary@example.com up" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Move secondary@example.com down" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Move primary@example.com down" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Move secondary@example.com up" })).toBeEnabled();
+  });
+
+  it("removes the account the control names", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+
+    renderWithProviders(
+      <AccountMultiSelect
+        value={["acc_primary", "acc_secondary"]}
+        onChange={onChange}
+        showPriorityOrder
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Remove primary@example.com" }));
+
+    expect(onChange).toHaveBeenCalledWith(["acc_secondary"]);
+  });
+
+  it("keeps an assignment whose account is gone visible and removable", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+
+    renderWithProviders(
+      <AccountMultiSelect value={["acc_deleted"]} onChange={onChange} showPriorityOrder />,
+    );
+
+    // Falls back to the raw id so a stale assignment can still be cleared.
+    expect(await screen.findByText("acc_deleted")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remove acc_deleted" }));
+
+    expect(onChange).toHaveBeenCalledWith([]);
+  });
+
+  it("stays an unordered set for callers that do not opt in", async () => {
+    renderWithProviders(
+      <AccountMultiSelect value={["acc_primary", "acc_secondary"]} onChange={vi.fn()} />,
+    );
+
+    expect(await screen.findByRole("button", { name: "2 accounts selected" })).toBeInTheDocument();
+    expect(screen.queryByText("Selection priority")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Move / })).not.toBeInTheDocument();
+  });
+});
