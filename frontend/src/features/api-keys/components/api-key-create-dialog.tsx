@@ -66,6 +66,7 @@ type ApiKeyCreateFormProps = {
 type ApiKeyCreateDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
+  restrictToAssignedAccounts: boolean;
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
   usageSections: string;
@@ -84,6 +85,7 @@ type ApiKeyCreateDraft = {
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   selectedModels: [],
   selectedAccountIds: [],
+  restrictToAssignedAccounts: true,
   selectedSourceIds: [],
   selectedReasoningEfforts: [],
   usageSections: "upstream_limits,account_pool_usage",
@@ -126,7 +128,12 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       applyToCodexModel: draft.applyToCodexModel,
       forceIncludeUsage: draft.forceIncludeUsage,
       promptCacheAffinityContinuation: draft.promptCacheAffinityContinuation,
-      ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
+      ...(draft.selectedAccountIds.length > 0
+        ? {
+            assignedAccountIds: draft.selectedAccountIds,
+            accountAssignmentScopeEnabled: draft.restrictToAssignedAccounts,
+          }
+        : {}),
       ...(draft.selectedSourceIds.length > 0 ? { assignedSourceIds: draft.selectedSourceIds } : {}),
       usageSections: draft.usageSections,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
@@ -219,7 +226,30 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
 
             <div className="space-y-1">
               <p className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</p>
-              <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
+              <AccountMultiSelect
+                value={draft.selectedAccountIds}
+                onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })}
+                showPriorityOrder
+              />
+              {draft.selectedAccountIds.length > 0 ? (
+                <div className="space-y-1 rounded-md border p-2 text-sm">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="create-api-key-restrict-accounts"
+                      checked={draft.restrictToAssignedAccounts}
+                      onCheckedChange={(checked) =>
+                        updateDraft({ restrictToAssignedAccounts: checked === true })
+                      }
+                    />
+                    <label htmlFor="create-api-key-restrict-accounts" className="cursor-pointer">
+                      {t("apiKeys.form.restrictToAssignedAccounts")}
+                    </label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {t("apiKeys.form.restrictToAssignedAccountsHint")}
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             <div className="space-y-1">

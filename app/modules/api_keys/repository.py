@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, true, update
+from sqlalchemy import BigInteger, Integer, case, cast, delete, func, insert, literal, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, raiseload, selectinload
 
@@ -517,13 +517,21 @@ class ApiKeysRepository:
             )
         await self._session.execute(delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.api_key_id == key_id))
         if account_ids:
+            # ``account_ids`` is ordered most-preferred first. The INSERT..SELECT
+            # cannot preserve that order on its own, so carry each account's
+            # position across as its selection rank.
+            priority_case = case(
+                {account_id: index for index, account_id in enumerate(account_ids)},
+                value=Account.id,
+                else_=len(account_ids),
+            )
             assignment_source = (
-                select(literal(key_id), Account.id)
+                select(literal(key_id), Account.id, priority_case)
                 .where(Account.id.in_(account_ids))
                 .where(Account.delete_requested_at.is_(None))
             )
             await self._session.execute(
-                insert(ApiKeyAccountAssignment).from_select(["api_key_id", "account_id"], assignment_source)
+                insert(ApiKeyAccountAssignment).from_select(["api_key_id", "account_id", "priority"], assignment_source)
             )
         if commit:
             await self._session.commit()

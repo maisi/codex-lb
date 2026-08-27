@@ -1795,6 +1795,14 @@ class ProxyService(
             if api_key is not None and api_key.account_assignment_scope_enabled
             else None
         )
+        # Account priority orders selection independently of the allowlist
+        # above: ranking an account must never silently narrow what the key can
+        # reach. Assignments load most-preferred first, so position is the rank.
+        account_priority = (
+            {account_id: rank for rank, account_id in enumerate(api_key.assigned_account_ids)}
+            if api_key is not None and api_key.assigned_account_ids
+            else None
+        )
         effective_traffic_class = (
             TRAFFIC_CLASS_OPPORTUNISTIC
             if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
@@ -1936,6 +1944,7 @@ class ProxyService(
                         model=model,
                         service_tier=service_tier,
                         additional_limit_name=additional_limit_name,
+                        account_priority=account_priority,
                         account_ids=(
                             {single_account_routing_id}
                             if required_continuity_preferred_account and single_account_routing_id is not None
@@ -2004,6 +2013,7 @@ class ProxyService(
                     model=model,
                     service_tier=service_tier,
                     additional_limit_name=additional_limit_name,
+                    account_priority=account_priority,
                     account_ids=scoped_account_ids,
                     required_account_id=single_account_routing_id,
                     exclude_account_ids=excluded_account_ids_set,
