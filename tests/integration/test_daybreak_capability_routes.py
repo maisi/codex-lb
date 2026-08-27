@@ -79,6 +79,9 @@ _LOCAL_AUTHENTICATED_ROUTES: frozenset[_RouteKey] = frozenset(
         ("HTTP", "GET", "/v1/reset-credit"),
         ("HTTP", "GET", "/api/codex/usage/"),
         ("HTTP", "GET", "/api/codex/usage"),
+        # Fork-only: token vending mints a token in-process behind an HMAC
+        # shared secret, so it never reaches capability routing.
+        ("HTTP", "POST", "/internal/bridge/oauth-token"),
     }
 )
 _RESPONSES_WEBSOCKET_ROUTES: frozenset[_RouteKey] = frozenset(
