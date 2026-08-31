@@ -1235,7 +1235,16 @@ async def _select_with_stickiness(
     persist_fallback = not preserve_existing_mapping_on_fallback
     apply_sticky_secondary_budget_threshold = False
 
-    if not existing and initial_preferred_account_id is not None:
+    # A process-level seed keeps one Codex process on one account for prompt-cache
+    # warmth, but it is only a preference. An explicit per-key account priority is
+    # an operator instruction, so a NEW thread must go through the ranked pool
+    # selection below rather than inheriting the seed. Without this, only the very
+    # first thread of a process ever follows the ranking and every later one
+    # silently pins to the seed -- the seed shortcut evaluates a single candidate,
+    # so rank can never influence it. An existing thread owner still wins: that is
+    # continuity, not preference.
+    seed_yields_to_account_priority = bool(account_priority)
+    if not existing and initial_preferred_account_id is not None and not seed_yields_to_account_priority:
         initial_preferred = next(
             (state for state in states if state.account_id == initial_preferred_account_id),
             None,

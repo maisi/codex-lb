@@ -1275,3 +1275,99 @@ def test_refresh_write_skippable_guards_seed_and_delete_and_deadline():
     # Mutations without an observed deadline always write through.
     plain = _StickyMutation(account_id="a")
     assert _sticky_refresh_write_skippable(plain, initialize_seed_key=None) is False
+
+
+# ---------------------------------------------------------------------------
+# Per-key account priority vs the process-level sticky seed
+# ---------------------------------------------------------------------------
+
+
+async def _invoke_with_seed_and_priority(
+    states: list[AccountState],
+    *,
+    seed_account_id: str | None,
+    account_priority: dict[str, int] | None,
+    existing_account_id: str | None = None,
+):
+    """Call the real _select_with_stickiness with a seed and/or ranks."""
+
+    @asynccontextmanager
+    async def mock_repo_factory():
+        yield AsyncMock()
+
+    lb = LoadBalancer(mock_repo_factory)
+    account_map = {s.account_id: cast(Account, AsyncMock()) for s in states}
+
+    outcome = await lb._select_with_stickiness(
+        states=states,
+        account_map=account_map,
+        sticky_key="thread-new",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=600,
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=100.0,
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        relative_availability_power=2.0,
+        relative_availability_top_k=5,
+        sticky_repo=_make_sticky_repo(existing_account_id),
+        routing_costs_by_account_id=None,
+        sticky_refresh_skip_deadline=None,
+        sticky_existing_account_id=existing_account_id,
+        initial_preferred_account_id=seed_account_id,
+        account_priority=account_priority,
+    )
+    return outcome.selection
+
+
+@pytest.mark.asyncio
+async def test_account_priority_outranks_the_process_sticky_seed():
+    """A new thread follows the key's rank, not the process seed.
+
+    The seed shortcut evaluates a single candidate, so before the fix every
+    thread after a process's first one silently pinned to the seed and the
+    ranking was ignored.
+    """
+    states = [_active("first", used_percent=90.0), _active("second", used_percent=5.0)]
+
+    selection = await _invoke_with_seed_and_priority(
+        states,
+        seed_account_id="second",
+        account_priority={"first": 0, "second": 1},
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "first"
+
+
+@pytest.mark.asyncio
+async def test_sticky_seed_still_wins_when_no_priority_is_configured():
+    """Regression guard: unranked keys keep the prompt-cache seed behaviour."""
+    states = [_active("first", used_percent=90.0), _active("second", used_percent=5.0)]
+
+    selection = await _invoke_with_seed_and_priority(
+        states,
+        seed_account_id="second",
+        account_priority=None,
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "second"
+
+
+@pytest.mark.asyncio
+async def test_existing_thread_owner_still_outranks_priority():
+    """Continuity beats rank: an owned thread is never re-homed."""
+    states = [_active("first", used_percent=5.0), _active("second", used_percent=90.0)]
+
+    selection = await _invoke_with_seed_and_priority(
+        states,
+        seed_account_id=None,
+        account_priority={"first": 0, "second": 1},
+        existing_account_id="second",
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "second"
