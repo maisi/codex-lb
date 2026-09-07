@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import re
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
@@ -24,7 +25,15 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, LimitWindow, RequestLog, UsageHistory
+from app.db.models import (
+    Account,
+    AccountStatus,
+    ApiKeyLimit,
+    ApiKeyUsageReservation,
+    LimitWindow,
+    RequestLog,
+    UsageHistory,
+)
 from app.db.session import SessionLocal
 from app.modules.api_keys.last_used_coalescer import get_api_key_last_used_coalescer
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -137,6 +146,29 @@ async def _create_model_source(
 
 
 @pytest.mark.asyncio
+async def test_api_key_collection_routes_accept_equivalent_slash_forms(async_client):
+    canonical_list = await async_client.get("/api/api-keys/")
+    unslashed_list = await async_client.get("/api/api-keys", follow_redirects=False)
+    unslashed_create = await async_client.post(
+        "/api/api-keys",
+        json={"name": "unslashed-key", "allowedModels": []},
+        follow_redirects=False,
+    )
+
+    assert {
+        "canonical_get": canonical_list.status_code,
+        "unslashed_get": unslashed_list.status_code,
+        "unslashed_post": unslashed_create.status_code,
+    } == {
+        "canonical_get": 200,
+        "unslashed_get": 200,
+        "unslashed_post": 200,
+    }
+    assert unslashed_list.json() == canonical_list.json()
+    assert unslashed_create.json()["key"].startswith("sk-clb-")
+
+
+@pytest.mark.asyncio
 async def test_api_keys_crud_and_regenerate(async_client):
     create = await async_client.post(
         "/api/api-keys/",
@@ -151,7 +183,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert create.status_code == 200
     payload = create.json()
     assert payload["name"] == "dev-key"
-    assert payload["key"].startswith("sk-clb-")
+    assert re.fullmatch(r"sk-clb-[0-9a-f]{48}", payload["key"])
     assert payload["accountAssignmentScopeEnabled"] is False
     assert payload["assignedAccountIds"] == []
     assert len(payload["limits"]) == 1
@@ -187,7 +219,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert regenerated.status_code == 200
     regenerated_payload = regenerated.json()
     assert regenerated_payload["id"] == key_id
-    assert regenerated_payload["key"].startswith("sk-clb-")
+    assert re.fullmatch(r"sk-clb-[0-9a-f]{48}", regenerated_payload["key"])
     assert regenerated_payload["key"] != first_key
 
     deleted = await async_client.delete(f"/api/api-keys/{key_id}")
@@ -3866,6 +3898,62 @@ async def test_update_key_same_policy_and_max_change_preserve_usage_state(async_
         assert len(limits) == 1
         assert limits[0].current_value == 222
         assert limits[0].reset_at == original_reset_at
+        assert limits[0].max_value == 2000
+
+
+@pytest.mark.asyncio
+async def test_update_limits_preserves_usage_committed_between_read_and_patch(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "preserve-interleaved-usage",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    concurrent_value = 777
+    concurrent_reset_at = utcnow() + timedelta(hours=6)
+
+    original_get_limits = ApiKeysRepository.get_limits_by_key
+    read_count = 0
+
+    async def interleave_after_initial_read(self, key_id: str):
+        nonlocal read_count
+        limits = await original_get_limits(self, key_id)
+        read_count += 1
+        if read_count == 1:
+            async with SessionLocal() as concurrent_session:
+                await concurrent_session.execute(
+                    update(ApiKeyLimit)
+                    .where(ApiKeyLimit.api_key_id == key_id)
+                    .values(current_value=concurrent_value, reset_at=concurrent_reset_at)
+                )
+                await concurrent_session.commit()
+        return limits
+
+    monkeypatch.setattr(ApiKeysRepository, "get_limits_by_key", interleave_after_initial_read)
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 2000},
+            ],
+        },
+    )
+    assert updated.status_code == 200
+
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == concurrent_value
+        assert limits[0].reset_at == concurrent_reset_at
         assert limits[0].max_value == 2000
 
 

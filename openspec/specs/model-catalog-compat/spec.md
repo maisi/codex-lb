@@ -1,7 +1,8 @@
 # model-catalog-compat Specification
 
 ## Purpose
-TBD - created by archiving change populate-bootstrap-model-metadata. Update Purpose after archive.
+Define bootstrap and refreshed model catalogs, compatible metadata and account eligibility evidence.
+
 ## Requirements
 ### Requirement: Bootstrap model catalog is available before refresh
 

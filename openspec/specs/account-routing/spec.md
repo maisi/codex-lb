@@ -1,7 +1,8 @@
 # account-routing Specification
 
 ## Purpose
-TBD - created by archiving change add-relative-availability-routing. Update Purpose after archive.
+Define account eligibility, routing strategies, priority and continuity ownership for proxy requests.
+
 ## Requirements
 ### Requirement: Relative availability routing
 

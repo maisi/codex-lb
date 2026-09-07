@@ -1,7 +1,8 @@
 # files-upload-protocol Specification
 
 ## Purpose
-TBD - created by archiving change add-backend-api-files-protocol. Update Purpose after archive.
+Define file registration, upload finalization and durable account ownership across replicas.
+
 ## Requirements
 ### Requirement: Native file upload registration endpoint
 

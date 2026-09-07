@@ -1,7 +1,8 @@
 # release-automation Specification
 
 ## Purpose
-TBD - created by archiving change cleanup-superseded-beta-release-prs. Update Purpose after archive.
+Define canonical beta release pull requests, superseded-request cleanup and generated release notes.
+
 ## Requirements
 ### Requirement: Superseded beta release PR cleanup
 

@@ -1,7 +1,8 @@
 # account-quota-presentation Specification
 
 ## Purpose
-TBD - created by archiving change free-account-monthly-window. Update Purpose after archive.
+Define consistent dashboard quota presentation for monthly, weekly, short-window and credit-based accounts.
+
 ## Requirements
 ### Requirement: Free-account quota surfaces are monthly-only
 

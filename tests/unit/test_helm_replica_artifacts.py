@@ -241,6 +241,34 @@ def test_helm_pool_budgets_count_both_postgres_engines() -> None:
         assert reserve >= _POSTGRES_DEFAULT_SUPERUSER_RESERVED_CONNECTIONS + _MIGRATOR_PEAK_CONNECTIONS
 
 
+def test_helm_codex_prewarm_defaults_off_like_settings() -> None:
+    defaults = yaml.safe_load((_CHART_DIR / "values.yaml").read_text())
+    bundled = yaml.safe_load((_CHART_DIR / "values-bundled.yaml").read_text())
+    configmap = (_CHART_DIR / "templates" / "configmap.yaml").read_text()
+
+    assert defaults["config"]["sessionBridgeCodexPrewarmEnabled"] is False
+    assert bundled["config"]["sessionBridgeCodexPrewarmEnabled"] is False
+    assert (
+        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED: "
+        "{{ .Values.config.sessionBridgeCodexPrewarmEnabled | toString | quote }}"
+    ) in configmap
+
+
+def test_helm_default_disables_global_backpressure_and_honors_override() -> None:
+    default_rendered = _helm_template("--show-only", "templates/configmap.yaml")
+    override_rendered = _helm_template(
+        "--set",
+        "config.backpressureMaxConcurrentRequests=37",
+        "--show-only",
+        "templates/configmap.yaml",
+    )
+    (default_configmap,) = _helm_documents(default_rendered)
+    (override_configmap,) = _helm_documents(override_rendered)
+
+    assert default_configmap["data"]["CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS"] == "0"
+    assert override_configmap["data"]["CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS"] == "37"
+
+
 def test_helm_pool_budget_values_flow_to_runtime_and_hpa_templates() -> None:
     configmap = (_CHART_DIR / "templates" / "configmap.yaml").read_text()
     deployment = (_CHART_DIR / "templates" / "deployment.yaml").read_text()

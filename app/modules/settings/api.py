@@ -19,12 +19,12 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
-from app.core.clients.http import _build_ssl_context
+from app.core.clients.http import _shared_ssl_context
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardSettingsConflictError
-from app.core.upstream_proxy import resolve_proxy_endpoint
+from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint, sends_plaintext_credentials
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
@@ -111,6 +111,7 @@ router = APIRouter(
 
 
 def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
+    environment_settings = get_app_settings()
     additional_quota_policies = [
         AdditionalQuotaPolicy(
             quota_key=definition.quota_key,
@@ -129,9 +130,41 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         prohibit_fast_mode=settings.prohibit_fast_mode,
         http_downstream_transport_policy=settings.http_downstream_transport_policy,
         proxy_account_response_create_limit=settings.proxy_account_response_create_limit,
+        proxy_account_response_create_limit_environment_value=(
+            getattr(
+                environment_settings,
+                "proxy_account_response_create_limit",
+                settings.proxy_account_response_create_limit,
+            )
+        ),
+        proxy_account_response_create_limit_override=(settings.proxy_account_response_create_limit_override),
         proxy_account_stream_limit=settings.proxy_account_stream_limit,
+        proxy_account_stream_limit_environment_value=getattr(
+            environment_settings,
+            "proxy_account_stream_limit",
+            settings.proxy_account_stream_limit,
+        ),
+        proxy_account_stream_limit_override=settings.proxy_account_stream_limit_override,
         proxy_account_stream_recovery_reserve=settings.proxy_account_stream_recovery_reserve,
+        proxy_account_stream_recovery_reserve_environment_value=(
+            getattr(
+                environment_settings,
+                "proxy_account_stream_recovery_reserve",
+                settings.proxy_account_stream_recovery_reserve,
+            )
+        ),
+        proxy_account_stream_recovery_reserve_override=(settings.proxy_account_stream_recovery_reserve_override),
         proxy_api_key_fair_share_congestion_threshold_pct=(settings.proxy_api_key_fair_share_congestion_threshold_pct),
+        proxy_api_key_fair_share_congestion_threshold_pct_environment_value=(
+            getattr(
+                environment_settings,
+                "proxy_api_key_fair_share_congestion_threshold_pct",
+                settings.proxy_api_key_fair_share_congestion_threshold_pct,
+            )
+        ),
+        proxy_api_key_fair_share_congestion_threshold_pct_override=(
+            settings.proxy_api_key_fair_share_congestion_threshold_pct_override
+        ),
         upstream_proxy_routing_enabled=settings.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
@@ -236,6 +269,9 @@ async def create_upstream_proxy_endpoint(
     _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyEndpointResponse:
+    if payload.username is not None and ":" in payload.username:
+        # Mirrors the resolver: a Basic user-id cannot encode a colon.
+        raise DashboardBadRequestError('Proxy usernames cannot contain ":"', code="invalid_proxy_username")
     encryptor = TokenEncryptor()
     row = ProxyEndpoint(
         name=payload.name,
@@ -261,7 +297,11 @@ async def test_upstream_proxy_endpoint(
     row = await context.session.get(ProxyEndpoint, endpoint_id)
     if row is None:
         raise DashboardBadRequestError("Proxy endpoint not found", code="proxy_endpoint_not_found")
-    endpoint = resolve_proxy_endpoint(row, encryptor=TokenEncryptor())
+    try:
+        endpoint = resolve_proxy_endpoint(row, encryptor=TokenEncryptor())
+    except UpstreamProxyRouteError as exc:
+        # Persisted rows the resolver now rejects report the reason instead of 500.
+        return UpstreamProxyEndpointTestResponse(endpoint_id=row.id, ok=False, elapsed_ms=0, error=exc.reason)
     started = time.monotonic()
     try:
         status_code = await _probe_upstream_proxy_endpoint(endpoint)
@@ -505,6 +545,9 @@ def _proxy_endpoint_response(row: ProxyEndpoint) -> UpstreamProxyEndpointRespons
         port=row.port,
         username=row.username,
         is_active=row.is_active,
+        plaintext_credentials=sends_plaintext_credentials(
+            row.scheme, has_credentials=row.username is not None or row.password_encrypted is not None
+        ),
     )
 
 
@@ -527,7 +570,7 @@ async def _probe_upstream_proxy_endpoint(endpoint) -> int:
             username=endpoint.username,
             password=endpoint.password,
             rdns=endpoint.proxy_url.split(":", 1)[0] == "socks5h",
-            ssl=_build_ssl_context(),
+            ssl=_shared_ssl_context(),
         )
         async with aiohttp.ClientSession(
             connector=connector,
@@ -617,14 +660,19 @@ async def update_settings(
         single_account_id = (
             payload.single_account_id if "single_account_id" in payload.model_fields_set else current.single_account_id
         )
+        startup_settings = get_app_settings()
         stream_limit = (
             payload.proxy_account_stream_limit
             if payload.proxy_account_stream_limit is not None
+            else startup_settings.proxy_account_stream_limit
+            if "proxy_account_stream_limit" in payload.model_fields_set
             else current.proxy_account_stream_limit
         )
         stream_recovery_reserve = (
             payload.proxy_account_stream_recovery_reserve
             if payload.proxy_account_stream_recovery_reserve is not None
+            else startup_settings.proxy_account_stream_recovery_reserve
+            if "proxy_account_stream_recovery_reserve" in payload.model_fields_set
             else current.proxy_account_stream_recovery_reserve
         )
         cap_fields_changed = bool(
@@ -658,20 +706,36 @@ async def update_settings(
                     if "proxy_account_response_create_limit" in payload.model_fields_set
                     else None
                 ),
+                clear_proxy_account_response_create_limit=(
+                    "proxy_account_response_create_limit" in payload.model_fields_set
+                    and payload.proxy_account_response_create_limit is None
+                ),
                 proxy_account_stream_limit=(
                     payload.proxy_account_stream_limit
                     if "proxy_account_stream_limit" in payload.model_fields_set
                     else None
+                ),
+                clear_proxy_account_stream_limit=(
+                    "proxy_account_stream_limit" in payload.model_fields_set
+                    and payload.proxy_account_stream_limit is None
                 ),
                 proxy_account_stream_recovery_reserve=(
                     payload.proxy_account_stream_recovery_reserve
                     if "proxy_account_stream_recovery_reserve" in payload.model_fields_set
                     else None
                 ),
+                clear_proxy_account_stream_recovery_reserve=(
+                    "proxy_account_stream_recovery_reserve" in payload.model_fields_set
+                    and payload.proxy_account_stream_recovery_reserve is None
+                ),
                 proxy_api_key_fair_share_congestion_threshold_pct=(
                     payload.proxy_api_key_fair_share_congestion_threshold_pct
                     if "proxy_api_key_fair_share_congestion_threshold_pct" in payload.model_fields_set
                     else None
+                ),
+                clear_proxy_api_key_fair_share_congestion_threshold_pct=(
+                    "proxy_api_key_fair_share_congestion_threshold_pct" in payload.model_fields_set
+                    and payload.proxy_api_key_fair_share_congestion_threshold_pct is None
                 ),
                 upstream_proxy_routing_enabled=(
                     payload.upstream_proxy_routing_enabled
@@ -907,6 +971,20 @@ async def update_settings(
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
+    capacity_override_fields = (
+        "proxy_account_response_create_limit",
+        "proxy_account_stream_limit",
+        "proxy_account_stream_recovery_reserve",
+        "proxy_api_key_fair_share_congestion_threshold_pct",
+    )
+    for field_name in capacity_override_fields:
+        override_field_name = f"{field_name}_override"
+        if (
+            getattr(current, field_name) == getattr(updated, field_name)
+            and getattr(current, override_field_name) != getattr(updated, override_field_name)
+            and field_name not in changed_fields
+        ):
+            changed_fields.append(field_name)
     if upstream_route_inputs_changed:
         # Durably bump ``upstream_route`` (with the coalesced retry fallback)
         # rather than relying solely on the ``settings`` bump issued above:

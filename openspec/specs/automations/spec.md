@@ -1,7 +1,8 @@
 # automations Specification
 
 ## Purpose
-TBD - created by archiving change add-automations-scheduled-pings. Update Purpose after archive.
+Define scheduled automation management, timezone-aware execution and coordination across replicas.
+
 ## Requirements
 ### Requirement: Automation jobs are manageable via dashboard APIs
 

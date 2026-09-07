@@ -8,9 +8,10 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import text
 
+import app.modules.settings.api as settings_api_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings_cache import get_settings_cache
-from app.db.models import Account, AccountStatus, DashboardSettings
+from app.db.models import Account, AccountStatus, DashboardSettings, ProxyEndpoint
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -52,9 +53,17 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["upstreamStreamTransport"] == "default"
     assert payload["prohibitFastMode"] is False
     assert payload["proxyAccountResponseCreateLimit"] == 4
+    assert payload["proxyAccountResponseCreateLimitEnvironmentValue"] == 4
+    assert payload["proxyAccountResponseCreateLimitOverride"] == 4
     assert payload["proxyAccountStreamLimit"] == 8
+    assert payload["proxyAccountStreamLimitEnvironmentValue"] == 8
+    assert payload["proxyAccountStreamLimitOverride"] == 8
     assert payload["proxyAccountStreamRecoveryReserve"] == 1
+    assert payload["proxyAccountStreamRecoveryReserveEnvironmentValue"] == 1
+    assert payload["proxyAccountStreamRecoveryReserveOverride"] == 1
     assert payload["proxyApiKeyFairShareCongestionThresholdPct"] == 0
+    assert payload["proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue"] == 0
+    assert payload["proxyApiKeyFairShareCongestionThresholdPctOverride"] == 0
     assert payload["upstreamProxyRoutingEnabled"] is False
     assert payload["upstreamProxyDefaultPoolId"] is None
     assert payload["preferEarlierResetAccounts"] is True
@@ -143,9 +152,13 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["upstreamStreamTransport"] == "websocket"
     assert updated["prohibitFastMode"] is True
     assert updated["proxyAccountResponseCreateLimit"] == 12
+    assert updated["proxyAccountResponseCreateLimitOverride"] == 12
     assert updated["proxyAccountStreamLimit"] == 24
+    assert updated["proxyAccountStreamLimitOverride"] == 24
     assert updated["proxyAccountStreamRecoveryReserve"] == 3
+    assert updated["proxyAccountStreamRecoveryReserveOverride"] == 3
     assert updated["proxyApiKeyFairShareCongestionThresholdPct"] == 80
+    assert updated["proxyApiKeyFairShareCongestionThresholdPctOverride"] == 80
     assert updated["upstreamProxyRoutingEnabled"] is True
     assert updated["upstreamProxyDefaultPoolId"] is None
     assert updated["preferEarlierResetAccounts"] is False
@@ -189,9 +202,13 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["upstreamStreamTransport"] == "websocket"
     assert payload["prohibitFastMode"] is True
     assert payload["proxyAccountResponseCreateLimit"] == 12
+    assert payload["proxyAccountResponseCreateLimitOverride"] == 12
     assert payload["proxyAccountStreamLimit"] == 24
+    assert payload["proxyAccountStreamLimitOverride"] == 24
     assert payload["proxyAccountStreamRecoveryReserve"] == 3
+    assert payload["proxyAccountStreamRecoveryReserveOverride"] == 3
     assert payload["proxyApiKeyFairShareCongestionThresholdPct"] == 80
+    assert payload["proxyApiKeyFairShareCongestionThresholdPctOverride"] == 80
     assert payload["upstreamProxyRoutingEnabled"] is True
     assert payload["upstreamProxyDefaultPoolId"] is None
     assert payload["preferEarlierResetAccounts"] is False
@@ -229,6 +246,57 @@ async def test_settings_api_get_and_update(async_client):
 
 
 @pytest.mark.asyncio
+async def test_settings_api_capacity_overrides_support_absent_null_and_explicit_values(async_client):
+    configured = await async_client.put(
+        "/api/settings",
+        json={
+            "proxyAccountResponseCreateLimit": 12,
+            "proxyAccountStreamLimit": 24,
+            "proxyAccountStreamRecoveryReserve": 3,
+            "proxyApiKeyFairShareCongestionThresholdPct": 80,
+        },
+    )
+    assert configured.status_code == 200
+
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    unchanged_payload = unchanged.json()
+    assert unchanged_payload["proxyAccountResponseCreateLimitOverride"] == 12
+    assert unchanged_payload["proxyAccountStreamLimitOverride"] == 24
+    assert unchanged_payload["proxyAccountStreamRecoveryReserveOverride"] == 3
+    assert unchanged_payload["proxyApiKeyFairShareCongestionThresholdPctOverride"] == 80
+
+    cleared = await async_client.put(
+        "/api/settings",
+        json={
+            "proxyAccountResponseCreateLimit": None,
+            "proxyAccountStreamLimit": None,
+            "proxyAccountStreamRecoveryReserve": None,
+            "proxyApiKeyFairShareCongestionThresholdPct": None,
+        },
+    )
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["proxyAccountResponseCreateLimit"] == 4
+    assert cleared_payload["proxyAccountResponseCreateLimitOverride"] is None
+    assert cleared_payload["proxyAccountStreamLimit"] == 8
+    assert cleared_payload["proxyAccountStreamLimitOverride"] is None
+    assert cleared_payload["proxyAccountStreamRecoveryReserve"] == 1
+    assert cleared_payload["proxyAccountStreamRecoveryReserveOverride"] is None
+    assert cleared_payload["proxyApiKeyFairShareCongestionThresholdPct"] == 0
+    assert cleared_payload["proxyApiKeyFairShareCongestionThresholdPctOverride"] is None
+
+    pinned_to_effective = await async_client.put(
+        "/api/settings",
+        json={"proxyAccountStreamLimit": 8},
+    )
+    assert pinned_to_effective.status_code == 200
+    pinned_payload = pinned_to_effective.json()
+    assert pinned_payload["proxyAccountStreamLimit"] == 8
+    assert pinned_payload["proxyAccountStreamLimitOverride"] == 8
+
+
+@pytest.mark.asyncio
 async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(async_client, monkeypatch):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -239,6 +307,7 @@ async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(a
         settings.proxy_account_response_create_limit = None
         settings.proxy_account_stream_limit = None
         settings.proxy_account_stream_recovery_reserve = None
+        settings.proxy_api_key_fair_share_congestion_threshold_pct = None
         await session.commit()
     await get_settings_cache().invalidate()
 
@@ -262,6 +331,7 @@ async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(a
         assert settings.proxy_account_response_create_limit is None
         assert settings.proxy_account_stream_limit is None
         assert settings.proxy_account_stream_recovery_reserve is None
+        assert settings.proxy_api_key_fair_share_congestion_threshold_pct is None
 
 
 @pytest.mark.asyncio
@@ -306,6 +376,37 @@ async def test_settings_api_rejects_stream_recovery_reserve_above_bounded_stream
     assert unlimited.status_code == 200
     assert unlimited.json()["proxyAccountStreamLimit"] == 0
     assert unlimited.json()["proxyAccountStreamRecoveryReserve"] == 3
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_clear_that_would_violate_environment_capacity(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        settings.proxy_account_stream_limit = 24
+        settings.proxy_account_stream_recovery_reserve = 3
+        await session.commit()
+    await get_settings_cache().invalidate()
+
+    startup_settings = settings_api_module.get_app_settings()
+    monkeypatch.setattr(
+        settings_api_module,
+        "get_app_settings",
+        lambda: startup_settings.model_copy(update={"proxy_account_stream_limit": 2}),
+    )
+
+    response = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": None})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_proxy_account_stream_recovery_reserve"
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        assert settings.proxy_account_stream_limit == 24
+        assert settings.proxy_account_stream_recovery_reserve == 3
 
 
 @pytest.mark.asyncio
@@ -513,7 +614,7 @@ async def test_upstream_proxy_admin_controls(async_client):
         "/api/settings/upstream-proxy/endpoints",
         json={
             "name": "Proxy A",
-            "scheme": "http",
+            "scheme": "https",
             "host": "proxy.internal",
             "port": 8080,
             "username": "user",
@@ -586,7 +687,7 @@ async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client
         "/api/settings/upstream-proxy/endpoints",
         json={
             "name": "Proxy A",
-            "scheme": "http",
+            "scheme": "https",
             "host": "proxy.internal",
             "port": 8080,
             "username": "user",
@@ -606,7 +707,7 @@ async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client
     assert payload["error"] is None
     client_kwargs = cast(dict[str, Any], captured["client_kwargs"])
     assert captured["url"] == "https://chatgpt.com/cdn-cgi/trace"
-    assert client_kwargs["proxy"] == "http://user:secret@proxy.internal:8080"
+    assert client_kwargs["proxy"] == "https://user:secret@proxy.internal:8080"
     assert "secret" not in str(payload)
 
 
@@ -634,7 +735,7 @@ async def test_upstream_proxy_endpoint_test_rejects_proxy_auth_response(async_cl
         "/api/settings/upstream-proxy/endpoints",
         json={
             "name": "Proxy Auth",
-            "scheme": "http",
+            "scheme": "https",
             "host": "proxy.internal",
             "port": 8080,
             "username": "user",
@@ -653,6 +754,87 @@ async def test_upstream_proxy_endpoint_test_rejects_proxy_auth_response(async_cl
     assert payload["statusCode"] == 407
     assert payload["error"] == "proxy_auth_failed"
     assert "wrong" not in str(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])
+async def test_upstream_proxy_endpoint_create_allows_plaintext_credentials_with_warning_flag(async_client, scheme: str):
+    response = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Plaintext proxy",
+            "scheme": scheme,
+            "host": "proxy.internal",
+            "port": 8080,
+            "username": "user",
+            "password": "secret",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["plaintextCredentials"] is True
+    assert "secret" not in str(payload)
+
+    listing = await async_client.get("/api/settings/upstream-proxy")
+    assert listing.status_code == 200
+    flags = {endpoint["id"]: endpoint["plaintextCredentials"] for endpoint in listing.json()["endpoints"]}
+    assert flags[payload["id"]] is True
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_https_credentials_are_not_flagged(async_client):
+    response = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "TLS proxy",
+            "scheme": "https",
+            "host": "proxy.internal",
+            "port": 8443,
+            "username": "user",
+            "password": "secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plaintextCredentials"] is False
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_create_rejects_colon_in_username(async_client):
+    response = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Colon proxy",
+            "scheme": "https",
+            "host": "proxy.internal",
+            "port": 8080,
+            "username": "user:name",
+            "password": "secret",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_proxy_username"
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_test_reports_unresolvable_persisted_row(async_client):
+    # A row persisted before the resolver rule existed must report the reason,
+    # not surface an unhandled 500 from the test route.
+    async with SessionLocal() as session:
+        row = ProxyEndpoint(name="Legacy", scheme="https", host="proxy.internal", port=8080, username="user:name")
+        session.add(row)
+        await session.commit()
+        endpoint_id = row.id
+
+    response = await async_client.post(f"/api/settings/upstream-proxy/endpoints/{endpoint_id}/test")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["error"] == "invalid_proxy_username"
+    assert payload["statusCode"] is None
 
 
 @pytest.mark.asyncio
