@@ -23,7 +23,16 @@ Upstream non-native fingerprint normalization replaces the equivalent fork imple
 - Python lint/type and proxy architecture, cancellation and timing checks.
 - Wheel build and bundled frontend asset verification.
 
-Full backend, PostgreSQL and native release-build checks are still running; this change remains active until verification completes.
+- Full local unit run: 8,213 passed, 97 skipped; one settings-ratchet failure corrected and verified in the 27-test final-fix run.
+- Full initial GitHub unit run: 8,364 passed, four skipped, one expected failure; the same settings-ratchet failure was the only failure.
+- All 167 PostgreSQL tests passed, with migration policy and schema drift checks clean.
+- 27 end-to-end tests passed; installed-Codex live proof skipped because its opt-in was unset.
+- Native formatting, clippy and release-worker build passed.
+- Frontend lint and generated settings reference checks passed.
+- GitHub Docker build, Trivy, Helm install, Nix, package, docs, frontend, PostgreSQL and all integration shards passed on the initial merge head.
+- Final-fix run: 27 tests passed, covering the settings count and release guard, including verified import and rejected missing/unrelated provenance, altered versions, release branches and non-fork events.
+
+The initial cloud beta guard rejected imported release metadata as a newly authored release. The integration now fetches official upstream tags into a dedicated ref namespace and verifies both ancestry and all version fields before recognizing a fork import. Publish validation is unchanged. Final-head GitHub gates remain mandatory before merge.
 
 ## Dashboard evidence
 

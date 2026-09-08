@@ -18,6 +18,7 @@ None beyond capabilities supplied by upstream's existing change artifacts.
 ### Modified Capabilities
 
 - `usage-refresh-policy`: combine upstream nonterminal HTTP errors with fork recovery and borrowed-account lifecycle.
+- `github-automation`: distinguish verified upstream release imports from fork-authored beta releases.
 - `database-migrations`: upgrade both existing fork databases and upstream databases through the combined graph.
 
 ## Impact

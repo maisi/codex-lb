@@ -86,7 +86,10 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # bound-eventless-server-recovery spec called it "configured"; the maintainer
 # asked for it to be promoted to a setting on PR #1633 (2026-08-20/08-26),
 # consistent with that PR's budget-from-settings principle.
-MAX_SETTINGS_FIELDS = 133
+# 133 upstream fields + 4 existing fork account_token_vending_* settings.
+# The topology, shared credential and token-skew controls retain their existing
+# opt-in defaults; integration introduces no additional vending settings.
+MAX_SETTINGS_FIELDS = 137
 
 
 def test_generated_settings_reference_matches_code() -> None:

@@ -7,6 +7,6 @@
 
 ## 2. Verification
 
-- [ ] 2.1 Run repository backend, frontend, native and packaging checks; record results.
-- [ ] 2.2 Validate and sync OpenSpec requirements; verify and archive this change after successful checks.
-- [ ] 2.3 Inspect final diff and commit integrated upstream ancestry with verification notes.
+- [x] 2.1 Run repository backend, frontend, native and packaging checks; record results.
+- [x] 2.2 Validate and sync OpenSpec requirements; verify this change before archival.
+- [x] 2.3 Inspect final diff and commit integrated upstream ancestry with verification notes.

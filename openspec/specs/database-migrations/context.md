@@ -63,3 +63,7 @@
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
+
+## September 2026 fork integration
+
+The September 2026 upstream integration joins the account-priority fork head and the upstream quota-warmup-claim-expiry head through 20260908_000000_merge_upstream_beta4_and_fork. Existing revision identities remain valid. Parent-upgrade tests preserve API-key continuation/usage flags and account ranks; topology for token vending remains environment configuration. See [spec.md](spec.md) for the normative contract.

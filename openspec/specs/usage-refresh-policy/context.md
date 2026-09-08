@@ -148,3 +148,7 @@ does not count as evidence that the account is healthy.
 
 - [#676 - initial bug report on `/wham/usage` vs. Settings UI divergence](https://github.com/Soju06/codex-lb/issues/676)
 - [#677 - dashboard per-account force-probe action](https://github.com/Soju06/codex-lb/issues/677)
+
+## September 2026 fork integration
+
+The September 2026 upstream integration uses explicit terminal content to classify usage failures. The fork retains the 404 refresh cooldown and historical false-deactivation recovery. Borrowed-account credentials remain owned by the configured vending peer; successful vending is the force-probe recovery signal. See [spec.md](spec.md) for the normative contract.
