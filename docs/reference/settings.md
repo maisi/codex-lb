@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 135 settings. Every setting is an environment
+codex-lb currently exposes 137 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -20,6 +20,15 @@ environment variable, not a `CODEX_LB_*` setting, and applies to host
 (uvx/local) runs only — env files map only prefixed variables. In Docker the
 container always listens on 2455 (the entrypoint pins `--port 2455`); change
 the host side of the compose `ports` mapping instead.
+
+## `CODEX_LB_ENV_FILE` (special case, bootstrap only)
+
+`.env` / `.env.local` are discovered next to the installed module root (the
+repository checkout). `CODEX_LB_ENV_FILE` — an `os.pathsep`-separated list
+of paths — overrides that discovery for installs whose module root cannot
+contain env files (the Nix package wrapper points it at the launch
+directory). It must be set in the process environment, not in an env file:
+the env-file locations have to be known before env files are read.
 
 ## Core
 
@@ -99,9 +108,11 @@ the host side of the compose `ports` mapping instead.
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_EVENT_SPOOL_MAX_PENDING_BYTES` | `int` | `33554432` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_EVENT_SPOOL_MAX_PENDING_EVENTS` | `int` | `2048` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED` | `bool` | `True` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_FORMAT` | `'rows_v1' \| 'chunks_v2'` | `'rows_v1'` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_RETENTION_SECONDS` | `float` | `604800` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUEUE_LIMIT` | `int` | `8` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_REQUEST_BUDGET_SECONDS` | `float` | `7200.0` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS` | `int` | `6` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS` | `float` | `300.0` |
 
 ## Proxy admission & account caps
@@ -227,7 +238,7 @@ the host side of the compose `ports` mapping instead.
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
-| `CODEX_LB_LOG_FORMAT` | `str` | `'text'` |
+| `CODEX_LB_LOG_FORMAT` | `'text' \| 'json'` | `'text'` |
 | `CODEX_LB_METRICS_ENABLED` | `bool` | `False` |
 | `CODEX_LB_METRICS_PORT` | `int` | `9090` |
 | `CODEX_LB_OTEL_ENABLED` | `bool` | `False` |

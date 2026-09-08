@@ -589,3 +589,50 @@ def test_publish_guard_rejects_merge_tree_that_differs_from_validated_head(tmp_p
     assert "merge commit tree differs from the validated candidate head" in result.stderr
     assert head_sha in result.stderr
     assert merge_sha in result.stderr
+
+
+@pytest.mark.parametrize(
+    "case", ["verified", "missing-tag", "unrelated-tag", "changed-version", "release-branch", "not-fork"]
+)
+def test_pr_guard_fork_sync_requires_official_release_provenance(tmp_path: Path, case: str) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = init_repo_with_beta_commit(repo)
+    base = git(repo, "rev-parse", "HEAD~1")
+    ref = "refs/upstream-release/v1.20.0-beta.3"
+    if case != "missing-tag":
+        git(repo, "update-ref", ref, sha)
+    if case == "unrelated-tag":
+        tree = git(repo, "rev-parse", "HEAD^{tree}")
+        unrelated = git(repo, "commit-tree", tree, "-m", "Unrelated release")
+        git(repo, "update-ref", ref, unrelated)
+    if case == "changed-version":
+        update_project_versions(repo, "1.20.0-beta.4")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "Changed beta version")
+        git(repo, "update-ref", "refs/upstream-release/v1.20.0-beta.4", sha)
+    branch = "release/beta-1.20.0-beta.3" if case == "release-branch" else "chore/integrate-upstream"
+    event_path = event_file(
+        tmp_path,
+        head_ref=branch,
+        head_sha=git(repo, "rev-parse", "HEAD"),
+        body="",
+        head_repo="maisi/codex-lb",
+        base_repo="maisi/codex-lb",
+    )
+    event = json.loads(event_path.read_text())
+    event["repository"]["fork"] = case != "not-fork"
+    event_path.write_text(json.dumps(event))
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        base,
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event_path),
+    )
+    assert result.returncode == (0 if case == "verified" else 1), result.stdout + result.stderr
+    if case == "verified":
+        assert "Verified upstream release import" in result.stdout

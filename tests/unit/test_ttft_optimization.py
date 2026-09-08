@@ -160,9 +160,14 @@ def test_normalize_sse_event_block_skips_json_parsing_without_type(monkeypatch) 
         '{"type":"response.output_tool_call.delta","delta":"hi"}',
         '{"type":"response.reasoning_summary_text.delta","delta":"hi"}',
         '{"type":"response.reasoning_text.delta","delta":"hi"}',
+        '{"type":"response.custom_tool_call_input.delta","delta":"pwd"}',
         (
             '{"type":"response.output_item.added","item":'
-            '{"type":"custom_tool_call","call_id":"call_1","name":"shell","input":""}}'
+            '{"type":"custom_tool_call","call_id":"call_1","name":"shell","input":"pwd"}}'
+        ),
+        (
+            '{"type":"response.output_item.done","item":'
+            '{"type":"custom_tool_call","call_id":"call_1","name":"shell","input":"pwd"}}'
         ),
     ],
 )
@@ -201,6 +206,73 @@ async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch, event
 
     assert len(chunks) == 2
     assert latency_first_token_ms > 0
+
+
+def test_ttft_ignores_metadata_only_and_empty_tool_items() -> None:
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.output_item.added",
+            {"item": {"type": "custom_tool_call", "call_id": "call-empty", "input": ""}},
+            now=time.monotonic(),
+        )
+        is None
+    )
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.output_item.added",
+            {"item": {"type": "apply_patch_call", "call_id": "call-meta"}},
+            now=time.monotonic(),
+        )
+        is None
+    )
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.output_item.added",
+            {"item": {"type": "custom_tool_call", "input": "pwd"}},
+            now=time.monotonic(),
+        )
+        is not None
+    )
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.custom_tool_call_input.delta",
+            {"delta": ""},
+            now=time.monotonic(),
+        )
+        is None
+    )
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.custom_tool_call_input.delta",
+            {"delta": "pwd"},
+            now=time.monotonic(),
+        )
+        is not None
+    )
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.output_item.done",
+            {"item": {"type": "custom_tool_call", "input": "pwd"}},
+            now=time.monotonic(),
+        )
+        is not None
+    )
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.output_item.done",
+            {"item": {"type": "custom_tool_call", "input": ""}},
+            now=time.monotonic(),
+        )
+        is None
+    )
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.output_item.done",
+            {"item": {"type": "apply_patch_call", "call_id": "call-meta"}},
+            now=time.monotonic(),
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -255,12 +327,13 @@ def test_ttft_reasoning_finalizer_uses_visible_prefix_arrival_time() -> None:
             "response.reasoning_summary_text.delta",
             {"type": "response.reasoning_summary_text.delta", "delta": "Plan\n\n<!"},
             pending,
+            now=time.monotonic(),
         )
         is None
     )
     time.sleep(0.03)
 
-    visible_at = proxy_service._finalize_ttft_reasoning_deltas(pending)
+    visible_at = proxy_service._finalize_ttft_reasoning_deltas(pending, now=time.monotonic())
 
     assert visible_at is not None
     assert int((visible_at - started_at) * 1000) < 20
@@ -277,6 +350,7 @@ def test_ttft_reasoning_ignores_split_blank_placeholder() -> None:
             "response.reasoning_summary_text.delta",
             {"type": "response.reasoning_summary_text.delta", "delta": "<!"},
             pending,
+            now=time.monotonic(),
         )
         is None
     )
@@ -285,6 +359,7 @@ def test_ttft_reasoning_ignores_split_blank_placeholder() -> None:
             "response.reasoning_summary_text.delta",
             {"type": "response.reasoning_summary_text.delta", "delta": "-- -->"},
             pending,
+            now=time.monotonic(),
         )
         is None
     )
@@ -303,6 +378,7 @@ def test_ttft_reasoning_uses_visible_prefix_when_candidate_becomes_text() -> Non
             "response.reasoning_summary_text.delta",
             {"type": "response.reasoning_summary_text.delta", "delta": "Plan\n\n<!"},
             pending,
+            now=time.monotonic(),
         )
         is None
     )
@@ -312,6 +388,7 @@ def test_ttft_reasoning_uses_visible_prefix_when_candidate_becomes_text() -> Non
         "response.reasoning_summary_text.delta",
         {"type": "response.reasoning_summary_text.delta", "delta": "not-a-comment"},
         pending,
+        now=time.monotonic(),
     )
 
     assert visible_at is not None

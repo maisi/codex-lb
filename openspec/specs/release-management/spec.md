@@ -1,7 +1,8 @@
 # release-management Specification
 
 ## Purpose
-TBD - created by archiving change add-beta-release-channel. Update Purpose after archive.
+Define beta preparation, artifact publication, soak verification and stable release promotion.
+
 ## Requirements
 ### Requirement: Beta releases are prepared through release PRs
 

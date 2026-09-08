@@ -253,6 +253,29 @@ def require_validation_evidence(body: str, expected_sha: str) -> None:
         )
 
 
+def is_verified_upstream_release_import(
+    root: Path, event: dict[str, Any], head_ref: str, release: ReleaseVersion
+) -> bool:
+    """Accept fork imports only against official tags fetched by the CI job.
+
+    The refs/upstream-release namespace is populated from Soju06/codex-lb,
+    never from the PR's fork. Publication guards remain independent.
+    """
+    repository = event.get("repository")
+    if not isinstance(repository, dict) or repository.get("fork") is not True:
+        return False
+    if head_ref.startswith("release/"):
+        return False
+    ref = f"refs/upstream-release/v{release.version}"
+    if run_git(root, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False).returncode != 0:
+        return False
+    if run_git(root, "merge-base", "--is-ancestor", ref, "HEAD", check=False).returncode != 0:
+        return False
+    return _canonical_release_versions(read_project_versions(root)) == _canonical_release_versions(
+        _read_project_versions_at_ref(root, ref)
+    )
+
+
 def guard_pull_request(root: Path, event: dict[str, Any], base_ref: str, head_ref: str) -> None:
     pr = pull_request(event)
     if pr is None and os.environ.get("GITHUB_EVENT_NAME"):
@@ -293,6 +316,10 @@ def guard_pull_request(root: Path, event: dict[str, Any], base_ref: str, head_re
     release = read_consistent_release_version(root)
     if release.channel != "beta":
         print(f"Release-managed files changed for non-beta version {release.version}; beta guard passed.")
+        return
+
+    if is_verified_upstream_release_import(root, event, head_ref, release):
+        print(f"Verified upstream release import v{release.version}; publication validation remains separate.")
         return
 
     canonical_branch = f"release/beta-{release.version}"

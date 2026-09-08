@@ -21,7 +21,29 @@ from app.core.utils.proxy_env import outbound_proxy_env_configured
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parents[3]
-ENV_FILES = (BASE_DIR / ".env", BASE_DIR / ".env.local")
+
+
+def _resolve_env_files() -> tuple[Path, ...]:
+    """Resolve the env files read at settings load.
+
+    Default: ``.env`` / ``.env.local`` next to the module root (the repository
+    checkout). ``CODEX_LB_ENV_FILE`` — an ``os.pathsep``-separated list of
+    paths — overrides that discovery for installs whose module root cannot
+    contain env files: the Nix package's module root lives in the read-only
+    store, so its wrapper points this at the launch directory. It is a
+    bootstrap environment variable rather than a ``Settings`` field because
+    the env-file locations must be known before Settings can read env files.
+    Unset (every non-Nix launch path) preserves module-root discovery
+    unchanged; launch-directory env files are never loaded implicitly.
+    """
+    raw = os.getenv("CODEX_LB_ENV_FILE", "")
+    files = tuple(Path(entry.strip()).expanduser() for entry in raw.split(os.pathsep) if entry.strip())
+    if files:
+        return files
+    return (BASE_DIR / ".env", BASE_DIR / ".env.local")
+
+
+ENV_FILES = _resolve_env_files()
 
 # OAuth protocol constants. These values identify codex-lb to OpenAI's OAuth
 # endpoints exactly like the Codex CLI; they are protocol constants, not
@@ -302,6 +324,10 @@ class Settings(BaseSettings):
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
     http_responses_session_bridge_anchor_poison_failure_threshold: int = Field(default=7, ge=1, le=100)
+    # Cap on server-owned recovery attempts while the client stream is held
+    # open after an eligible eventless terminal (`server_indefinite_recovery`
+    # mode). Once exhausted, the bridge emits one terminal `response.failed`.
+    http_responses_session_bridge_server_recovery_max_attempts: int = Field(default=6, ge=1, le=100)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
     http_responses_session_bridge_clean_close_retry_jitter_max_seconds: float = Field(
@@ -317,6 +343,9 @@ class Settings(BaseSettings):
     # Bound durable replay storage per operation so a long response cannot
     # exhaust the database. An incomplete spool is never replayed.
     http_responses_session_bridge_operation_event_spool_max_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    # Rollout fence: chunks_v2 must be enabled only after every serving replica
+    # runs the dual-reader schema expansion.
+    http_responses_session_bridge_operation_spool_format: Literal["rows_v1", "chunks_v2"] = "rows_v1"
     http_responses_session_bridge_operation_event_spool_batch_size: int = Field(default=32, gt=0, le=256)
     http_responses_session_bridge_operation_event_spool_flush_interval_seconds: float = Field(
         default=0.1,
@@ -436,10 +465,10 @@ class Settings(BaseSettings):
     # --- Multi-replica & production settings ---
     # Prometheus metrics
     metrics_enabled: bool = False
-    metrics_port: int = 9090
+    metrics_port: int = Field(default=9090, ge=1, le=65535)
 
     # Logging
-    log_format: str = "text"  # "text" or "json"
+    log_format: Literal["text", "json"] = "text"
 
     # Leader election
     leader_election_enabled: bool = True
@@ -509,7 +538,7 @@ class Settings(BaseSettings):
     otel_exporter_endpoint: str = ""
 
     # Shutdown drain
-    shutdown_drain_timeout_seconds: int = 30
+    shutdown_drain_timeout_seconds: int = Field(default=30, gt=0, le=300)
 
     # HTTP connector limits
     http_connector_limit: int = 100

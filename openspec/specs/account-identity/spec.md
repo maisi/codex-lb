@@ -1,7 +1,8 @@
 # account-identity Specification
 
 ## Purpose
-TBD - created by archiving change fix-shared-workspace-account-slots. Update Purpose after archive.
+Preserve distinct account slots when multiple credentials share an upstream workspace identity.
+
 ## Requirements
 ### Requirement: Shared upstream workspace identities preserve account slots
 

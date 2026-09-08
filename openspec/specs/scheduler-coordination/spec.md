@@ -1,7 +1,8 @@
 # scheduler-coordination Specification
 
 ## Purpose
-TBD - created by archiving change harden-scheduler-leader-election. Update Purpose after archive.
+Define database-backed leadership, lease renewal and shutdown coordination for singleton schedulers.
+
 ## Requirements
 ### Requirement: Singleton schedulers gate on the shared leader lease
 

@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import json
 import logging
-import time
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -15,9 +14,9 @@ from app.core import usage as usage_core
 from app.core.auth.reauth_telemetry import REAUTH_SOURCE_PROXY, record_account_status_transition
 from app.core.balancer import (
     ERROR_BACKOFF_THRESHOLD,
-    HEALTH_TIER_DRAINING,
-    HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
+    RATE_LIMITED_MIN_COOLDOWN_SECONDS,
+    ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
     TRAFFIC_CLASS_OPPORTUNISTIC,
     USAGE_LIMIT_REACHED,
@@ -26,7 +25,6 @@ from app.core.balancer import (
     RoutingCostsByAccount,
     RoutingStrategy,
     TrafficClass,
-    evaluate_health_tier,
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
@@ -35,10 +33,12 @@ from app.core.balancer import (
 from app.core.balancer import (
     ROUTING_POLICY_BURN_FIRST as ROUTING_POLICY_BURN_FIRST,
 )
+from app.core.balancer.logic import plausible_rate_limit_reset_at
 from app.core.balancer.types import UpstreamError
-from app.core.config import settings as config_settings
+from app.core.clock import REAL_CLOCK, Clock
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.crypto import TokenEncryptor
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     account_cap_rejections_total,
@@ -55,8 +55,9 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.snapshot import clone_row
 from app.modules.proxy._load_balancer.model_eligibility import (
     _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES,
     CatalogOmissionQuotaAdmission,
@@ -129,24 +130,45 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     run_unbound_selection_path,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
-from app.modules.proxy.account_state import (
-    _ADDITIONAL_QUOTA_ROUTING_POLICIES,
-    AccountStateDependencies,
+from app.modules.proxy.account_eligibility import (
+    account_access_token_expires_at,
+    all_accounts_require_reauthentication,
 )
 from app.modules.proxy.account_state import (
-    background_recovery_state_from_account as _reconstruct_background_recovery_state,
+    _extract_credit_status as _extract_credit_status,
 )
 from app.modules.proxy.account_state import (
-    extract_credit_status as _reconstruct_credit_status,
+    _health_tier_primary_used as _health_tier_primary_used,
 )
 from app.modules.proxy.account_state import (
-    normalize_account_routing_policy as _normalize_account_routing_policy,
+    _normalize_account_routing_policy as _normalize_account_routing_policy,
 )
 from app.modules.proxy.account_state import (
-    select_long_window_entry as _select_long_window_entry,
+    _normalize_usage_inputs as _normalize_usage_inputs,
 )
 from app.modules.proxy.account_state import (
-    state_from_account as _reconstruct_account_state,
+    _NormalizedUsageInputs as _NormalizedUsageInputs,
+)
+from app.modules.proxy.account_state import (
+    _rate_limited_freshness_entry as _rate_limited_freshness_entry,
+)
+from app.modules.proxy.account_state import (
+    _state_from_account as _reconstruct_account_state,
+)
+from app.modules.proxy.account_state import (
+    _sync_runtime_health_tier as _sync_runtime_health_tier,
+)
+from app.modules.proxy.account_state import (
+    _usage_entry_is_recent_available as _usage_entry_is_recent_available,
+)
+from app.modules.proxy.account_state import (
+    _usage_entry_is_recent_enough as _usage_entry_is_recent_enough,
+)
+from app.modules.proxy.account_state import (
+    _usage_entry_recorded_after_block as _usage_entry_recorded_after_block,
+)
+from app.modules.proxy.account_state import (
+    _usage_refresh_interval_seconds as _usage_refresh_interval_seconds,
 )
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.cap_partitioning import (
@@ -167,7 +189,6 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_quota_definition,
     get_additional_quota_routing_policy,
 )
-from app.modules.usage.mappers import usage_history_to_window_row
 
 if TYPE_CHECKING:
     from app.modules.accounts.repository import AccountsRepository
@@ -190,21 +211,14 @@ NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 ADDITIONAL_QUOTA_EXHAUSTED = "quota_exhausted"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
+_ROUTING_POLICY_NORMAL = "normal"
+_ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
+_ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
 OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
 _AMBIGUOUS_CONVERSATION_OWNER_MESSAGE = "Conversation owner cannot be determined from the eligible account pool"
-
-
-@dataclass(frozen=True, slots=True)
-class _NormalizedUsageInputs:
-    primary_used: float | None
-    primary_reset: int | None
-    primary_window_minutes: int | None
-    effective_secondary_entry: _UsageWindowEntry | None
-    secondary_used: float | None
-    secondary_reset: int | None
 
 
 @dataclass
@@ -215,6 +229,7 @@ class AccountSelection:
     resets_at: int | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
+    continuity_owner_no_longer_exists: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,14 +247,12 @@ class _SelectionInputs(SelectionInputsProtocol):
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_monthly: dict[str, UsageHistory]
-    # Ownership ambiguity is resolved before transient additional-quota,
-    # exclusion, runtime-health, budget, and account-cap filters. Keep that
-    # stronger candidate pool alongside the effective routing pool.
+    # Resolve ownership before transient routing filters; keep that stronger
+    # candidate pool alongside the effective routing pool.
     continuity_owner_candidates: list[Account] | None = None
-    # Sticky-row mutation is authorized by account assignment and security
-    # policy, before model/service-tier eligibility. Keep this separate from
-    # continuity ambiguity: a model-ineligible account can still own the raw
-    # row that this authenticated request is allowed to retire.
+    # Sticky mutation authority precedes model/service-tier eligibility; keep
+    # it separate because a model-ineligible account can still own the raw row
+    # this authenticated request may retire.
     sticky_mutation_authority_account_ids: frozenset[str] | None = None
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
@@ -288,8 +301,16 @@ SelectionInputs = _SelectionInputs
 
 
 class LoadBalancer:
-    def __init__(self, repo_factory: ProxyRepoFactory) -> None:
+    def __init__(
+        self,
+        repo_factory: ProxyRepoFactory,
+        *,
+        encryptor: TokenEncryptor | None = None,
+        clock: Clock = REAL_CLOCK,
+    ) -> None:
         self._repo_factory = repo_factory
+        self._encryptor = encryptor or TokenEncryptor()
+        self._clock = clock
         self._runtime: dict[str, RuntimeState] = {}
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
@@ -374,7 +395,7 @@ class LoadBalancer:
             lease_id=uuid4().hex,
             account_id=account_id,
             kind=kind,
-            acquired_at=time.monotonic(),
+            acquired_at=self._clock.monotonic(),
             estimated_tokens=max(0.0, estimated_tokens),
             api_key_id=api_key_id,
         )
@@ -391,7 +412,7 @@ class LoadBalancer:
                 runtime.stream_key_inflight[api_key_id] = runtime.stream_key_inflight.get(api_key_id, 0) + 1
         runtime.leased_tokens += lease.estimated_tokens
         if record_selection:
-            runtime.last_selected_at = time.time()
+            runtime.last_selected_at = self._clock.time()
             runtime.version += 1
         _record_account_lease_acquired(kind)
         _record_account_inflight_leases(account_id, runtime)
@@ -506,7 +527,7 @@ class LoadBalancer:
                 "Reclaimed stale account lease account_id=%s kind=%s age_seconds=%.3f",
                 "<redacted>" if redact_sensitive_details else current.account_id,
                 current.kind,
-                time.monotonic() - current.acquired_at,
+                self._clock.monotonic() - current.acquired_at,
             )
         return True
 
@@ -516,7 +537,7 @@ class LoadBalancer:
         redact_sensitive_details: bool = False,
     ) -> None:
         settings = get_settings()
-        now = time.monotonic()
+        now = self._clock.monotonic()
         for runtime in self._runtime.values():
             if not runtime.leases:
                 continue
@@ -808,6 +829,7 @@ class LoadBalancer:
                 account=None,
                 error_message=selection_inputs.error_message,
                 error_code=selection_inputs.error_code,
+                continuity_owner_no_longer_exists=selection_inputs.error_code == CONTINUITY_OWNER_UNAVAILABLE,
             )
 
         selected_snapshot: Account | None = None
@@ -1050,7 +1072,7 @@ class LoadBalancer:
                     error_message=error_message,
                     error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
                 )
-            if required_continuity_owner and selection_error_code in (None, "hard_affinity_saturated"):
+            if required_continuity_owner and selection_error_code is None:
                 selection_error_code = CONTINUITY_OWNER_UNAVAILABLE
             if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message and selection_error_code is None:
                 return AccountSelection(
@@ -1114,6 +1136,7 @@ class LoadBalancer:
             return None
         result = select_account(
             states,
+            now=self._clock.time(),
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1137,7 +1160,7 @@ class LoadBalancer:
         # This is not a health observation, so it must not advance ``version``
         # and invalidate an operator Force Probe that is loading usage.
         previous_last_selected_at = runtime.last_selected_at
-        reserved_at = time.time()
+        reserved_at = self._clock.time()
         runtime.last_selected_at = reserved_at
         return ProbeReservation(
             account_id=result.account.account_id,
@@ -1176,7 +1199,7 @@ class LoadBalancer:
         # Only a selection that survived sticky persistence and final local
         # admission consumes the quiet interval. Unlike reserve/release, this
         # committed observation must invalidate older Force Probe settlement.
-        runtime.last_selected_at = time.time()
+        runtime.last_selected_at = self._clock.time()
         runtime.version += 1
         runtime.health_version += 1
         return True
@@ -1282,7 +1305,7 @@ class LoadBalancer:
             else:
                 # Administrative/runtime status affects routability, not who
                 # may own account-scoped upstream state. Capture this pool
-                # before PAUSED/REAUTH_REQUIRED/etc. can manufacture uniqueness.
+                # before PAUSED/DEACTIVATED/etc. can manufacture uniqueness.
                 continuity_owner_candidates = scoped_accounts
             if model and not accounts:
                 if not all_accounts:
@@ -1356,8 +1379,9 @@ class LoadBalancer:
                 return selection_inputs
 
             if effective_limit_name:
+                additional_quota_candidates = accounts
                 additional_filter = await self._filter_accounts_for_additional_limit(
-                    accounts,
+                    additional_quota_candidates,
                     model=model,
                     limit_name=effective_limit_name,
                     explicit_limit=additional_limit_name is not None,
@@ -1365,7 +1389,13 @@ class LoadBalancer:
                     require_fresh_evidence_account_ids=model_catalog_omitted_account_ids,
                 )
                 accounts = additional_filter.accounts
-                if not accounts:
+                if not accounts and all_accounts_require_reauthentication(
+                    additional_quota_candidates,
+                    self._encryptor,
+                    now=self._clock.time(),
+                ):
+                    accounts = additional_quota_candidates
+                elif not accounts:
                     selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},
@@ -1442,15 +1472,9 @@ class LoadBalancer:
             )
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
-                latest_primary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()
-                },
-                latest_secondary={
-                    account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
-                },
-                latest_monthly={
-                    account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
-                },
+                latest_primary={account_id: clone_row(entry) for account_id, entry in latest_primary.items()},
+                latest_secondary={account_id: clone_row(entry) for account_id, entry in latest_secondary.items()},
+                latest_monthly={account_id: clone_row(entry) for account_id, entry in latest_monthly.items()},
                 continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                 sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                 quota_planner_settings=quota_planner_settings,
@@ -1500,8 +1524,10 @@ class LoadBalancer:
                 latest_secondary=selection_inputs.latest_secondary,
                 latest_monthly=selection_inputs.latest_monthly,
                 runtime=self._runtime,
+                now=self._clock.time(),
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+                encryptor=self._encryptor,
             )
             selection_states = _filter_states_for_account_caps(
                 states,
@@ -1570,7 +1596,7 @@ class LoadBalancer:
         if not accounts:
             return _AdditionalLimitFilterResult(accounts=[], latest_primary={}, latest_secondary={})
 
-        fresh_since = _additional_usage_fresh_since()
+        fresh_since = _additional_usage_fresh_since(to_utc_naive(self._clock.now()))
         account_ids = [account.id for account in accounts]
         latest_primary = await _latest_additional_by_key(
             repos.additional_usage,
@@ -1604,6 +1630,7 @@ class LoadBalancer:
         eligible_accounts: list[Account] = []
         blocked_by_data = False
         blocked_by_exhaustion = False
+        now = self._clock.time()
         for account in accounts:
             eligibility = _additional_quota_eligibility(
                 account_id=account.id,
@@ -1615,6 +1642,7 @@ class LoadBalancer:
                 latest_secondary=latest_secondary,
                 fresh_primary=fresh_primary,
                 fresh_secondary=fresh_secondary,
+                now=now,
             )
             if eligibility == "eligible":
                 eligible_accounts.append(account)
@@ -1703,8 +1731,10 @@ class LoadBalancer:
             latest_secondary=selection_inputs.latest_secondary,
             latest_monthly=selection_inputs.latest_monthly,
             runtime=self._runtime,
+            now=self._clock.time(),
             routing_policy_override=selection_inputs.routing_policy_override,
             ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+            encryptor=self._encryptor,
         )
         if required_account_id is None:
             return states, account_map
@@ -1794,6 +1824,8 @@ class LoadBalancer:
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
             usage_exhaustion_states=usage_exhaustion_states,
             sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
+            overload_backoff_runtime=self._runtime,
+            clock=self._clock,
         )
 
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)
@@ -1820,18 +1852,15 @@ class LoadBalancer:
             self._selection_inputs_cache.invalidate()
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
-        """Downgrade *account* to its permanent-failure status and, when that
-        downgrade actually lands, exclude it from local routing.
+        """Downgrade *account* to its permanent-failure status.
 
         Returns whether the permanent downgrade applied (or was already in
         effect). When the guarded status write MISSES because a peer replica
         concurrently re-authed/imported and rotated ``refresh_token_encrypted``
-        (the DB row was repaired and left ACTIVE), the account is NOT marked
-        routing-unavailable in this replica's local overlay -- excluding a
-        freshly repaired healthy account would be a self-inflicted routing loss
-        that undermines the CAS guard. Only a real downgrade (CAS applied, or no
-        write needed because the primary refresh authority already CAS-wrote it)
-        both persists the failure status and applies the local exclusion.
+        (the DB row was repaired and left ACTIVE), the account keeps its
+        repaired state. A landed DEACTIVATED downgrade is excluded from local
+        routing; REAUTH_REQUIRED remains request-routable with its stored access
+        token while still blocking future refresh-token exchange.
         """
         lock = await self._get_account_lock(account.id)
         async with lock:
@@ -1862,12 +1891,9 @@ class LoadBalancer:
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            # Honor the guarded-CAS result: only exclude the account from local
-            # routing when the permanent downgrade actually applied. A CAS miss
-            # means a peer replica repaired/rotated the row (still ACTIVE), so
-            # keep the healthy account selectable here.
             if downgraded:
-                mark_account_routing_unavailable(account.id)
+                if state.status == AccountStatus.DEACTIVATED:
+                    mark_account_routing_unavailable(account.id)
                 if previous_status != state.status:
                     record_account_status_transition(
                         account,
@@ -1900,7 +1926,7 @@ class LoadBalancer:
             account_snapshot = _clone_account(account)
             state = self._state_for(account)
             state.error_count = max(state.error_count + count, minimum_error_count)
-            state.last_error_at = time.time()
+            state.last_error_at = self._clock.time()
             self._sync_runtime_state(account, state)
             runtime = self._runtime.get(account.id)
             if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
@@ -1961,11 +1987,12 @@ class LoadBalancer:
                 monthly_entry=monthly_entry,
                 secondary_entry=secondary_entry,
             )
+            now = self._clock.time()
             normalized_usage = _normalize_usage_inputs(
                 account=account,
                 primary_entry=primary_entry,
                 secondary_entry=effective_secondary_entry,
-                now_epoch=int(time.time()),
+                now_epoch=int(now),
             )
             health_primary_used = _health_tier_primary_used(
                 plan_type=account.plan_type,
@@ -1986,13 +2013,13 @@ class LoadBalancer:
                 primary_entry=primary_entry,
                 secondary_entry=effective_secondary_entry,
                 runtime=replace(runtime),
+                now=now,
             )
             account_status = normalized_state.status
-            if account_status != AccountStatus.ACTIVE:
+            if account_status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED):
                 return
 
             settings = get_settings()
-            now = time.time()
             was_probe_eligible = runtime.health_tier == HEALTH_TIER_PROBING
             if was_probe_eligible and (runtime.error_count > 0 or runtime.last_error_at is not None):
                 runtime.error_count = 0
@@ -2066,7 +2093,7 @@ class LoadBalancer:
         runtime = self._runtime.setdefault(account.id, RuntimeState())
         if expected_version is not None and runtime.version != expected_version:
             if selected:
-                runtime.last_selected_at = time.time()
+                runtime.last_selected_at = self._clock.time()
                 runtime.version += 1
             return False
 
@@ -2092,7 +2119,7 @@ class LoadBalancer:
             dirty = True
         health_dirty = dirty
         if selected:
-            runtime.last_selected_at = time.time()
+            runtime.last_selected_at = self._clock.time()
             dirty = True
         if dirty:
             runtime.version += 1
@@ -2196,9 +2223,12 @@ def _build_states(
     latest_secondary: Mapping[str, UsageHistory | AdditionalUsageHistory],
     latest_monthly: Mapping[str, UsageHistory],
     runtime: dict[str, RuntimeState],
+    now: float | None = None,
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
+    encryptor: TokenEncryptor | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
+    now = REAL_CLOCK.time() if now is None else now
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
 
@@ -2215,6 +2245,12 @@ def _build_states(
             primary_entry=latest_primary.get(account.id),
             secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
+            access_token_expires_at=(
+                account_access_token_expires_at(account, encryptor)
+                if account.status == AccountStatus.REAUTH_REQUIRED and encryptor is not None
+                else None
+            ),
+            now=now,
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
@@ -2346,198 +2382,86 @@ def _parse_additional_quota_routing_policies(raw_policies: str) -> dict[str, str
     return policies
 
 
-def _account_state_dependencies() -> AccountStateDependencies:
-    return AccountStateDependencies(
-        time=time.time,
-        utcnow=utcnow,
-        settings=get_settings(),
-        usage_refresh_interval_seconds=_usage_refresh_interval_seconds(),
-    )
-
-
-def _extract_credit_status(
-    *entries: UsageHistory | AdditionalUsageHistory | None,
-) -> tuple[bool | None, bool | None, float | None]:
-    return _reconstruct_credit_status(*entries)
-
-
-def _state_from_account(
-    *,
-    account: Account,
-    primary_entry: UsageHistory | AdditionalUsageHistory | None,
-    secondary_entry: UsageHistory | AdditionalUsageHistory | None,
-    runtime: RuntimeState,
-) -> AccountState:
-    health_before = (
-        runtime.health_tier,
-        runtime.drain_entered_at,
-        runtime.probe_success_streak,
-    )
-    state = _reconstruct_account_state(
-        account=account,
-        primary_entry=primary_entry,
-        secondary_entry=secondary_entry,
-        runtime=runtime,
-        dependencies=_account_state_dependencies(),
-    )
-    health_after = (
-        runtime.health_tier,
-        runtime.drain_entered_at,
-        runtime.probe_success_streak,
-    )
-    if health_after != health_before:
-        runtime.version += 1
-        runtime.health_version += 1
-    return state
-
-
-def _normalize_usage_inputs(
-    *,
-    account: Account,
-    primary_entry: _UsageWindowEntry | None,
-    secondary_entry: _UsageWindowEntry | None,
-    now_epoch: int,
-) -> _NormalizedUsageInputs:
-    """Normalize persisted usage for routing and explicit probe settlement."""
-    primary_used = primary_entry.used_percent if primary_entry else None
-    primary_reset = primary_entry.reset_at if primary_entry else None
-    primary_window_minutes = primary_entry.window_minutes if primary_entry else None
-    effective_secondary_entry = secondary_entry
-    if (
-        effective_secondary_entry is not None
-        and effective_secondary_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
-    ):
-        effective_secondary_entry = None
-    primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
-    secondary_row = usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None
-    # Weekly-only accounts may not emit a dedicated secondary row; treat the
-    # weekly primary row as quota-window input for balancer decisions. When
-    # both rows exist, prefer the newer weekly snapshot.
-    if primary_row is not None and usage_core.should_use_weekly_primary(primary_row, secondary_row):
-        effective_secondary_entry = primary_entry
-        primary_used = None
-        primary_reset = None
-        primary_window_minutes = None
-
-    secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
-    secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
-
-    # Expired rows describe prior windows. Zero derived values without
-    # rewriting history so stale samples cannot hold drain tiers forever.
-    if primary_used is not None and primary_reset is not None and primary_reset <= now_epoch:
-        primary_used = 0.0
-        primary_reset = None
-    # A strictly newer long-window row proves a later fetch no longer
-    # reported the short window, so phase planning drops the stale duration.
-    if (
-        primary_window_minutes is not None
-        and primary_entry is not None
-        and effective_secondary_entry is not None
-        and effective_secondary_entry is not primary_entry
-        and (effective_secondary_entry.recorded_at - primary_entry.recorded_at).total_seconds()
-        > _SIBLING_FETCH_MARGIN_SECONDS
-    ):
-        primary_window_minutes = None
-    if secondary_used is not None and secondary_reset is not None and secondary_reset <= now_epoch:
-        secondary_used = 0.0
-        secondary_reset = None
-
-    return _NormalizedUsageInputs(
-        primary_used=primary_used,
-        primary_reset=primary_reset,
-        primary_window_minutes=primary_window_minutes,
-        effective_secondary_entry=effective_secondary_entry,
-        secondary_used=secondary_used,
-        secondary_reset=secondary_reset,
-    )
-
-
-def _health_tier_primary_used(*, plan_type: str | None, primary_used: float | None) -> float | None:
-    """Drop primary usage when the plan has no primary-window capacity."""
-    # Storage may retain a legacy/synthetic primary row for free accounts. The
-    # health state machine must follow plan capacity, not the row's slot, or
-    # both ordinary routing and Force Probe can drain an account on a quota it
-    # does not have.
-    if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
-        return None
-    return primary_used
-
-
-def _sync_runtime_health_tier(
-    *,
-    account_id: str,
-    status: AccountStatus,
-    used_percent: float | None,
-    secondary_used_percent: float | None,
-    routing_policy: str,
-    runtime: RuntimeState,
-    now: float,
-    soft_drain_enabled: bool,
-) -> int:
-    before = (
-        runtime.health_tier,
-        runtime.drain_entered_at,
-        runtime.probe_success_streak,
-    )
-    if soft_drain_enabled:
-        new_tier = evaluate_health_tier(
-            AccountState(
-                account_id=account_id,
-                status=status,
-                used_percent=used_percent,
-                secondary_used_percent=secondary_used_percent,
-                last_error_at=runtime.last_error_at,
-                error_count=runtime.error_count,
-                health_tier=runtime.health_tier,
-                routing_policy=routing_policy,
-            ),
-            now=now,
-            drain_entered_at=runtime.drain_entered_at,
-            probe_success_streak=runtime.probe_success_streak,
-            # Drain/probe thresholds are fixed in
-            # ``app/core/balancer/logic.py`` (evaluate_health_tier defaults).
-        )
-        if new_tier == HEALTH_TIER_DRAINING and runtime.health_tier != HEALTH_TIER_DRAINING:
-            runtime.drain_entered_at = now
-            runtime.probe_success_streak = 0
-        if new_tier == HEALTH_TIER_HEALTHY:
-            runtime.drain_entered_at = None
-            runtime.probe_success_streak = 0
-        runtime.health_tier = new_tier
-    else:
-        runtime.health_tier = HEALTH_TIER_HEALTHY
-        runtime.drain_entered_at = None
-        runtime.probe_success_streak = 0
-
-    after = (
-        runtime.health_tier,
-        runtime.drain_entered_at,
-        runtime.probe_success_streak,
-    )
-    if after != before:
-        runtime.version += 1
-        runtime.health_version += 1
-    return runtime.health_tier
-
-
 def background_recovery_state_from_account(
     *,
     account: Account,
     primary_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
 ) -> AccountState:
-    return _reconstruct_background_recovery_state(
+    """Evaluate recovery without live runtime state.
+
+    Seed a throwaway runtime from the persisted block marker so post-block usage
+    can clear stale reset guards after a balancer restart.
+    """
+
+    runtime = RuntimeState()
+    blocked_at = float(account.blocked_at) if account.blocked_at is not None else None
+    now = REAL_CLOCK.time()
+    reset_at = float(account.reset_at) if account.reset_at is not None else None
+    valid_reset_at = plausible_rate_limit_reset_at(reset_at, now=now)
+
+    if blocked_at is not None:
+        runtime.blocked_at = blocked_at
+
+    if account.status == AccountStatus.RATE_LIMITED and blocked_at is not None and valid_reset_at is not None:
+        runtime.cooldown_until = valid_reset_at
+    state = _state_from_account(
         account=account,
         primary_entry=primary_entry,
         secondary_entry=secondary_entry,
-        dependencies=_account_state_dependencies(),
+        runtime=runtime,
+        now=now,
     )
+    if account.status == AccountStatus.RATE_LIMITED:
+        freshness_entry = _rate_limited_freshness_entry(
+            account=account,
+            primary_entry=primary_entry,
+            long_window_entry=secondary_entry,
+            now=now,
+        )
+        # Keep elapsed resets intact until _state_from_account evaluates the
+        # selector's normal expiry path; only freshness gates the final repair.
+        if blocked_at is not None and reset_at is not None and reset_at <= now:
+            minimum_floor_deadline = blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+            # An early explicit reset does not let scheduler reconciliation
+            # bypass the persisted post-429 minimum floor.
+            if now < minimum_floor_deadline or not _usage_entry_recorded_after_block(freshness_entry, blocked_at):
+                return replace(
+                    state,
+                    status=AccountStatus.RATE_LIMITED,
+                    reset_at=reset_at,
+                    blocked_at=blocked_at,
+                    cooldown_until=max(reset_at, minimum_floor_deadline),
+                )
+        elif blocked_at is None and reset_at is not None and reset_at <= now:
+            if not _usage_entry_is_recent_available(freshness_entry, now=now):
+                return replace(
+                    state,
+                    status=AccountStatus.RATE_LIMITED,
+                    reset_at=reset_at,
+                    blocked_at=None,
+                    cooldown_until=None,
+                )
+        if reset_at is None:
+            return replace(
+                state,
+                status=AccountStatus.RATE_LIMITED,
+                reset_at=None,
+                blocked_at=blocked_at,
+                cooldown_until=None,
+            )
+    return state
 
 
-def _usage_refresh_interval_seconds() -> int:
-    settings = config_settings.get_settings()
-    return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
+def _select_long_window_entry(
+    *,
+    account: Account,
+    monthly_entry: UsageHistory | None,
+    secondary_entry: UsageHistory | AdditionalUsageHistory | None,
+) -> UsageHistory | AdditionalUsageHistory | None:
+    if monthly_entry is not None and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
+        return monthly_entry
+    return secondary_entry
 
 
 def _filter_accounts_for_model(
@@ -2571,11 +2495,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:
-    return [
-        account
-        for account in accounts
-        if account.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
-    ]
+    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
 
 
 def _mapped_model_has_registry_entry(model: str | None) -> bool:
@@ -2596,32 +2516,14 @@ def _first_not_none(
     return None
 
 
-def _clone_usage_history(entry: UsageHistory | AdditionalUsageHistory) -> UsageHistory | AdditionalUsageHistory:
-    if isinstance(entry, AdditionalUsageHistory):
-        data = {column.name: getattr(entry, column.name) for column in AdditionalUsageHistory.__table__.columns}
-        return AdditionalUsageHistory(**data)
-    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
-    return UsageHistory(**data)
-
-
-def _clone_standard_usage_history(entry: UsageHistory) -> UsageHistory:
-    data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
-    return UsageHistory(**data)
-
-
 def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInputs:
     return _SelectionInputs(
         accounts=[_clone_account(account) for account in selection_inputs.accounts],
-        latest_primary={
-            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_primary.items()
-        },
+        latest_primary={account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_primary.items()},
         latest_secondary={
-            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
+            account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_secondary.items()
         },
-        latest_monthly={
-            account_id: _clone_standard_usage_history(entry)
-            for account_id, entry in selection_inputs.latest_monthly.items()
-        },
+        latest_monthly={account_id: clone_row(entry) for account_id, entry in selection_inputs.latest_monthly.items()},
         continuity_owner_candidates=(
             None
             if selection_inputs.continuity_owner_candidates is None
@@ -2668,3 +2570,27 @@ def _format_degraded_error_message(message: str | None) -> str:
     reason = degradation_status.get("reason") or "upstream capacity is currently unavailable"
     base_message = message or "Upstream unavailable"
     return f"{base_message}. Service is operating in degraded mode: {reason}"
+
+
+def _state_from_account(
+    *,
+    account: Account,
+    primary_entry: UsageHistory | AdditionalUsageHistory | None,
+    secondary_entry: UsageHistory | AdditionalUsageHistory | None,
+    runtime: RuntimeState,
+    access_token_expires_at: float | None = None,
+    now: float | None = None,
+) -> AccountState:
+    now = REAL_CLOCK.time() if now is None else now
+    health_before = (runtime.health_tier, runtime.drain_entered_at, runtime.probe_success_streak)
+    state = _reconstruct_account_state(
+        account=account,
+        primary_entry=primary_entry,
+        secondary_entry=secondary_entry,
+        runtime=runtime,
+        access_token_expires_at=access_token_expires_at,
+        now=now,
+    )
+    if health_before != (runtime.health_tier, runtime.drain_entered_at, runtime.probe_success_streak):
+        runtime.health_version += 1
+    return state

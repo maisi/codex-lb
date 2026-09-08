@@ -83,3 +83,7 @@ one-line, reviewable diff rather than an argument.
   graph (not stdlib-only) — deferred to the simplicity backlog.
 - Docs-site pages are intentionally unbudgeted: depth is supposed to move
   there.
+
+## September 2026 fork integration
+
+Fork synchronization may import published upstream beta metadata without authoring a release. CI fetches official Soju06/codex-lb tags into refs/upstream-release and requires tag ancestry plus matching values in all release-managed version files. For example, a feature branch containing v1.25.0-beta.4 can import that metadata, but a release/beta-* branch still needs ordinary validation evidence. Missing tags or mismatches fail closed through the normal beta guard; publication guards are unchanged. See [spec.md](spec.md) for the normative contract.

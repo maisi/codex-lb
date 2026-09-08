@@ -73,6 +73,11 @@ if PROMETHEUS_AVAILABLE:
         "Upstream request duration",
         registry=REGISTRY,
     )
+    upstream_reasoning_replay_400_total = Counter(
+        "codex_lb_upstream_reasoning_replay_400_total",
+        "Total upstream HTTP 400 rejections whose message references reasoning items",
+        registry=REGISTRY,
+    )
     image_requests_total = Counter(
         "codex_lb_image_requests_total",
         "Total OpenAI-compatible image route requests",
@@ -314,6 +319,34 @@ if PROMETHEUS_AVAILABLE:
         ["outcome"],
         registry=REGISTRY,
     )
+    http_bridge_spool_cleanup_runs_total = Counter(
+        "codex_lb_http_bridge_spool_cleanup_runs_total",
+        "Total durable HTTP bridge transcript cleanup passes by outcome",
+        ["outcome"],
+        registry=REGISTRY,
+    )
+    http_bridge_spool_cleanup_deleted_operations_total = Counter(
+        "codex_lb_http_bridge_spool_cleanup_deleted_operations_total",
+        "Total durable HTTP bridge operations deleted by transcript retention",
+        registry=REGISTRY,
+    )
+    http_bridge_spool_cleanup_duration_seconds = Histogram(
+        "codex_lb_http_bridge_spool_cleanup_duration_seconds",
+        "Durable HTTP bridge transcript cleanup pass duration",
+        registry=REGISTRY,
+    )
+    http_bridge_spool_cleanup_backlog_likely = Gauge(
+        "codex_lb_http_bridge_spool_cleanup_backlog_likely",
+        "Whether the latest durable transcript cleanup pass stopped with likely backlog",
+        registry=REGISTRY,
+        **({"multiprocess_mode": "livemostrecent"} if MULTIPROCESS_MODE else {}),
+    )
+    http_bridge_operation_abandonment_total = Counter(
+        "codex_lb_http_bridge_operation_abandonment_total",
+        "Total ambiguous HTTP bridge operations fenced as abandoned",
+        ["source_state"],
+        registry=REGISTRY,
+    )
     event_loop_lag_seconds = Gauge(
         "codex_lb_event_loop_lag_seconds",
         "Sampled event-loop scheduling lag (asyncio.sleep drift) in seconds",
@@ -372,6 +405,7 @@ else:
     upstream_requests_total: CounterLike | None = None
     upstream_transport_decisions_total: CounterLike | None = None
     upstream_request_duration_seconds: HistogramLike | None = None
+    upstream_reasoning_replay_400_total: CounterLike | None = None
     image_requests_total: CounterLike | None = None
     image_request_duration_seconds: HistogramLike | None = None
     active_connections: GaugeLike | None = None
@@ -410,6 +444,11 @@ else:
     http_bridge_stuck_retire_total: CounterLike | None = None
     account_status_transition_total: CounterLike | None = None
     http_bridge_retry_circuit_total: CounterLike | None = None
+    http_bridge_spool_cleanup_runs_total: CounterLike | None = None
+    http_bridge_spool_cleanup_deleted_operations_total: CounterLike | None = None
+    http_bridge_spool_cleanup_duration_seconds: HistogramLike | None = None
+    http_bridge_spool_cleanup_backlog_likely: GaugeLike | None = None
+    http_bridge_operation_abandonment_total: CounterLike | None = None
     event_loop_lag_seconds: GaugeLike | None = None
     event_loop_lag_warnings_total: CounterLike | None = None
     stream_keepalive_sent_total: CounterLike | None = None
@@ -463,6 +502,11 @@ __all__ = [
     "http_bridge_prewarm_total",
     "prompt_cache_continuation_total",
     "http_bridge_retry_circuit_total",
+    "http_bridge_spool_cleanup_backlog_likely",
+    "http_bridge_spool_cleanup_deleted_operations_total",
+    "http_bridge_spool_cleanup_duration_seconds",
+    "http_bridge_spool_cleanup_runs_total",
+    "http_bridge_operation_abandonment_total",
     "http_bridge_stuck_retire_total",
     "stream_keepalive_sent_total",
     "stream_idle_timeout_total",
@@ -477,6 +521,7 @@ __all__ = [
     "requests_total",
     "stream_pool_capacity",
     "stream_pool_inflight",
+    "upstream_reasoning_replay_400_total",
     "upstream_request_duration_seconds",
     "upstream_requests_total",
     "upstream_transport_decisions_total",

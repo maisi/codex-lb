@@ -115,7 +115,12 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def replace_limits(self, key_id: str, limits: list[ApiKeyLimit]) -> list[ApiKeyLimit]: ...
 
     async def upsert_limits(
-        self, key_id: str, limits: list[ApiKeyLimit], *, commit: bool = True
+        self,
+        key_id: str,
+        limits: list[ApiKeyLimit],
+        *,
+        commit: bool = True,
+        preserve_matched_usage: bool = False,
     ) -> list[ApiKeyLimit]: ...
     async def replace_account_assignments(
         self, key_id: str, account_ids: list[str], *, commit: bool = True
@@ -402,8 +407,7 @@ def _compute_pooled_credits(
     account_map = {
         a.id: a
         for a in all_accounts
-        if a.id in requested_account_ids
-        and a.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+        if a.id in requested_account_ids and a.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
     }
     account_ids = set(account_map)
 
@@ -602,7 +606,13 @@ class ApiKeysService:
             for row in rows
         ]
 
-    async def update_key(self, key_id: str, payload: ApiKeyUpdateData) -> ApiKeyData:
+    async def update_key(
+        self,
+        key_id: str,
+        payload: ApiKeyUpdateData,
+        *,
+        _retry_attempt: int = 0,
+    ) -> ApiKeyData:
         expires_at = _normalize_expires_at(payload.expires_at) if payload.expires_at_set else None
         existing = await self._repository.get_by_id(key_id)
         if existing is None:
@@ -773,11 +783,20 @@ class ApiKeysService:
                 await self._repository.replace_source_assignments(key_id, assigned_source_ids, commit=False)
 
             if limit_rows is not None:
-                await self._repository.upsert_limits(key_id, limit_rows, commit=False)
+                await self._repository.upsert_limits(
+                    key_id,
+                    limit_rows,
+                    commit=False,
+                    preserve_matched_usage=not payload.reset_usage,
+                )
 
             await self._repository.commit()
         except Exception as exc:
             await self._repository.rollback()
+            if isinstance(exc, OperationalError) and _is_sqlite_database_locked(exc):
+                if _retry_attempt < _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                    await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**_retry_attempt))
+                    return await self.update_key(key_id, payload, _retry_attempt=_retry_attempt + 1)
             if isinstance(exc, IntegrityError) and _is_reasoning_policy_constraint_error(exc):
                 raise ApiKeyValidationError(
                     "enforced_reasoning_effort and allowed_reasoning_efforts cannot be configured together"
@@ -1418,7 +1437,7 @@ def _get_usage_sections_with_default(row: ApiKey) -> str:
 
 
 def _generate_plain_key() -> str:
-    return f"sk-clb-{secrets.token_urlsafe(32)}"
+    return f"sk-clb-{secrets.token_hex(24)}"
 
 
 def _hash_key(plain_key: str) -> str:
@@ -2057,6 +2076,8 @@ def _is_sqlite_database_locked(exc: OperationalError) -> bool:
         "database is locked" in message
         or "database table is locked" in message
         or "database schema is locked" in message
+        or "sqlite_busy_snapshot" in message
+        or "busy_snapshot" in message
     )
 
 
