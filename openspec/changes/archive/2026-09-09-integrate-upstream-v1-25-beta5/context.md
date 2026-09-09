@@ -10,7 +10,9 @@ Local evidence: 296 initial routing/settings tests; full unit run 8,985 passed w
 
 Settings screenshots captured from the actual beta4 fork and integrated beta5 source with the repository's seeded screenshot fixtures and Advanced settings expanded:
 
-- [Before](../../../docs/screenshots/beta5-settings-before.jpg)
-- [After](../../../docs/screenshots/beta5-settings-after.jpg)
+- [Before](../../../../docs/screenshots/beta5-settings-before.jpg)
+- [After](../../../../docs/screenshots/beta5-settings-after.jpg)
 
 For example, timeout and resilience tuning now appear in the dashboard while vending remains opt-in deployment topology. Imported upstream configuration keeps inherit precedence; fork account mappings and shared credentials are not dashboard behavior settings.
+
+GitHub run `34327487742` verified all remaining integration-core shards, PostgreSQL tests and migration checks, browser smoke, packaging, Docker, Helm/kind and Nix. Its four substantive failures were the subsequently corrected locale parity, native-test harness, health-generation increment and retained-fork-head assertions. Each affected test suite passed locally after those corrections. This is implementation verification for archival; merge still waits for the actual final-head GitHub rollup.
