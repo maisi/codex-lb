@@ -25,6 +25,7 @@ import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage as _FakeUpstreamMessage
 from app.core.config.settings import Settings
+from app.core.errors import PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
 from app.core.openai.model_registry import ModelRegistry
 from app.core.utils.request_id import (
     reset_request_id,
@@ -8322,7 +8323,7 @@ async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_
 
     assert second.status_code == 502
     assert second.json()["error"] == {
-        "message": "Previous response owner account is unavailable; retry later.",
+        "message": PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
         "type": "server_error",
         "code": "previous_response_owner_unavailable",
     }
@@ -9101,6 +9102,134 @@ async def test_backend_responses_http_bridge_real_selector_recovers_full_resend_
     follow_up_payload = json.loads(alternate_upstream.sent_text[1])
     assert follow_up_payload["previous_response_id"] == second_response["id"]
     assert degraded_reasons == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("owner_status", [AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED])
+@pytest.mark.parametrize("replay_case", ["account-neutral", "file-pinned", "missing-result", "unknown-field"])
+@pytest.mark.parametrize("explicit_anchor", [False, True])
+async def test_http_bridge_goal_followup_after_complete_tool_batch_leaves_unavailable_owner(
+    async_client, app_instance, monkeypatch, path, owner_status, replay_case, explicit_anchor
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_id = await _import_account(async_client, "acc_goal_tool_owner", "goal-tool-owner@example.com")
+    owner = await _get_account(owner_id)
+    owner_upstream = _ClosingInterruptedCustomToolUpstreamWebSocket()
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_goal_replacement")
+    connected = []
+
+    async def ensure_fresh(self, account, *, force=False, timeout_seconds):
+        return account
+
+    async def connect(headers, access_token, account_id_header, *, base_url=None, session=None):
+        connected.append(account_id_header)
+        return owner_upstream if account_id_header == owner.chatgpt_account_id else replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    session_id = "goal-tool-followup-session"
+    history = [{"role": "user", "content": [{"type": "input_text", "text": "Inspect the workspace"}]}]
+    body = {"model": "gpt-5.1", "instructions": "Continue the diagnostic", "input": history, "stream": True}
+    first = await _collect_sse_events(async_client, path, json_body=body, headers={"session_id": session_id})
+    call = next(event["item"] for event in first if event["type"] == "response.output_item.done")
+    service = get_proxy_service_for_app(app_instance)
+    lookup = await service._durable_bridge.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value=session_id,
+        api_key_id=None,
+        turn_state=None,
+        session_header=session_id,
+        previous_response_id=None,
+    )
+    assert lookup is not None
+    assert lookup.latest_pending_tool_calls == {call["call_id"]: "custom_tool_call"}
+
+    replacement_id = await _import_account(
+        async_client, "acc_goal_tool_replacement", "goal-tool-replacement@example.com"
+    )
+    replacement = await _get_account(replacement_id)
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account)
+            .where(Account.id == owner_id)
+            .values(status=owner_status, reset_at=int(time.time()) + 3600, blocked_at=int(time.time()))
+        )
+        await session.commit()
+    full_resend = [
+        *history,
+        call,
+        {"type": "custom_tool_call_output", "call_id": call["call_id"], "output": "/workspace"},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": '<codex_internal_context source="goal">Continue the goal.</codex_internal_context>',
+                }
+            ],
+        },
+    ]
+    if explicit_anchor:
+        body["previous_response_id"] = lookup.latest_response_id
+    record_failure = AsyncMock(wraps=service._record_http_bridge_retry_circuit_failure)
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    if replay_case == "file-pinned":
+        await service._pin_file_account("file_goal_owner", owner_id)
+        fresh_content = full_resend[-1]["content"]
+        assert isinstance(fresh_content, list)
+        fresh_content.append({"type": "input_file", "file_id": "file_goal_owner"})
+    elif replay_case == "missing-result":
+        full_resend.pop(2)
+    elif replay_case == "unknown-field":
+        full_resend[-1]["owner_reference"] = "owner-scoped"
+    if replay_case != "account-neutral":
+        rejected = await async_client.post(
+            path, json={**body, "input": full_resend}, headers={"session_id": session_id}
+        )
+        assert rejected.status_code in (502, 503)
+        if replay_case != "file-pinned":
+            error = rejected.json()["error"]
+            assert error["code"] == "previous_response_owner_unavailable"
+            assert "complete account-neutral history" in error["message"]
+            assert "without previous_response_id" in error["message"]
+            assert "start a new session" in error["message"]
+        for _ in range(2):
+            repeated = await async_client.post(
+                path, json={**body, "input": full_resend}, headers={"session_id": session_id}
+            )
+            assert repeated.status_code == rejected.status_code
+            assert repeated.json()["error"]["code"] == rejected.json()["error"]["code"]
+        record_failure.assert_not_awaited()
+        assert connected == [owner.chatgpt_account_id]
+        assert not replacement_upstream.sent_text
+        return
+    second = await _collect_sse_events(
+        async_client,
+        path,
+        json_body={**body, "input": full_resend},
+        headers={"session_id": session_id},
+    )
+    assert second[-1]["response"]["id"] == "resp_goal_replacement_1"
+    assert connected == [owner.chatgpt_account_id, replacement.chatgpt_account_id]
+    assert len(owner_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 1
+    replay = json.loads(replacement_upstream.sent_text[0])
+    assert "previous_response_id" not in replay
+    assert replay["input"] == [{k: v for k, v in item.items() if k != "id"} for item in full_resend]
+    third = await _collect_sse_events(
+        async_client,
+        path,
+        json_body={
+            **body,
+            "input": [{"role": "user", "content": "Continue on the replacement"}],
+            "previous_response_id": second[-1]["response"]["id"],
+        },
+        headers={"session_id": session_id},
+    )
+    assert third[-1]["response"]["id"] == "resp_goal_replacement_2"
+    assert connected == [owner.chatgpt_account_id, replacement.chatgpt_account_id]
 
 
 @pytest.mark.asyncio

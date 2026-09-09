@@ -38,6 +38,7 @@ from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # 
 from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
 from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     openai_error,
     response_failed_event,
@@ -2194,7 +2195,7 @@ class _HTTPBridgeStreamingMixin:
                 502,
                 openai_error(
                     "previous_response_owner_unavailable",
-                    "Previous response owner account is unavailable; retry later.",
+                    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
                 ),
             )
             _record_continuity_fail_closed(
