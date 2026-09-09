@@ -772,6 +772,33 @@ def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
 
 
+def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether the one permitted server-side anchored replay is unused."""
+    settings = _service_get_settings()
+    return (
+        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
+        in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and (
+            request_state.replay_count == 0
+            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+            == "server_indefinite_recovery"
+        )
+    )
+
+
+def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    payload = openai_error(
+        "previous_response_not_found",
+        "Previous response was not found; retry without previous_response_id.",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+    return payload
+
+
 def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
     return cast(Callable[[Any | None], float], _service_global("_proxy_admission_wait_timeout_seconds"))(settings)
 
@@ -2083,6 +2110,26 @@ def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -
     ):
         return session.downstream_turn_state
     return session.upstream_turn_state
+
+
+def _http_bridge_reconnect_turn_state(
+    session: "_HTTPBridgeSession",
+    account_id: str,
+    owner_rebind_affinity: _AffinityPolicy | None,
+) -> str | None:
+    """Return the turn state the replacement handshake for ``account_id`` may carry.
+
+    The turn state was learned from the retired socket and belongs to the
+    account that issued it. Only a reconnect to that same account offers it
+    again; a replacement account (or an owner rebind) opens its socket with no
+    turn state -- the same condition under which the reconnect clears the
+    session's turn state once the replacement socket is open, so the handshake
+    cannot leak what the session-side cleanup is about to drop
+    (``responses-api-compat``: "Cross-account bridge retries clear turn-state").
+    """
+    if owner_rebind_affinity is not None or account_id != session.account.id:
+        return None
+    return _preferred_http_bridge_reconnect_turn_state(session)
 
 
 def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -> tuple[str, str | None]:
@@ -3837,6 +3884,7 @@ for _helper_name in (
     "_http_bridge_session_retiring_with_visible_requests",
     "_http_bridge_payload_looks_like_full_resend",
     "_preferred_http_bridge_reconnect_turn_state",
+    "_http_bridge_reconnect_turn_state",
     "_http_bridge_turn_state_alias_key",
     "_http_bridge_previous_response_alias_key",
     "_http_bridge_session_allows_api_key",

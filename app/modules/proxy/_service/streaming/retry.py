@@ -34,6 +34,7 @@ from app.core.resilience.network_recovery import (
     NetworkRecoveryDecision,
     ProcessNetworkRecovery,
 )
+from app.core.resilience.toggles import bind_resilience_toggles, set_resilience_toggles
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.retry import backoff_seconds
@@ -63,6 +64,7 @@ from app.modules.proxy._service.support import (
     _TerminalStreamError,
     _TransientStreamError,
     _WebSocketUpstreamControl,
+    configured_upstream_stream_transport,
 )
 from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
@@ -174,7 +176,6 @@ def _verified_cross_transport_fresh_replay(
 def _effective_http_downstream_transport_policy(
     api_key: ApiKeyData | None,
     dashboard_settings: Any,
-    base_settings: Any,
 ) -> tuple[str, bool]:
     override = getattr(api_key, "transport_policy_override", None) if api_key is not None else None
     if override is not None:
@@ -182,14 +183,11 @@ def _effective_http_downstream_transport_policy(
     dashboard_policy = getattr(dashboard_settings, "http_downstream_transport_policy", None)
     if isinstance(dashboard_policy, str) and dashboard_policy:
         return dashboard_policy, False
-    base_policy = getattr(base_settings, "http_downstream_transport_policy", _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT)
-    return base_policy, False
+    return _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT, False
 
 
-def _resolved_configured_stream_transport(dashboard_settings: Any, base_settings: Any) -> tuple[str, bool]:
-    configured = getattr(dashboard_settings, "upstream_stream_transport", "default")
-    if configured == "default":
-        configured = getattr(base_settings, "upstream_stream_transport", "auto")
+def _resolved_configured_stream_transport(dashboard_settings: Any) -> tuple[str, bool]:
+    configured = configured_upstream_stream_transport(dashboard_settings)
     return configured, configured in ("http", "websocket")
 
 
@@ -203,21 +201,14 @@ def _http_bridge_allowed_by_transport_policy(
 ) -> bool:
     """Apply ordinary HTTP transport precedence before entering the WS bridge."""
 
-    configured_transport, explicit_transport = _resolved_configured_stream_transport(
-        dashboard_settings,
-        base_settings,
-    )
+    configured_transport, explicit_transport = _resolved_configured_stream_transport(dashboard_settings)
     if explicit_transport:
         return configured_transport == "websocket"
     if _is_native_codex_request(headers):
         # A first-party Codex client owns its WebSocket -> HTTP fallback. Once
         # it submits HTTP, sticky metadata must not promote it back to WS.
         return False
-    policy, _override_applied = _effective_http_downstream_transport_policy(
-        api_key,
-        dashboard_settings,
-        base_settings,
-    )
+    policy, _override_applied = _effective_http_downstream_transport_policy(api_key, dashboard_settings)
     return _resolve_http_downstream_transport(policy, payload=payload, headers=headers) == "websocket"
 
 
@@ -328,6 +319,11 @@ class _StreamingRetryMixin:
         start = clock.monotonic()
         base_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
+        # C2-3 resilience toggles: resolved from this request's snapshot and
+        # bound to the task so the upstream client gates its breaker the same
+        # way; rebound before every upstream attempt because a keepalive yield
+        # can move this generator to another task (ContextVars follow tasks).
+        resilience = bind_resilience_toggles(settings, startup_settings=base_settings)
         concurrency_caps = _facade().effective_account_concurrency_caps(settings)
         deadline = start + _facade()._stream_request_budget_seconds(
             base_settings,
@@ -354,7 +350,7 @@ class _StreamingRetryMixin:
 
         upstream_stream_transport = upstream_stream_transport_override
         if upstream_stream_transport is None:
-            configured_transport, explicit_transport = _resolved_configured_stream_transport(settings, base_settings)
+            configured_transport, explicit_transport = _resolved_configured_stream_transport(settings)
             image_bypass = _facade()._responses_request_uses_image_generation(
                 payload
             ) or _facade()._responses_request_contains_input_image(payload)
@@ -382,9 +378,7 @@ class _StreamingRetryMixin:
                     upstream_transport_policy_label = policy
                     upstream_stream_transport = "http"
                 else:
-                    policy, override_applied = _effective_http_downstream_transport_policy(
-                        api_key, settings, base_settings
-                    )
+                    policy, override_applied = _effective_http_downstream_transport_policy(api_key, settings)
                     upstream_transport_policy_label = policy
                     policy_transport = _resolve_http_downstream_transport(policy, payload=payload, headers=headers)
                     upstream_stream_transport = "http" if policy_transport == "http" else configured_transport
@@ -885,6 +879,9 @@ class _StreamingRetryMixin:
 
             while True:
                 settlement.reset()
+                # Rebind per attempt: a capacity keepalive may have handed this
+                # generator to another task since the request-entry binding.
+                set_resilience_toggles(resilience)
                 stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
                     proxy._remaining_budget_seconds(deadline)
                 )
@@ -2098,6 +2095,7 @@ class _StreamingRetryMixin:
                     transient_retries = 0
                     allow_retry_flag = attempt < max_attempts - 1
                     while True:
+                        set_resilience_toggles(resilience)  # rebind per attempt (task handoff)
                         stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
                             proxy._remaining_budget_seconds(deadline),
                         )
@@ -2441,7 +2439,7 @@ class _StreamingRetryMixin:
                                     http_status=tex.status_code,
                                     phase="first_event",
                                 )
-                                if getattr(base_settings, "deterministic_failover_enabled", True):
+                                if resilience.deterministic_failover_enabled:
                                     action = failover_decision(
                                         failure_class=classified["failure_class"],
                                         downstream_visible=settlement.downstream_visible,
@@ -3089,7 +3087,7 @@ class _StreamingRetryMixin:
                             candidates_remaining = max_attempts - attempt - 1
                             if retry_exc.status_code == 401 and candidates_remaining > 0:
                                 action = "failover_next"
-                            elif getattr(base_settings, "deterministic_failover_enabled", True):
+                            elif resilience.deterministic_failover_enabled:
                                 action = failover_decision(
                                     failure_class=classified["failure_class"],
                                     downstream_visible=False,
