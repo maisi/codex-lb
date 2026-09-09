@@ -603,9 +603,11 @@ class LoadBalancer:
         allow_usage_exhaustion_error: bool = True,
         api_key_id: str | None = None,
         api_key_stream_fair_share_threshold_pct: int = 0,
+        dashboard_settings: object | None = None,
     ) -> AccountSelection:
         return await self._select_account(
             sticky_key,
+            dashboard_settings=dashboard_settings,
             sticky_kind=sticky_kind,
             reallocate_sticky=reallocate_sticky,
             sticky_source=sticky_source,
