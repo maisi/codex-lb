@@ -265,3 +265,9 @@ OpenSpec change first.
 - Post-deploy: correlate retry-circuit `opened`, `half_open`, and `reset` events with bridge `pending` and `response_events_seen` diagnostics. An idle `pending=0` retirement must not precede an immediate two-failure cooldown.
 - Post-deploy: monitor `previous_response_not_found` on `/backend-api/codex/responses`; recurring spikes show repeated continuity failures, which may come from malformed client identifiers, server-side invalidation, or connection lifecycle. Clients should perform the documented full-context retry without `previous_response_id`. Investigate socket-lifecycle remediation only when a separate close-reason, reconnect, or transport diagnostic correlates with the failures.
 - Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`
+
+## Tool-complete owner recovery
+
+When a full resend matches its durable prefix and settles every recorded tool call, a trailing user instruction is now replayable through the existing account-neutral recovery path. The complete tool batch and new input are retained; stored account-bound anchors are removed only after proof. For example, a rate-limited owner can yield a fully replayable goal continuation to another eligible account, and subsequent anchored turns stay on the replacement.
+
+Missing results, account-owned files, unknown ownership fields and opaque compaction still prevent migration. An owner-unavailable error now explains that the client must send complete account-neutral history without the old response ID or start a new session. This does not make encrypted checkpoints portable. See the normative requirements in [spec.md](spec.md).
