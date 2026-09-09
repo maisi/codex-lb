@@ -13,6 +13,7 @@ Upstream advanced another 20 commits after the beta5 integration snapshot, throu
 ### Modified Capabilities
 
 - `database-migrations`: preserve fork policy while adding upstream report aggregates and routing settings.
+- `report-aggregation`: retain historical API-key filters without full report computation.
 
 ## Impact
 
