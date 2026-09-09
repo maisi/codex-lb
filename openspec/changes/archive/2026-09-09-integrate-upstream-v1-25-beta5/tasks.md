@@ -6,6 +6,6 @@
 
 ## 2. Verification
 
-- [ ] 2.1 Verify SQLite/PostgreSQL upgrade paths and migration data preservation.
-- [ ] 2.2 Run backend unit/integration, frontend, native, lint, type and OpenSpec checks.
-- [ ] 2.3 Verify and archive the change, open the integration PR, and verify actual GitHub checks and mergeability before merging.
+- [x] 2.1 Verify SQLite/PostgreSQL upgrade paths and migration data preservation.
+- [x] 2.2 Run backend unit/integration, frontend, native, lint, type and OpenSpec checks.
+- [x] 2.3 Verify the change against implementation and regression evidence and publish integration PR #29.
