@@ -2509,7 +2509,9 @@ class _HTTPBridgeUpstreamEventsMixin:
         previous_completion_pending = session.continuation_completion_pending
         session.continuation_completion_pending = True
         try:
-            await self._process_http_bridge_upstream_text_settlement(session, text, scheduler=scheduler, clock=clock)
+            await self._process_http_bridge_upstream_text_settlement(
+                session, text, message=message, scheduler=scheduler, clock=clock
+            )
         finally:
             session.continuation_completion_pending = previous_completion_pending
 
@@ -2518,6 +2520,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
         text: str,
         *,
+        message: UpstreamWebSocketMessage | None = None,
         scheduler: Scheduler | None = None,
         clock: Clock | None = None,
     ) -> None:
