@@ -27,6 +27,12 @@ from app.core.balancer import (
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
+from app.core.clients.proxy import _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE as _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE
+from app.core.clients.proxy import (
+    _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE as _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE,
+)
+from app.core.clients.proxy import _UPSTREAM_RESPONSE_CREATE_MAX_BYTES as _UPSTREAM_RESPONSE_CREATE_MAX_BYTES
+from app.core.clients.proxy import _UPSTREAM_RESPONSE_CREATE_WARN_BYTES as _UPSTREAM_RESPONSE_CREATE_WARN_BYTES
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy as CodexControlRequestPrivacyPolicy
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
@@ -44,6 +50,24 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     push_compact_timeout_overrides,
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
+)
+from app.core.clients.proxy import _is_inline_image_reference as _is_inline_image_reference
+from app.core.clients.proxy import (
+    _response_create_inline_image_notice_item as _response_create_inline_image_notice_item,
+)
+from app.core.clients.proxy import (
+    _response_create_inline_image_notice_part as _response_create_inline_image_notice_part,
+)
+from app.core.clients.proxy import _response_create_recent_suffix_start as _response_create_recent_suffix_start
+from app.core.clients.proxy import (
+    _response_create_too_large_error_envelope as _response_create_too_large_error_envelope,
+)
+from app.core.clients.proxy import _should_slim_historical_tool_output as _should_slim_historical_tool_output
+from app.core.clients.proxy import _slim_historical_response_content as _slim_historical_response_content
+from app.core.clients.proxy import _slim_historical_response_content_part as _slim_historical_response_content_part
+from app.core.clients.proxy import _slim_historical_response_input_item as _slim_historical_response_input_item
+from app.core.clients.proxy import (
+    _slim_response_create_payload_for_upstream as _slim_response_create_payload_for_upstream,
 )
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
@@ -388,18 +412,6 @@ from app.modules.proxy._service.response_create import (
     _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE as _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE,
 )
 from app.modules.proxy._service.response_create import (
-    _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE as _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE,
-)
-from app.modules.proxy._service.response_create import (
-    _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE as _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE,
-)
-from app.modules.proxy._service.response_create import (
-    _UPSTREAM_RESPONSE_CREATE_MAX_BYTES as _UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
-)
-from app.modules.proxy._service.response_create import (
-    _UPSTREAM_RESPONSE_CREATE_WARN_BYTES as _UPSTREAM_RESPONSE_CREATE_WARN_BYTES,
-)
-from app.modules.proxy._service.response_create import (
     _count_external_image_urls as _count_external_image_urls,
 )
 from app.modules.proxy._service.response_create import (
@@ -419,9 +431,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _input_part_is_image as _input_part_is_image,
-)
-from app.modules.proxy._service.response_create import (
-    _is_inline_image_reference as _is_inline_image_reference,
 )
 from app.modules.proxy._service.response_create import (
     _json_size_bytes as _json_size_bytes,
@@ -445,15 +454,6 @@ from app.modules.proxy._service.response_create import (
     _response_create_history_omission_notice_item as _response_create_history_omission_notice_item,
 )
 from app.modules.proxy._service.response_create import (
-    _response_create_inline_image_notice_item as _response_create_inline_image_notice_item,
-)
-from app.modules.proxy._service.response_create import (
-    _response_create_inline_image_notice_part as _response_create_inline_image_notice_part,
-)
-from app.modules.proxy._service.response_create import (
-    _response_create_recent_suffix_start as _response_create_recent_suffix_start,
-)
-from app.modules.proxy._service.response_create import (
     _response_create_text as _response_create_text,
 )
 from app.modules.proxy._service.response_create import (
@@ -461,9 +461,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _response_create_text_with_size_guard as _response_create_text_with_size_guard,
-)
-from app.modules.proxy._service.response_create import (
-    _response_create_too_large_error_envelope as _response_create_too_large_error_envelope,
 )
 from app.modules.proxy._service.response_create import (
     _response_output_item_done_tool_call as _response_output_item_done_tool_call,
@@ -479,21 +476,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _should_dump_oversized_response_create as _should_dump_oversized_response_create,
-)
-from app.modules.proxy._service.response_create import (
-    _should_slim_historical_tool_output as _should_slim_historical_tool_output,
-)
-from app.modules.proxy._service.response_create import (
-    _slim_historical_response_content as _slim_historical_response_content,
-)
-from app.modules.proxy._service.response_create import (
-    _slim_historical_response_content_part as _slim_historical_response_content_part,
-)
-from app.modules.proxy._service.response_create import (
-    _slim_historical_response_input_item as _slim_historical_response_input_item,
-)
-from app.modules.proxy._service.response_create import (
-    _slim_response_create_payload_for_upstream as _slim_response_create_payload_for_upstream,
 )
 from app.modules.proxy._service.response_create import (
     _summarize_response_create_input as _summarize_response_create_input,
