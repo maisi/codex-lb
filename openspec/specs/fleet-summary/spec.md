@@ -1,8 +1,7 @@
 # fleet-summary Specification
 
 ## Purpose
-Define authenticated fleet pressure and continuity summaries that exclude sensitive account data.
-
+Governs the API-key-authenticated fleet surface (`/api/fleet/*`) that external monitors read: the fleet summary, the observability feed of request pressure windows and sticky-session continuity, and fleet-triggered usage refreshes. These endpoints must follow the fleet usage-visibility policy, exclude sensitive identifiers and raw error payloads, and participate in graceful shutdown.
 ## Requirements
 ### Requirement: Fleet observability requires API key authentication
 

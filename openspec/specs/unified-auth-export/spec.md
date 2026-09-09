@@ -1,8 +1,7 @@
 # unified-auth-export Specification
 
 ## Purpose
-Define authenticated multi-format credential exports and their dashboard security controls.
-
+Governs the single account credential export surface: one `POST /api/accounts/{id}/export/auth` endpoint returning structured tokens plus both Codex and OpenCode `auth.json` payloads, and the dashboard modal that switches between formats. Two divergent export buttons forced users to know the target format up front and gave inconsistent security UX; this capability replaces them, requires an explicit security warning, and retires the predecessor routes.
 ## Requirements
 ### Requirement: Combined auth export endpoint
 

@@ -5,8 +5,8 @@ import json
 import logging
 import math
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
@@ -51,6 +51,7 @@ from app.core.clients.proxy import (
     _SSE_SEPARATOR_OVERLAP,
     CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE,
     CODEX_LB_REQUIRED_CAPABILITY_HEADER,
+    MAX_SSE_EVENT_BYTES,
     CodexControlRequestPrivacyPolicy,
     CodexControlResponse,
     ProxyResponseError,
@@ -130,7 +131,12 @@ from app.core.openai.chat_responses import (
     stream_chat_chunks,
 )
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.images import V1ImageResponse, V1ImagesEditsForm, V1ImagesGenerationsRequest
+from app.core.openai.images import (
+    DEFAULT_PUBLIC_IMAGE_MODEL,
+    V1ImageResponse,
+    V1ImagesEditsForm,
+    V1ImagesGenerationsRequest,
+)
 from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
 from app.core.openai.models import (
     CompactResponsePayload,
@@ -251,6 +257,7 @@ from app.modules.model_sources.selection import (
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy._service.observability import record_http_bridge_routing
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
     _bind_propagated_capacity_startup_wait,
@@ -656,6 +663,10 @@ _CAPACITY_WAIT_MARKER_GRACE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
+# Cap on server-owned recovery attempts while the client stream is held open
+# after an eligible eventless terminal (`server_indefinite_recovery` mode).
+# Once exhausted, the bridge emits one terminal `response.failed`.
+HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS: Final = 6
 _CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS = _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
 _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 2.0
 _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 15.0
@@ -2409,6 +2420,53 @@ def _responses_cleanup_scheduler(service: object) -> _ResponsesCleanupScheduler 
     return None
 
 
+async def _guard_chat_bridge_reservation(
+    stream: AsyncIterator[str],
+    *,
+    reservation: ApiKeyUsageReservationData | None,
+    service: object,
+) -> AsyncIterator[str]:
+    cleanup = _ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=reservation,
+        scheduler=_responses_cleanup_scheduler(service),
+        request_id=ensure_request_id(),
+    )
+    ready, dispatched, rejected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @contextmanager
+    def settlement_signals() -> Iterator[None]:
+        ready_token = _bind_propagated_responses_service_cleanup_ready(ready)
+        dispatched_token = _bind_propagated_responses_owner_forward_dispatched(dispatched)
+        rejected_token = _bind_propagated_responses_owner_forward_rejected(rejected)
+        try:
+            yield
+        finally:
+            _reset_propagated_responses_owner_forward_rejected(rejected_token)
+            _reset_propagated_responses_owner_forward_dispatched(dispatched_token)
+            _reset_propagated_responses_service_cleanup_ready(ready_token)
+
+    try:
+        while True:
+            # Startup probes and response consumers can run in different tasks.
+            # Never retain a ContextVar token across a yield to either caller.
+            with settlement_signals():
+                try:
+                    line = await anext(stream)
+                except StopAsyncIteration:
+                    break
+            yield line
+    finally:
+        with anyio.CancelScope(shield=True), settlement_signals():
+            await _close_responses_stream_best_effort(stream, action="chat bridge")
+            if _responses_origin_may_release_reservation(
+                service_cleanup_ready_event=ready,
+                owner_forward_dispatched_event=dispatched,
+                owner_forward_rejected_event=rejected,
+            ):
+                await cleanup.release(action="chat bridge")
+
+
 def _select_codex_usage_limit(
     limits: list[V1UsageLimitResponse],
     window: str,
@@ -3262,11 +3320,10 @@ async def _proxy_images_generation_request(
     # ``gpt-image-*`` variant whose validation matrix it does not
     # satisfy, leading to a non-canonical upstream failure instead of
     # a deterministic 400 at the API boundary.
-    settings = proxy_service_module.get_settings()
     requested_model = payload.model  # may be None; resolved below.
     effective_model = _effective_model_for_api_key(
         api_key,
-        requested_model or settings.images_default_model,
+        requested_model or DEFAULT_PUBLIC_IMAGE_MODEL,
     )
     if not images_service_module.is_supported_image_model(effective_model):
         record_images_route_observability(
@@ -3571,11 +3628,10 @@ async def _proxy_images_edit_request(
     # cross-field matrix, so the matrix is checked against the model we
     # will actually send upstream. See the matching comment in
     # ``_proxy_images_generation_request``.
-    settings = proxy_service_module.get_settings()
     requested_model = payload.model
     effective_model = _effective_model_for_api_key(
         api_key,
-        requested_model or settings.images_default_model,
+        requested_model or DEFAULT_PUBLIC_IMAGE_MODEL,
     )
     if not images_service_module.is_supported_image_model(effective_model):
         record_images_route_observability(
@@ -4361,6 +4417,7 @@ def _raw_optional_string(raw: Mapping[str, JsonValue], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+@v1_router.post("/chat/completions/", include_in_schema=False)
 @v1_router.post(
     "/chat/completions",
     response_model=ChatCompletionResult,
@@ -4462,6 +4519,11 @@ async def v1_chat_completions(
         )
         if admission_denial is not None:
             return admission_denial
+    bridge_active = (
+        await _http_bridge_active_for_request(responses_payload, request.headers, api_key, preferred=True)
+        if source is None
+        else False
+    )
     reservation = await _enforce_request_limits(
         api_key,
         request_model=request_model,
@@ -4485,17 +4547,38 @@ async def v1_chat_completions(
             prohibit_fast_mode=prohibit_fast_mode,
         )
     responses_payload.stream = True
-    stream = context.service.stream_responses(
-        responses_payload,
-        request.headers,
-        codex_session_affinity=False,
-        propagate_http_errors=True,
-        openai_cache_affinity=True,
-        api_key=api_key,
-        api_key_reservation=reservation,
-        suppress_text_done_events=True,
-        client_ip=resolve_request_client_host(request),
-    )
+    if bridge_active:
+        downstream_turn_state = proxy_affinity_module.ensure_http_downstream_turn_state(request.headers)
+        rate_limit_headers = {
+            **rate_limit_headers,
+            **proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state),
+        }
+        stream = context.service.stream_http_responses(
+            responses_payload,
+            request.headers,
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=True,
+            client_ip=resolve_request_client_host(request),
+            downstream_turn_state=downstream_turn_state,
+            http_bridge_active=True,
+        )
+        stream = _guard_chat_bridge_reservation(stream, reservation=reservation, service=context.service)
+    else:
+        stream = context.service.stream_responses(
+            responses_payload,
+            request.headers,
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=True,
+            client_ip=resolve_request_client_host(request),
+        )
     startup_probe_timeout = (
         _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
         if cursor_compat_client
@@ -4521,7 +4604,8 @@ async def v1_chat_completions(
         _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
         if cursor_compat_client and _is_context_length_startup_error(startup_error):
-            await _release_reservation(reservation)
+            if not bridge_active:
+                await _release_reservation(reservation)
             if payload.stream:
                 return _cursor_context_limit_usage_stream(
                     payload,
@@ -5929,9 +6013,9 @@ async def _iter_source_sse_event_blocks(
     byte-identical. Ignores one optional leading UTF-8 BOM, and swallows the
     LF residue of a CRLF separator whose CR arrived at the end of the prior
     chunk (CR-only dispatch must not wait for the disambiguating byte).
-    Bounds reassembly with ``max_sse_event_bytes``.
+    Bounds reassembly with ``MAX_SSE_EVENT_BYTES``.
     """
-    limit = max_event_bytes if max_event_bytes is not None else get_settings().max_sse_event_bytes
+    limit = max_event_bytes if max_event_bytes is not None else MAX_SSE_EVENT_BYTES
     buffer = bytearray()
     scanned = 0
     bom_pending = True
@@ -6017,10 +6101,7 @@ async def _wrap_source_responses_public_stream(
     use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
     keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
     settings = with_dashboard_overrides(get_settings())
-    event_blocks = _iter_source_sse_event_blocks(
-        stream,
-        max_event_bytes=getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024),
-    )
+    event_blocks = _iter_source_sse_event_blocks(stream)
     normalized = _normalize_public_responses_stream(
         event_blocks,
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -6753,6 +6834,7 @@ async def _http_bridge_active_for_request(
 ) -> bool:
     base_settings = proxy_service_module.get_settings()
     if not preferred or not base_settings.http_responses_session_bridge_enabled:
+        record_http_bridge_routing(stage="admission", reason="bridge_disabled" if preferred else "route_disabled")
         return False
     if policy_already_applied:
         # The origin already made the authoritative policy decision before
@@ -7439,11 +7521,7 @@ async def _force_refresh_codex_usage_identity_account(request: Request) -> None:
             accounts_repo,
             AdditionalUsageRepository(session),
         )
-        usage_written = await updater.force_refresh(
-            account,
-            ignore_refresh_disabled=True,
-            access_token_override=access_token,
-        )
+        usage_written = await updater.force_refresh(account, access_token_override=access_token)
         if usage_written:
             get_account_selection_cache().invalidate()
 
@@ -7567,11 +7645,28 @@ async def _wait_for_first_stream_probe(
                         post_ready_timeout = max(0.0, timeout_seconds - (clock.monotonic() - ready_set_at))
                 if post_ready_timeout <= 0:
                     return False
-                post_ready_done, _pending = await scheduler.wait(
-                    {first_task},
-                    timeout=post_ready_timeout,
-                )
-                return bool(post_ready_done)
+                # The resumed upstream may reject again and park the stream on
+                # a further bounded wait (e.g. the same-account burst backoff).
+                # A newer wait marker supersedes this ready, so keep watching
+                # it and re-read the level state instead of handing off.
+                post_ready_wait_task = scheduler.create_task(capacity_wait_event.wait())
+                try:
+                    post_ready_done, _pending = await scheduler.wait(
+                        {first_task, post_ready_wait_task},
+                        timeout=post_ready_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    if not post_ready_wait_task.done():
+                        post_ready_wait_task.cancel()
+                    await asyncio.gather(post_ready_wait_task, return_exceptions=True)
+                if first_task in post_ready_done:
+                    if capacity_wait_event.is_set():
+                        capacity_wait_event.clear()
+                    return True
+                if post_ready_wait_task in post_ready_done:
+                    continue
+                return False
 
             marker_task = scheduler.create_task(capacity_wait_event.wait())
             ready_task = (
@@ -8290,7 +8385,7 @@ async def _stream_response_error_events(
             # fingerprint; each new upstream attempt is still at-least-once.
             retry_delay = max(1.0, min(30.0, float(exc.retry_after_seconds or 5.0)))
             recovery_attempts = 0
-            server_recovery_max_attempts = settings.http_responses_session_bridge_server_recovery_max_attempts
+            server_recovery_max_attempts = HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS
             while recovery_attempts < server_recovery_max_attempts:
                 yield ": codex-lb recovery in progress\n\n"
                 await scheduler.sleep(retry_delay)
@@ -10317,9 +10412,6 @@ def _http_bridge_recovery_request_eligible(
     turn_state_anchor = proxy_affinity_module._sticky_key_from_turn_state_header(headers or {})
     if not bridge_active or (payload.previous_response_id is None and turn_state_anchor is None):
         return False
-    settings = proxy_service_module.get_settings()
-    if not getattr(settings, "http_responses_session_bridge_operation_ledger_enabled", True):
-        return False
     # Turn-state-only requests are admitted to the recovery-capable stream so
     # the submit path can first prove a durable predecessor by advancing its
     # operation anchor. The streaming layer marks an exception recovery-safe
@@ -10329,7 +10421,7 @@ def _http_bridge_recovery_request_eligible(
     ) or proxy_service_module._responses_request_uses_image_generation(payload):
         return False
     payload_bytes = len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
-    return payload_bytes <= proxy_service_module._ws_transport_payload_budget_bytes(settings)
+    return payload_bytes <= proxy_service_module._ws_transport_payload_budget_bytes()
 
 
 def _mask_previous_response_not_found_error(

@@ -1,8 +1,7 @@
 # account-pool-usage-v1-usage Specification
 
 ## Purpose
-Define aggregate account-pool usage and API-key-controlled detail sections on the usage endpoint.
-
+Governs what pooled-account capacity an API-key client can learn from `GET /v1/usage`. Key-level limits and aggregate upstream windows alone do not tell a client how much of the primary and secondary account pool remains, and administrators previously had no way to limit which usage detail sections a key exposes. This capability adds `account_pool_usage` to the response and lets each key's `usage_sections` setting decide which sections are returned.
 ## Requirements
 ### Requirement: /v1/usage response includes account_pool_usage
 

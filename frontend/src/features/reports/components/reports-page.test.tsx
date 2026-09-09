@@ -7,7 +7,7 @@ import { renderWithProviders } from "@/test/utils";
 import type { ReportsResponse } from "@/features/reports/schemas";
 import { listAccounts } from "@/features/accounts/api";
 import { getBrowserReportsTimeZone } from "@/features/reports/date";
-import { useReports } from "@/features/reports/hooks/use-reports";
+import { useReports, useReportsOptions } from "@/features/reports/hooks/use-reports";
 import { REPORT_CHART_VISIBILITY_STORAGE_KEY } from "@/features/reports/hooks/use-report-chart-visibility";
 import { ReportsPage } from "./reports-page";
 
@@ -17,6 +17,7 @@ vi.mock("@/features/accounts/api", () => ({
 
 vi.mock("@/features/reports/hooks/use-reports", () => ({
   useReports: vi.fn(),
+  useReportsOptions: vi.fn(),
 }));
 
 vi.mock("@/features/reports/date", async () => {
@@ -71,6 +72,7 @@ const EMPTY_REPORT: ReportsResponse = {
   byApiKey: [],
 };
 
+const useReportsOptionsMock = vi.mocked(useReportsOptions);
 const useReportsMock = vi.mocked(useReports);
 const listAccountsMock = vi.mocked(listAccounts);
 const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
@@ -84,6 +86,8 @@ const asUseReportsResult = (
 describe("ReportsPage", () => {
   beforeEach(() => {
     useReportsMock.mockReset();
+    useReportsOptionsMock.mockReset();
+    useReportsOptionsMock.mockReturnValue({ data: { models: ["gpt-5.1", "gpt-5.2"], useragents: ["CLI", "SDK"] }, isLoading: false, refetch: vi.fn() } as unknown as ReturnType<typeof useReportsOptions>);
     listAccountsMock.mockReset();
     getBrowserReportsTimeZoneMock.mockReset();
     window.localStorage.clear();
@@ -116,7 +120,7 @@ describe("ReportsPage", () => {
     });
   });
 
-  it("passes the page-managed timezone state into both reports queries", () => {
+  it("passes the page-managed timezone state into the report and options queries", () => {
     useReportsMock.mockReturnValue(
       asUseReportsResult({
         data: EMPTY_REPORT,
@@ -136,8 +140,8 @@ describe("ReportsPage", () => {
       }),
       "America/Los_Angeles",
     );
-    expect(useReportsMock).toHaveBeenNthCalledWith(
-      2,
+    expect(useReportsOptionsMock).toHaveBeenNthCalledWith(
+      1,
       expect.objectContaining({
         startDate: expect.any(String),
         endDate: expect.any(String),
@@ -189,7 +193,7 @@ describe("ReportsPage", () => {
     renderWithProviders(<ReportsPage />);
 
     expect(useReportsMock).toHaveBeenNthCalledWith(1, expect.any(Object), "America/Los_Angeles");
-    expect(useReportsMock).toHaveBeenNthCalledWith(2, expect.any(Object), "America/Los_Angeles");
+    expect(useReportsOptionsMock).toHaveBeenNthCalledWith(1, expect.any(Object), "America/Los_Angeles");
   });
 
   it("uses the cached valid timezone for reports queries when live detection is unavailable", async () => {
@@ -218,7 +222,7 @@ describe("ReportsPage", () => {
     renderWithProviders(<ReportsPage />);
 
     expect(useReportsMock).toHaveBeenNthCalledWith(1, expect.any(Object), "Europe/Paris");
-    expect(useReportsMock).toHaveBeenNthCalledWith(2, expect.any(Object), "Europe/Paris");
+    expect(useReportsOptionsMock).toHaveBeenNthCalledWith(1, expect.any(Object), "Europe/Paris");
   });
 
   it("omits timezone for reports queries only when live and cached timezones are both invalid", async () => {
@@ -247,7 +251,7 @@ describe("ReportsPage", () => {
     renderWithProviders(<ReportsPage />);
 
     expect(useReportsMock).toHaveBeenNthCalledWith(1, expect.any(Object), undefined);
-    expect(useReportsMock).toHaveBeenNthCalledWith(2, expect.any(Object), undefined);
+    expect(useReportsOptionsMock).toHaveBeenNthCalledWith(1, expect.any(Object), undefined);
   });
 
   it("refreshes timezone state on focus, visibility changes, and interval ticks", async () => {
@@ -269,8 +273,8 @@ describe("ReportsPage", () => {
       expect.any(Object),
       "America/Los_Angeles",
     );
-    expect(useReportsMock).toHaveBeenNthCalledWith(
-      2,
+    expect(useReportsOptionsMock).toHaveBeenNthCalledWith(
+      1,
       expect.any(Object),
       "America/Los_Angeles",
     );
@@ -281,12 +285,12 @@ describe("ReportsPage", () => {
     });
 
     expect(useReportsMock).toHaveBeenNthCalledWith(
-      3,
+      2,
       expect.any(Object),
       "America/New_York",
     );
-    expect(useReportsMock).toHaveBeenNthCalledWith(
-      4,
+    expect(useReportsOptionsMock).toHaveBeenNthCalledWith(
+      2,
       expect.any(Object),
       "America/New_York",
     );
@@ -297,12 +301,12 @@ describe("ReportsPage", () => {
     });
 
     expect(useReportsMock).toHaveBeenNthCalledWith(
-      5,
+      3,
       expect.any(Object),
       undefined,
     );
-    expect(useReportsMock).toHaveBeenNthCalledWith(
-      6,
+    expect(useReportsOptionsMock).toHaveBeenNthCalledWith(
+      3,
       expect.any(Object),
       undefined,
     );
@@ -313,12 +317,12 @@ describe("ReportsPage", () => {
     });
 
     expect(useReportsMock).toHaveBeenNthCalledWith(
-      7,
+      4,
       expect.any(Object),
       "America/Chicago",
     );
-    expect(useReportsMock).toHaveBeenNthCalledWith(
-      8,
+    expect(useReportsOptionsMock).toHaveBeenNthCalledWith(
+      4,
       expect.any(Object),
       "America/Chicago",
     );
@@ -463,6 +467,7 @@ describe("ReportsPage", () => {
   });
 
   it("shows one shared catalog failure for model and user-agent options", async () => {
+    useReportsOptionsMock.mockReturnValue({ isLoading: false, error: new Error("shared catalog endpoint unavailable"), refetch: vi.fn() } as unknown as ReturnType<typeof useReportsOptions>);
     useReportsMock.mockImplementation((filters) =>
       filters.model || filters.useragent
         ? asUseReportsResult({
@@ -665,7 +670,7 @@ describe("ReportsPage", () => {
 
     await screen.findByText("Cost by Day");
     const callCountBeforeToggle = useReportsMock.mock.calls.length;
-    const callsBeforeToggle = useReportsMock.mock.calls.slice(-2).map(
+    const callsBeforeToggle = useReportsMock.mock.calls.slice(-1).map(
       ([filters, timeZone]) => [filters, timeZone],
     );
     await user.click(screen.getByRole("button", { name: "Charts (5)" }));
@@ -674,7 +679,7 @@ describe("ReportsPage", () => {
     );
 
     expect(useReportsMock.mock.calls.length).toBeGreaterThan(callCountBeforeToggle);
-    expect(useReportsMock.mock.calls.slice(-2)).toEqual(callsBeforeToggle);
+    expect(useReportsMock.mock.calls.slice(-1)).toEqual(callsBeforeToggle);
   });
 
   it("keeps the model and user-agent metric toggles independent", async () => {
@@ -780,6 +785,12 @@ describe("ReportsPage", () => {
 
   it("populates API key options from the filter catalog, falling back to the ID for deleted keys", async () => {
     const user = userEvent.setup();
+    useReportsOptionsMock.mockReturnValue({
+      data: {models: [], useragents: [], apiKeys: [
+        {apiKeyId: "key_active", apiKeyName: "Active Key", keyPrefix: "sk-active"},
+        {apiKeyId: "key_deleted", apiKeyName: null, keyPrefix: null},
+      ]}, isLoading: false, refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useReportsOptions>);
     useReportsMock.mockImplementation(() =>
       asUseReportsResult({
         data: {
@@ -885,5 +896,20 @@ describe("ReportsPage", () => {
     expect(createObjectURL).toHaveBeenCalledOnce();
     const csvContent = await blobText();
     expect(csvContent).toContain("2030-01-15,42,2,1000,200,0,50,0.1500,1,0,0");
+  });
+});
+
+
+describe("report speed availability", () => {
+  it("discloses omitted long-window speed metrics without showing zero speed charts", async () => {
+    useReportsMock.mockReturnValue(asUseReportsResult({ data: { ...EMPTY_REPORT, speedMetricsAvailable: false, speedMetricsMaxDays: 7 }, isLoading: false, refetch: vi.fn() }));
+    useReportsOptionsMock.mockReturnValue({ data: { models: [], useragents: [] }, refetch: vi.fn() } as unknown as ReturnType<typeof useReportsOptions>);
+    renderWithProviders(<ReportsPage />);
+    expect(await screen.findByText(/Speed metrics are available for date ranges of 7 days or less/)).toBeInTheDocument();
+    expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
+    expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+    expect(screen.getByText("Total Cost")).toBeInTheDocument();
   });
 });

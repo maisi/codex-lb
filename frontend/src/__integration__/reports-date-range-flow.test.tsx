@@ -81,6 +81,7 @@ describe("reports date-range flow integration", () => {
       const expectedStart = daysAgoLocalISO(expectedStartDaysAgo, referenceDate);
       const expectedEnd = daysAgoLocalISO(expectedEndDaysAgo, referenceDate);
       const reportsRequests: URLSearchParams[] = [];
+      const optionsRequests: URLSearchParams[] = [];
       let accountRequests = 0;
 
       server.use(
@@ -92,6 +93,10 @@ describe("reports date-range flow integration", () => {
           reportsRequests.push(new URL(request.url).searchParams);
           return HttpResponse.json(REPORT_WITH_MODEL);
         }),
+        http.get("/api/reports/options", ({ request }) => {
+          optionsRequests.push(new URL(request.url).searchParams);
+          return HttpResponse.json({ models: ["gpt-5.1"], useragents: [] });
+        }),
       );
 
       window.history.pushState({}, "", "/reports");
@@ -101,6 +106,7 @@ describe("reports date-range flow integration", () => {
       await waitFor(() => {
         expect(accountRequests).toBeGreaterThan(0);
         expect(reportsRequests.length).toBeGreaterThan(0);
+        expect(optionsRequests).toHaveLength(1);
       });
       expect(await screen.findByRole("heading", { name: "Cost Report" })).toBeInTheDocument();
 
@@ -128,7 +134,7 @@ describe("reports date-range flow integration", () => {
         screen.getByText("Start date must be on or before end date."),
       ).toBeInTheDocument();
       expect(
-        reportsRequests.filter((params) => {
+        [...reportsRequests, ...optionsRequests].filter((params) => {
           const startDate = params.get("start_date");
           const endDate = params.get("end_date");
           return startDate !== null && endDate !== null && startDate > endDate;
@@ -145,7 +151,14 @@ describe("reports date-range flow integration", () => {
             params.get("start_date") === expectedStart &&
             params.get("end_date") === expectedEnd,
         );
-        expect(correctedRequests).toHaveLength(2);
+        expect(correctedRequests).toHaveLength(1);
+        expect(
+          optionsRequests.filter(
+            (params) =>
+              params.get("start_date") === expectedStart &&
+              params.get("end_date") === expectedEnd,
+          ),
+        ).toHaveLength(1);
       });
       const correctedRequests = reportsRequests.filter(
         (params) =>
@@ -156,7 +169,8 @@ describe("reports date-range flow integration", () => {
         correctedRequests
           .map((params) => params.get("model") ?? "")
           .sort(),
-      ).toEqual(["", "gpt-5.1"]);
+      ).toEqual(["gpt-5.1"]);
+      expect(optionsRequests.every((params) => !params.has("model"))).toBe(true);
       expect(
         screen.queryByText("Start date must be on or before end date."),
       ).not.toBeInTheDocument();
@@ -171,6 +185,7 @@ describe("reports date-range flow integration", () => {
     const user = userEvent.setup({ delay: null });
     const referenceDate = new Date();
     const reportsRequests: URLSearchParams[] = [];
+    const optionsRequests: URLSearchParams[] = [];
     let accountRequests = 0;
 
     server.use(
@@ -190,6 +205,10 @@ describe("reports date-range flow integration", () => {
         reportsRequests.push(new URL(request.url).searchParams);
         return HttpResponse.json(REPORT_WITH_MODEL);
       }),
+      http.get("/api/reports/options", ({ request }) => {
+        optionsRequests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ models: ["gpt-5.1"], useragents: [] });
+      }),
     );
 
     window.history.pushState({}, "", "/reports");
@@ -199,6 +218,7 @@ describe("reports date-range flow integration", () => {
     await waitFor(() => {
       expect(accountRequests).toBeGreaterThan(0);
       expect(reportsRequests.length).toBeGreaterThan(0);
+      expect(optionsRequests).toHaveLength(1);
     });
     expect(await screen.findByRole("heading", { name: "Cost Report" })).toBeInTheDocument();
 
@@ -232,6 +252,7 @@ describe("reports date-range flow integration", () => {
     });
     const accountRequestsBeforeRetry = accountRequests;
     const reportsRequestsBeforeRetry = reportsRequests.length;
+    const optionsRequestsBeforeRetry = optionsRequests.length;
 
     await user.click(retryButton);
 
@@ -239,8 +260,9 @@ describe("reports date-range flow integration", () => {
       expect(accountRequests).toBe(accountRequestsBeforeRetry + 1);
     });
     expect(reportsRequests).toHaveLength(reportsRequestsBeforeRetry);
+    expect(optionsRequests).toHaveLength(optionsRequestsBeforeRetry);
     expect(
-      reportsRequests.filter((params) => {
+      [...reportsRequests, ...optionsRequests].filter((params) => {
         const startDate = params.get("start_date");
         const endDate = params.get("end_date");
         return startDate !== null && endDate !== null && startDate > endDate;
