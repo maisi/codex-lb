@@ -4,7 +4,12 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.modules.reports.repository import MAX_DAILY_REPORT_DAYS, DailyReportRangeTooLargeError, ReportsRepository
+from app.modules.reports.repository import (
+    MAX_DAILY_REPORT_DAYS,
+    MAX_SPEED_REPORT_DAYS,
+    DailyReportRangeTooLargeError,
+    ReportsRepository,
+)
 from app.modules.reports.schemas import (
     AccountCostEntry,
     ApiKeyCacheEntry,
@@ -12,6 +17,7 @@ from app.modules.reports.schemas import (
     ModelCostEntry,
     ReportComparison,
     ReportComparisonPrevious,
+    ReportsOptionsResponse,
     ReportsResponse,
     ReportSummary,
     UserAgentCostEntry,
@@ -36,17 +42,8 @@ class ReportsService:
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
     ) -> ReportsResponse:
-        timezone_info = _resolve_timezone(report_timezone)
-        now = utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info)
-        if end_date is None:
-            end_date = now.date()
-        if start_date is None:
-            start_date = end_date - timedelta(days=6)
-        if start_date > end_date:
-            raise InvalidReportDateRangeError("start_date must be on or before end_date")
+        start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
         window_days = (end_date - start_date).days + 1
-        if window_days > MAX_DAILY_REPORT_DAYS:
-            raise DailyReportRangeTooLargeError(f"report date range must be {MAX_DAILY_REPORT_DAYS} days or less")
 
         start_at = _local_midnight_to_utc_naive(start_date, timezone_info)
         end_at = _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info)
@@ -133,6 +130,8 @@ class ReportsService:
         )
 
         return ReportsResponse(
+            speed_metrics_available=window_days <= MAX_SPEED_REPORT_DAYS,
+            speed_metrics_max_days=MAX_SPEED_REPORT_DAYS,
             summary=ReportSummary(
                 total_cost_usd=round(summary.total_cost_usd, 4),
                 total_input_tokens=summary.total_input_tokens,
@@ -191,6 +190,38 @@ class ReportsService:
                 for row in by_api_key
             ],
         )
+
+    async def get_options(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        report_timezone: str | None = None,
+        account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
+    ) -> ReportsOptionsResponse:
+        start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
+        models, useragents, api_keys = await self._repository.list_filter_options(
+            _local_midnight_to_utc_naive(start_date, timezone_info),
+            _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info),
+            account_ids,
+            api_key_ids,
+        )
+        return ReportsOptionsResponse(models=models, useragents=useragents, api_keys=api_keys)
+
+
+def resolve_report_range(
+    start_date: date | None,
+    end_date: date | None,
+    report_timezone: str | None,
+) -> tuple[date, date, ZoneInfo | timezone]:
+    timezone_info = _resolve_timezone(report_timezone)
+    end_date = end_date or utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info).date()
+    start_date = start_date or end_date - timedelta(days=6)
+    if start_date > end_date:
+        raise InvalidReportDateRangeError("start_date must be on or before end_date")
+    if (end_date - start_date).days + 1 > MAX_DAILY_REPORT_DAYS:
+        raise DailyReportRangeTooLargeError(f"report date range must be {MAX_DAILY_REPORT_DAYS} days or less")
+    return start_date, end_date, timezone_info
 
 
 def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:

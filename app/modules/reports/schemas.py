@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from pydantic import Field
 
 from app.modules.shared.schemas import DashboardModel
@@ -82,7 +84,22 @@ class ReportComparison(DashboardModel):
     previous: ReportComparisonPrevious
 
 
+class ApiKeyReportOption(DashboardModel):
+    api_key_id: str
+    api_key_name: str | None = None
+    key_prefix: str | None = None
+
+
+class ReportsOptionsResponse(DashboardModel):
+    api_keys: list[ApiKeyReportOption] = Field(default_factory=list)
+    models: list[str]
+    useragents: list[str]
+
+
 class ReportsResponse(DashboardModel):
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    speed_metrics_available: bool = True
+    speed_metrics_max_days: int = 7
     summary: ReportSummary
     comparison: ReportComparison
     daily: list[DailyReportRow] = Field(default_factory=list)
