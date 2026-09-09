@@ -10,4 +10,4 @@ Verification: before-fix public regression failed on both HTTP endpoints; 552 re
 
 Regression scenarios were adapted from upstream PR #2121 and expanded. Its reported concern about relaxed validation of trailing input is covered by canonical ownership validation and explicit unknown-field/owner-metadata tests. Opaque compaction remains nonportable. Direct WebSocket behavior keeps its existing ownership policy and stable error code while gaining the same actionable guidance.
 
-PR #30 follows integration PR #29. Final-head GitHub checks and clean mergeability remain deployment/merge gates; local verification does not replace them.
+PR #30 follows beta6 integration PR #31; beta5 integration PR #29 is merged. All 1,660 replay-safety, HTTP bridge and direct WebSocket tests passed after incorporating beta6. Final-head GitHub checks and clean mergeability remain deployment/merge gates; local verification does not replace them.
