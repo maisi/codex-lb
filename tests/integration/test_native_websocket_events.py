@@ -95,7 +95,7 @@ async def test_native_websocket_values_and_policy_match_python(monkeypatch: pyte
                         with monkeypatch.context() as patch:
                             if interpreted and text.startswith("{") and "\n" not in text and "\r" not in text:
                                 patch.setattr(bridge, "parse_sse_data_json_text", reject_decode)
-                            await bridge._HTTPBridgeUpstreamEventsMixin._process_http_bridge_upstream_text(
+                            await bridge._HTTPBridgeUpstreamEventsMixin._process_http_bridge_upstream_text_settlement(
                                 harness,
                                 cast(Any, None),
                                 text,

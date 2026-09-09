@@ -2,6 +2,7 @@
   "accounts.actions.disableWarmup": "Warm-up 끄기",
   "accounts.actions.enableWarmup": "Warm-up 켜기",
   "accounts.actions.forceProbe": "강제 probe",
+  "accounts.actions.recover": "복구",
   "accounts.actions.warmNow": "지금 Warm-up",
   "accounts.actions.resetWithCount": "Reset ({{count}})",
   "accounts.actions.routingPolicy": "Routing policy",

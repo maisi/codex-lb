@@ -2542,7 +2542,6 @@ def _state_from_account(
     soft_drain_enabled: bool | None = None,
 ) -> AccountState:
     now = REAL_CLOCK.time() if now is None else now
-    health_before = (runtime.health_tier, runtime.drain_entered_at, runtime.probe_success_streak)
     state = _reconstruct_account_state(
         account=account,
         primary_entry=primary_entry,
@@ -2552,6 +2551,4 @@ def _state_from_account(
         now=now,
         soft_drain_enabled=soft_drain_enabled,
     )
-    if health_before != (runtime.health_tier, runtime.drain_entered_at, runtime.probe_success_streak):
-        runtime.health_version += 1
     return state
