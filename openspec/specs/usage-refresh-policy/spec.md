@@ -435,29 +435,36 @@ This credit-aware interpretation MUST be shared by proxy account selection and a
 
 ### Requirement: Reset-confirmed limit warm-up
 
-The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window moved into a newly available reset window. Eligibility SHALL depend on a real reset transition and the configured post-reset availability gate, not on whether the previous window was exhausted. The legacy `limit_warmup_exhausted_threshold_percent` setting MUST NOT gate reset-confirmed eligibility.
+The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window moved into a newly available reset window. Eligibility SHALL depend on a real reset transition and the configured post-reset availability gate, not on whether the previous window was exhausted. The legacy `limit_warmup_exhausted_threshold_percent` setting MUST NOT gate forward-reset eligibility. Exhausted-to-available transitions with an unchanged or earlier reset deadline SHALL remain eligible under the stricter unplanned-reset evidence checks.
 
-Background usage refresh MUST complete any applicable blocked-status reconciliation before warm-up evaluation. Candidate evaluation and the sender's fresh preflight check MUST both require the account to be `active`; paused, deactivated, `reauth_required`, `rate_limited`, and `quota_exceeded` accounts MUST NOT receive warm-up traffic. When a reset-confirmed recovery uses persisted transition evidence, warm-up SHALL reuse that same before/after pair so the new account/window/reset tuple enters the ordinary durable deduplication path.
+Background usage refresh MUST complete any applicable blocked-status reconciliation before warm-up evaluation. Candidate evaluation and the sender's fresh preflight check MUST both require the account to be `active`; paused, deactivated, `reauth_required`, `rate_limited`, and `quota_exceeded` accounts MUST NOT receive warm-up traffic. When a reset-confirmed recovery uses persisted transition evidence, warm-up SHALL reuse that same before/after pair so the new account/window/transition tuple enters the ordinary durable deduplication path.
 
-The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle warm-up candidates. It MUST NOT suppress a reset-confirmed candidate for a distinct account/window/reset tuple, which remains protected by the durable atomic attempt claim for that tuple.
+The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle warm-up candidates. It MUST NOT suppress a reset-confirmed candidate for a distinct account/window/transition tuple, which remains protected by the durable atomic attempt claim for that tuple.
 
 #### Scenario: Warm-up follows a real reset regardless of prior usage
 - **GIVEN** limit warm-up is enabled globally and for an active account
 - **AND** the account's previous usage sample for a selected window reports any usage below or at exhaustion
 - **WHEN** background usage refresh records a newer sample that proves a real reset for that window and satisfies the configured availability gate
-- **THEN** the system sends at most one warm-up request for that account/window/reset tuple
+- **THEN** the system sends at most one warm-up request for that account/window/transition tuple
 
 #### Scenario: Staggered idle cooldown does not suppress a distinct reset tuple
 - **GIVEN** an account has a recent warm-up attempt inside `limit_warmup_cooldown_seconds`
-- **AND** background usage refresh confirms a different selected account/window/reset tuple
+- **AND** background usage refresh confirms a different selected account/window/transition tuple
 - **WHEN** reset-confirmed warm-up evaluates the new tuple
 - **THEN** the staggered idle cooldown MUST NOT suppress that candidate
 - **AND** the durable attempt claim MUST still prevent another send for an already claimed identical tuple
 
-#### Scenario: Warm-up is skipped unless reset is confirmed
+#### Scenario: Warm-up follows a scheduled reset
 - **GIVEN** limit warm-up is enabled globally and for an account
 - **WHEN** background usage refresh records a newer available sample without a real selected-window reset transition
 - **THEN** the system MUST NOT send a reset-confirmed warm-up request for that sample
+
+#### Scenario: Warm-up follows an unplanned reset
+- **GIVEN** limit warm-up is enabled globally and for an active account
+- **AND** the previous sample for the selected window was exhausted
+- **WHEN** a newer available sample proves an unplanned reset with an unchanged or earlier deadline
+- **THEN** the system sends at most one warm-up request for that observed transition
+- **AND** an earlier transition with the same reset deadline MUST NOT suppress the new attempt
 
 #### Scenario: Warm-up is not triggered by upstream reset_at timestamp jitter
 - **GIVEN** limit warm-up is enabled globally and for an account
@@ -499,9 +506,9 @@ The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle wa
 - **THEN** it does not send the warm-up request
 
 #### Scenario: Warm-up attempts are durable and deduplicated
-- **WHEN** multiple refresh workers observe the same account/window/reset candidate
-- **THEN** the database permits at most one persisted attempt for that tuple
-- **AND** later refresh cycles skip that tuple after a prior attempt exists
+- **WHEN** multiple refresh workers observe the same exhausted-to-available transition
+- **THEN** the database permits at most one persisted attempt for that account/window/transition tuple
+- **AND** later refresh cycles skip that transition after a prior attempt exists
 
 #### Scenario: Persisted recovery evidence shares the warm-up tuple
 - **GIVEN** a scheduler restart causes recovery to use a persisted monthly before/after transition
@@ -1443,11 +1450,11 @@ local writes but MUST NOT be the mechanism that guarantees dedup.
   window
 - **AND** the losing worker receives no attempt and sends no warm-up probe
 
-#### Scenario: Exact-tuple duplicates remain constrained
+#### Scenario: Exact-transition duplicates remain constrained
 
 - **GIVEN** a warm-up attempt already persists for an account, window, and
-  `reset_at` tuple
-- **WHEN** another worker inserts the identical tuple despite the atomic guard
+  transition key
+- **WHEN** another worker inserts the identical transition despite the atomic guard
 - **THEN** the unique constraint rejects the duplicate
 - **AND** the worker treats the rejection as a dedup skip rather than an error
 
@@ -1809,6 +1816,18 @@ Auth Guardian MUST preserve stable account identities while its candidate-query 
 - **WHEN** the candidate-query session closes before per-account refresh work begins
 - **THEN** Auth Guardian refreshes the selected account without a detached-instance failure
 - **AND** the refresh worker re-reads the account in its own session before refreshing it
+
+### Requirement: Integrated usage errors preserve recoverable fork accounts
+
+Usage refresh MUST NOT deactivate an account solely because of HTTP 404 or 402. Explicit terminal error signals MUST retain their terminal semantics. Borrowed accounts MUST obtain credentials from their configured vending source rather than refreshing an owner token locally.
+
+#### Scenario: Ambiguous usage status
+- **WHEN** usage refresh returns HTTP 404 or 402 without an explicit terminal signal
+- **THEN** the account remains recoverable without permanent deactivation
+
+#### Scenario: Borrowed account recovery
+- **WHEN** force probe successfully vends credentials for a borrowed account
+- **THEN** the borrowed account recovers without requiring successful inference on the owner's upstream account
 
 ### Requirement: Streaming usage-limit failures request an immediate coalesced usage refresh
 

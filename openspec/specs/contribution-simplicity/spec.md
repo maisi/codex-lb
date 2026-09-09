@@ -81,6 +81,7 @@ A PR that changes what the dashboard renders MUST include before/after screensho
 - **WHEN** a PR alters dashboard rendering and its body contains no screenshots or recording
 - **THEN** the reviewer blocks the PR until visual evidence is attached
 
+
 ### Requirement: Tracked repository-root entries are allowlisted
 
 Every tracked repository-root entry (file or directory, as listed by `git ls-tree --name-only HEAD`) MUST appear in the `allowed` list of the `[root_files]` section in `.github/simplicity-budgets.toml`, and the simplicity-budget check SHALL report each unlisted entry as a violation that names the entry and the escape hatch. A PR that adds an unlisted root entry SHALL be blocked from merge unless the entry is added to the allowlist in the same diff or a maintainer applies the `simplicity-budget-approved` label. When the `[root_files]` section is absent from the budget configuration, the check SHALL be skipped rather than fail.

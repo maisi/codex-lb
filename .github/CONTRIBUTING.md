@@ -193,10 +193,11 @@ PR titles must follow the same format — that's the title release-please reads.
 2. Make atomic commits with Conventional Commit titles.
 3. Run the lint/test gate locally (see above).
 4. Open a PR using the template. Link the relevant issue.
-5. CodeRabbit (and a human maintainer) will review. Address feedback by
+5. Codex Review may review. If a review is requested, address its feedback by
    pushing follow-up commits — no force-pushing during active review.
-6. Once approved and CI is green, a maintainer squash-merges with a clean
-   Conventional Commits title.
+6. Once CI is green and the PR is mergeable, a maintainer or explicitly
+   authorized repository owner squash-merges with a clean Conventional Commits
+   title.
 
 ## Merge gates and collaborator rules
 
@@ -218,11 +219,10 @@ Before a PR is squash-merged into `main`:
    guards (`Beta release guard`, `Stable release guard`) run from
    `release-guards.yml` so an edited release PR body re-checks them without
    restarting the matrix; they are separate contexts, not part of `CI Required`.
-2. **Actionable CodeRabbit findings must be fixed or explicitly addressed
-   or dismissed in-thread on the merge-target head.** Review the current-head
-   CodeRabbit findings before merging; no finding may be silently skipped.
-   Local `codex review --base origin/main` runs remain an encouraged extra
-   tool, but they are not a merge gate and do not substitute for CodeRabbit.
+2. **Codex review is optional.** If `@codex review` is requested for the
+   merge-target head, its findings must be addressed before merge. The
+   `🤖 codex: ok` label is an audit aid, not a substitute for branch
+   protection or merge queue checks.
    - **P1 findings**: fix in the PR, or justify in-thread with a short
      write-up of why the finding doesn't apply. No silent skipping.
    - **P2 findings**: fix in the PR, or open a follow-up issue and link
@@ -280,10 +280,9 @@ every PR (budget checks are enforced by CI via
 Collaborators (write-access contributors) follow two additional rules on
 top of the merge gates above:
 
-1. **No self-merge by default.** A collaborator's own PR is merged by
-   another maintainer (or, until the project has more collaborators,
-   by the project owner). Review independence matters more than
-   turnaround.
+1. **Repository-owner self-merge is allowed with explicit authorization.**
+   Collaborators' own PRs are otherwise merged by a maintainer or the
+   repository owner.
 2. **Large PRs get split.** Roughly:
    - If a PR is a stack tip pulling in unrelated commits from sibling
      branches, split it so each merged PR is a single scoped change.
@@ -293,29 +292,12 @@ top of the merge gates above:
      touches the proxy hot path *and* the dashboard *and* the OAuth
      flow is not.
 
-### Bus factor escape hatch
-
-To keep the project unblocked if the owner is unavailable, the following
-self-merge escape hatch applies:
-
-- If a collaborator's PR has been waiting on a maintainer merge for
-  **more than 14 days** with **all merge gates met** (CI green,
-  CodeRabbit findings addressed, `mergeable=CLEAN`, no
-  outstanding requested-changes review, no objection from any other
-  active collaborator in the thread), the PR author may self-merge.
-- Self-merge under this clause **must** include a comment on the PR
-  explicitly invoking the clause and linking to the date the merge
-  gates first went green. Audit trail must stay clean.
-- The clause is a safety valve, not a default path. If you're tempted to
-  invoke it on a PR you opened less than two weeks ago, the merge gates
-  probably aren't actually all green yet.
-
 ### What this is not
 
 These rules are intentionally lightweight. They don't require:
 
-- A second human reviewer in addition to CodeRabbit for every PR.
-  CodeRabbit review + the PR author + a maintainer merge is the baseline.
+- A required Codex or second-human review for every PR. Reviews remain
+  encouraged, and requested review findings must be resolved.
 - Squash-merge commit message rewriting beyond the Conventional Commits
   title. The PR description ends up in the body; that's enough.
 - A formal escalation process for disagreements. If a P1 finding is

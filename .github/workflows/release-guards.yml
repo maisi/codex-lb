@@ -54,6 +54,10 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" --force
 
+      - name: Fetch official upstream release provenance for fork syncs
+        if: github.event.repository.fork == true
+        run: git fetch --no-tags https://github.com/Soju06/codex-lb.git '+refs/tags/*:refs/upstream-release/*'
+
       - name: Require validated canonical beta release PRs
         env:
           BASE_REF: ${{ github.base_ref || 'main' }}

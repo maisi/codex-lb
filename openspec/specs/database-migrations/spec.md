@@ -60,11 +60,17 @@ The database schema SHALL preserve historical `request_logs` rows when their par
 
 ### Requirement: Limit warm-up persistence
 
-The database SHALL persist global warm-up settings, per-account opt-in, warm-up attempt history, and request-log source metadata. Global warm-up settings SHALL include a non-null exhausted-threshold percent used by reset-confirmed limit warm-up candidate selection.
+The database SHALL persist global warm-up settings, per-account opt-in, warm-up attempt history, request-log source metadata, a durable identity for each observed warm-up transition, and a non-null exhausted-threshold percent used by reset-confirmed limit warm-up candidate selection.
 
-#### Scenario: Warm-up attempt is unique per reset
-- **WHEN** an attempt is stored for an account, window, and reset timestamp
-- **THEN** the database enforces uniqueness for that account/window/reset tuple
+#### Scenario: Warm-up attempt is unique per transition
+- **WHEN** an attempt is stored for an account, window, and observed transition
+- **THEN** the database enforces uniqueness for that account/window/transition tuple
+- **AND** the attempt separately retains the upstream reset timestamp
+
+#### Scenario: Existing warm-up attempts are migrated
+- **WHEN** an existing database is migrated to transition-based warm-up identity
+- **THEN** every existing warm-up attempt receives a non-null legacy transition identity
+- **AND** existing attempt history remains visible without being replayed
 
 #### Scenario: Existing installs remain disabled
 - **WHEN** an existing database is migrated
@@ -203,6 +209,31 @@ sidecar WAL file.
 - **THEN** those rows are queryable from the backup database
 - **AND** the backup passes SQLite integrity checking
 
+### Requirement: Fork and upstream migration histories converge on one head
+
+When an upstream synchronization combines independently advanced fork and upstream Alembic histories, the synchronized migration graph MUST join the resulting heads with a no-op merge revision. The merge revision MUST preserve both parent histories and MUST restore exactly one valid `head` target without applying additional schema changes. A later synchronization that advances upstream beyond an earlier fork merge revision MUST add a new merge revision rather than re-parenting or deleting published history.
+
+#### Scenario: Fresh database upgrades through both histories
+
+- **WHEN** a fresh database upgrades to `head` after the upstream synchronization
+- **THEN** Alembic applies both parent histories
+- **AND** finishes at the single merge revision
+
+#### Scenario: Database already at either parent upgrades safely
+
+- **GIVEN** a database is already stamped at either parent revision
+- **WHEN** it upgrades to `head`
+- **THEN** Alembic applies the missing parent history as needed
+- **AND** records the merge revision without dropping or rewriting schema objects
+
+#### Scenario: Upstream advances after an earlier fork merge revision
+
+- **GIVEN** the fork history already contains a published merge revision from an earlier synchronization
+- **AND** upstream adds migrations on its own descendant line
+- **WHEN** the histories synchronize again
+- **THEN** the graph adds another no-op merge revision joining the current heads
+- **AND** previously published revisions remain unchanged
+
 ### Requirement: Startup migrations are mutually exclusive across processes
 
 The system SHALL serialize schema upgrades and stamps across all processes sharing a database using a backend-appropriate cross-process mutex: a PostgreSQL session-level advisory lock held on a dedicated connection for the full upgrade sequence, or an exclusive write transaction on a sentinel SQLite file adjacent to a file-backed SQLite database (no-op for in-memory SQLite). After acquiring the mutex, the upgrader MUST re-inspect migration state and MUST skip applying revisions when the target is head and the schema is already at head with no legacy bootstrap or revision remap pending, completing startup successfully. Waiting for the mutex MUST be bounded by `database_migration_lock_timeout_seconds` (default 300); on timeout the system SHALL raise an explicit error naming the migration lock and the timeout setting, honoring `database_migrations_fail_fast` on the startup path.
@@ -337,6 +368,18 @@ When the application builds an Alembic `Config` for migration inspection or upgr
 - **GIVEN** a SQLite or PostgreSQL URL whose path contains no `%`
 - **WHEN** the escape and decode round-trip is applied
 - **THEN** the URL is unchanged and migration behavior is identical to before
+
+### Requirement: Integrated upstream and fork database upgrades preserve fork data
+
+Database upgrades MUST converge to one migration head from the pre-integration fork and upstream heads, preserving account credentials, API-key account ranks, forced-usage flags and continuation settings. Deployed migration revision identities MUST remain valid.
+
+#### Scenario: Existing fork database upgrades
+- **WHEN** a database at the pre-integration fork head upgrades to the integrated head
+- **THEN** its fork settings and account assignments remain unchanged and upstream schema additions are available
+
+#### Scenario: Existing upstream database upgrades
+- **WHEN** a database at the upstream v1.25.0-beta.4 head upgrades to the integrated head
+- **THEN** fork fields receive compatible defaults and migration status reports one head
 
 ### Requirement: Overflow and transport migration heads converge without rewriting history
 

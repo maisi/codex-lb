@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 130 settings. Every setting is an environment
+codex-lb currently exposes 134 settings. Every setting is an environment
 variable, normally with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process); aliased settings list every accepted name.
 All defaults work with zero configuration —
@@ -306,6 +306,10 @@ anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
+| `CODEX_LB_ACCOUNT_TOKEN_VENDING_ACCESS_TOKEN_SKEW_SECONDS` | T1 | `float` | `60.0` |
+| `CODEX_LB_ACCOUNT_TOKEN_VENDING_AUTHORITY_BASE_URL` | T1 | `str \| None` | `None` |
+| `CODEX_LB_ACCOUNT_TOKEN_VENDING_REMOTE_ACCOUNTS` | T1 | `dict[str, str]` | `{}` |
+| `CODEX_LB_ACCOUNT_TOKEN_VENDING_SHARED_SECRET` | T2 | `str \| None` | `None` |
 | `CODEX_LB_EVENT_LOOP_LAG_WARN_THRESHOLD_SECONDS` | T1 | `float` | `0.5` |
 | `CODEX_LB_TELEMETRY_ENABLED` | T3 | `bool \| None` | `None` |
 | `CODEX_LB_TELEMETRY_ENDPOINT` | T1 | `str` | `'https://telemetry.tokmaxxing.com'` |

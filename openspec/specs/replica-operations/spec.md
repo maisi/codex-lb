@@ -329,6 +329,7 @@ seat mismatch, identity conflict, and unexpected errors).
 - **THEN** the loser reports the durable `success` (not an error) and does not
   leave the local flow in `error`
 
+
 ### Requirement: Browser OAuth callback listeners expire without follow-up requests
 
 Each replica SHALL schedule cleanup for locally started or hydrated pending browser OAuth flows. When the final pending browser flow expires, the replica MUST prune the expired local state and release its process-local callback listener without requiring another request. While an unexpired pending browser flow remains, expiry cleanup MUST retain the shared listener.

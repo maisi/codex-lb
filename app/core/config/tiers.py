@@ -30,6 +30,11 @@ TIERS: Final[tuple[Tier, ...]] = ("T0", "T1", "T2", "T3", "T4")
 # Declaration order follows ``Settings``; the tier is the policy answer to
 # "may this value differ between two replicas / must it exist before the DB?".
 SETTING_TIERS: Final[dict[str, Tier]] = {
+    # Fork inter-instance vending is topology plus a shared credential.
+    "account_token_vending_authority_base_url": "T1",
+    "account_token_vending_remote_accounts": "T1",
+    "account_token_vending_shared_secret": "T2",
+    "account_token_vending_access_token_skew_seconds": "T1",
     "data_dir": "T0",
     "database_url": "T0",
     "database_pool_size": "T1",
