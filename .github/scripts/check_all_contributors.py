@@ -77,7 +77,9 @@ def local_commit_author_logins() -> set[str]:
         match = NOREPLY_RE.match(email.strip())
         if match:
             login = match.group(1)
-            if not login.endswith("[bot]"):
+            # Legacy fork automation used this unnumbered Actions address.
+            # It is an automation identity, not a missing human contributor.
+            if not login.endswith("[bot]") and email.strip() != "actions@users.noreply.github.com":
                 logins.add(login.lower())
     return logins
 

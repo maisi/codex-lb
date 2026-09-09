@@ -18,13 +18,15 @@ pytestmark = pytest.mark.integration
     [
         "20260827_020000_merge_retry_circuit_and_account_priority_heads",
         "20260830_000000_add_quota_warmup_claim_expiry",
+        "20260908_000000_merge_upstream_beta4_and_fork",
+        "20260909_040000_dashboard_timeout_settings",
     ],
 )
 async def test_upstream_fork_merge_preserves_existing_key_policy(tmp_path: Path, parent: str) -> None:
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'merge.db'}"
     await to_thread.run_sync(lambda: run_upgrade(database_url, parent, bootstrap_legacy=True))
     engine = create_async_engine(database_url)
-    is_fork = "account_priority" in parent
+    is_fork = "account_priority" in parent or "merge_upstream_beta4_and_fork" in parent
     try:
         async with engine.begin() as connection:
             await connection.execute(
@@ -74,6 +76,6 @@ async def test_upstream_fork_merge_preserves_existing_key_policy(tmp_path: Path,
             ).scalar_one()
             assert priority == (7 if is_fork else 0)
             revisions = (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
-            assert revisions == ["20260908_000000_merge_upstream_beta4_and_fork"]
+            assert revisions == ["20260909_050000_merge_upstream_beta5_and_fork"]
     finally:
         await engine.dispose()

@@ -78,6 +78,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.accepted_replay import (
     _claim_websocket_replay_create_gate,
+    _http_bridge_accepted_replay_may_exclude_account,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR,
@@ -86,6 +87,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _bind_http_bridge_proxy_injected_anchor,
     _build_http_bridge_prewarm_text,
     _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_client_full_history_recovery_error,
     _http_bridge_denied_anchor_fence_advanced,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
@@ -318,22 +320,6 @@ def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketR
     )
 
 
-def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
-    settings = _service_get_settings()
-    return (
-        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
-        in {"server_anchored_replay_once", "server_indefinite_recovery"}
-        and request_state.previous_response_id is not None
-        and request_state.response_id is None
-        and request_state.response_event_count == 0
-        and (
-            request_state.replay_count == 0
-            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
-            == "server_indefinite_recovery"
-        )
-    )
-
-
 def _http_bridge_operation_fence_for_hard_continuity_enabled(request_state: _WebSocketRequestState) -> bool:
     """Return whether a hard turn-state request may use the durable replay fence."""
     if not request_state.hard_continuity_anchor:
@@ -396,16 +382,6 @@ def _http_bridge_terminal_hard_turn_response_id(
         return None
     response_id = getattr(operation, "response_id", None)
     return response_id if isinstance(response_id, str) and response_id else None
-
-
-def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
-    payload = openai_error(
-        "previous_response_not_found",
-        "Previous response was not found; retry without previous_response_id.",
-        error_type="invalid_request_error",
-    )
-    payload["error"]["param"] = "previous_response_id"
-    return payload
 
 
 def _http_bridge_hard_continuity_full_history_recovery_error() -> OpenAIErrorEnvelope:
@@ -4239,7 +4215,15 @@ class _HTTPBridgeRequestSubmitMixin:
                         request_state.preferred_account_id = session.account.id
                     else:
                         request_state.preferred_account_id = None
-                        request_state.excluded_account_ids.add(session.account.id)
+                        # An accepted replay whose session affinity may resolve
+                        # a hard sticky owner reconnects unexcluded: the owner
+                        # is the only account selection can return, so the
+                        # exclusion would spin on ``hard_affinity_saturated``
+                        # until the bridge request budget ran out.
+                        if model_fallback_replay or _http_bridge_accepted_replay_may_exclude_account(
+                            request_state, session
+                        ):
+                            request_state.excluded_account_ids.add(session.account.id)
             if session.account.id in request_state.excluded_account_ids:
                 session.upstream_turn_state = None
                 session.downstream_turn_state = None

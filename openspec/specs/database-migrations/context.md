@@ -60,6 +60,15 @@
 - Emergency toggle:
   - `CODEX_LB_DATABASE_ALEMBIC_AUTO_REMAP_ENABLED=false` disables auto-remap.
 
+## September overflow and transport merge
+
+The subscription-overflow and transport-sentinel revisions both descended from
+the quota-warmup revision. A forward merge joins them without changing their
+operations. An upgrade from one parent applies the other parent normally;
+downgrading only the merge restores both parent stamps while preserving both
+schemas and their data. This is not a rollback to a build that knows only one
+branch. See the [repair context](../../changes/merge-overflow-transport-migration-heads/context.md).
+
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
@@ -67,3 +76,9 @@ Branch A and B each create migration revisions in parallel. After merge, CI dete
 ## September 2026 fork integration
 
 The September 2026 upstream integration joins the account-priority fork head and the upstream quota-warmup-claim-expiry head through 20260908_000000_merge_upstream_beta4_and_fork. Existing revision identities remain valid. Parent-upgrade tests preserve API-key continuation/usage flags and account ranks; topology for token vending remains environment configuration. See [spec.md](spec.md) for the normative contract.
+
+## Beta5 fork integration
+
+The operation-free revision `20260909_050000_merge_upstream_beta5_and_fork` joins the deployed beta4 fork merge with upstream's dashboard-timeout migration. Both parent histories remain valid. For example, an existing fork database retains API-key priority 7 and opt-in forced usage/continuation when upgrading; an upstream database receives compatible fork defaults.
+
+Direct downgrade of the upstream overflow/transport merge retains the independent fork head. Tests compare both schemas and application rows rather than assuming that upstream history is the only active branch. See [spec.md](spec.md) for the normative preservation contract.

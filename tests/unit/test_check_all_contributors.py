@@ -127,3 +127,24 @@ def test_fetch_contributor_logins_fail_closed_when_retries_exhaust(monkeypatch):
 
     with pytest.raises(SystemExit, match="cannot validate all-contributors coverage"):
         checker.fetch_contributor_logins("example/codex-lb", "token")
+
+
+def test_local_commit_authors_skip_legacy_actions_identity(monkeypatch):
+    from subprocess import CompletedProcess
+
+    checker = _load_checker_module()
+    monkeypatch.setattr(
+        checker.subprocess,
+        "run",
+        lambda *args, **kwargs: CompletedProcess(
+            args[0],
+            0,
+            stdout=(
+                "actions@users.noreply.github.com\n"
+                "41898282+github-actions[bot]@users.noreply.github.com\n"
+                "12345+octocat@users.noreply.github.com\n"
+                "SHAREN@users.noreply.github.com\n"
+            ),
+        ),
+    )
+    assert checker.local_commit_author_logins() == {"octocat", "sharen"}

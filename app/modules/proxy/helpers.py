@@ -16,6 +16,7 @@ from app.core.errors import (
     is_previous_response_not_found_error,
     previous_response_stream_incomplete_error,
 )
+from app.core.openai.chat_responses import _coerce_number
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
 from app.core.types import JsonValue
@@ -435,17 +436,6 @@ def _proxy_response_error_code(exc: ProxyResponseError) -> str | None:
 
 def _coerce_str(value: JsonValue) -> str | None:
     return value if isinstance(value, str) else None
-
-
-def _coerce_number(value: JsonValue) -> int | float | None:
-    if isinstance(value, (int, float)):
-        return value
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
-            return None
-    return None
 
 
 def _apply_error_metadata(target: OpenAIErrorDetail, error: OpenAIError | None) -> None:
