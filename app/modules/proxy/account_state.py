@@ -17,12 +17,13 @@ from app.core.balancer import (
     ROUTING_POLICY_BURN_FIRST as ROUTING_POLICY_BURN_FIRST,
 )
 from app.core.balancer.logic import plausible_rate_limit_reset_at
-from app.core.config import settings as config_settings
 from app.core.config.settings import get_settings
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage.quota import apply_usage_quota
+from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, UsageHistory
-from app.modules.proxy._load_balancer.error_rate import error_rate_weight_multiplier
+from app.modules.proxy._load_balancer.error_rate import ErrorRateWeightingPolicy, error_rate_weight_multiplier
+from app.modules.proxy._load_balancer.tunables import RoutingTunables, resolve_routing_tunables
 from app.modules.proxy._load_balancer.types import (
     RuntimeState,
 )
@@ -37,8 +38,10 @@ def _state_from_account(
     runtime: RuntimeState,
     access_token_expires_at: float | None = None,
     now: float,
+    routing_tunables: RoutingTunables | None = None,
     soft_drain_enabled: bool | None = None,
 ) -> AccountState:
+    tunables = routing_tunables or resolve_routing_tunables(None, startup_settings=get_settings())
     routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
     normalized_usage = _normalize_usage_inputs(
         account=account,
@@ -300,11 +303,9 @@ def _state_from_account(
         else None
     )
 
-    settings = get_settings()
     if soft_drain_enabled is None:
-        # C2-3 resilience toggles: callers on the request path pass the
-        # dashboard value; anything else inherits the env alias / default.
-        soft_drain_enabled = resolve_resilience_toggles(None, startup_settings=settings).soft_drain_enabled
+        # C2-3 resilience toggles: callers pass the dashboard value; None (tests, tools) = env alias / default.
+        soft_drain_enabled = resolve_resilience_toggles(None, startup_settings=get_settings()).soft_drain_enabled
     new_tier = _sync_runtime_health_tier(
         account_id=account.id,
         status=status,
@@ -316,17 +317,16 @@ def _state_from_account(
         soft_drain_enabled=soft_drain_enabled,
     )
 
-    inflight_pressure_pct = (runtime.inflight_response_creates + runtime.inflight_streams) * getattr(
-        settings, "proxy_account_inflight_penalty_pct", 2.5
-    )
+    inflight_pressure_pct = (
+        runtime.inflight_response_creates + runtime.inflight_streams
+    ) * tunables.inflight_penalty_pct
     leased_token_pressure_pct = 0.0
     long_window_key = "secondary"
     if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
         long_window_key = "monthly"
     capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
     if capacity_credits > 0.0 and runtime.leased_tokens > 0:
-        lease_token_weight = getattr(settings, "proxy_account_lease_token_weight", 1.0)
-        leased_token_pressure_pct = runtime.leased_tokens * lease_token_weight / capacity_credits * 100.0
+        leased_token_pressure_pct = runtime.leased_tokens * tunables.lease_token_weight / capacity_credits * 100.0
     pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
     effective_used_percent = None if used_percent is None else min(100.0, used_percent + pressure_pct)
     effective_secondary_used_percent = None if secondary_used is None else min(100.0, secondary_used + pressure_pct)
@@ -357,7 +357,9 @@ def _state_from_account(
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
         routing_policy=routing_policy,
-        selection_weight_multiplier=error_rate_weight_multiplier(runtime, now),
+        selection_weight_multiplier=error_rate_weight_multiplier(
+            runtime, now, policy=ErrorRateWeightingPolicy(enabled=tunables.error_rate_weighting_enabled)
+        ),
     )
 
 
@@ -597,13 +599,9 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None, *, now: float) -
     if recorded_at is None:
         return False
     current_time = datetime.fromtimestamp(now, tz=timezone.utc)
-    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
+    interval_seconds = usage_freshness_horizon_seconds()
     recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
     return recorded_time >= current_time - timedelta(seconds=interval_seconds)
-
-
-def _usage_refresh_interval_seconds() -> int:
-    return config_settings.get_settings().usage_refresh_interval_seconds
 
 
 _SIBLING_FETCH_MARGIN_SECONDS = 5.0

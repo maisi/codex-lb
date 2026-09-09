@@ -43,6 +43,8 @@ from app.core.clients.proxy import (
     _CHATGPT_ACCOUNT_ID_HEADER,
     _HOP_BY_HOP_HEADER_NAMES,
     CODEX_INSTALLATION_ID_HEADER,
+    CODEX_ROUTING_HINT_HEADER,
+    MAX_SSE_EVENT_BYTES,
     ProxyResponseError,
     _is_native_codex_request,
     _is_upstream_edge_challenge,
@@ -719,6 +721,7 @@ def _build_upstream_websocket_headers(
     *,
     include_responses_beta: bool = True,
     normalize_non_native_fingerprint: bool = True,
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> dict[str, str]:
     headers = filter_inbound_websocket_headers(inbound)
     # ``filter_inbound_websocket_headers`` strips ``x-codex-installation-id`` because it
@@ -755,6 +758,11 @@ def _build_upstream_websocket_headers(
             headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
     if include_responses_beta:
         _ensure_responses_websocket_beta_header(headers)
+    if routing_hint is not None:
+        model, service_tier = routing_hint
+        headers[CODEX_ROUTING_HINT_HEADER] = f"model={model}"
+        if service_tier is not None:
+            headers[CODEX_ROUTING_HINT_HEADER] += f";tier={service_tier}"
     return headers
 
 
@@ -888,10 +896,13 @@ async def _connect_upstream_websocket(
     allow_direct_egress: bool = False,
     policy: _UpstreamWebSocketPolicy,
     subprotocols: Sequence[str] = (),
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> UpstreamWebSocket:
     settings = with_dashboard_overrides(get_settings())
     if policy.include_responses_beta:
-        upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_websocket_headers(
+            headers, access_token, account_id, routing_hint=routing_hint
+        )
     else:
         upstream_headers = _build_upstream_live_websocket_headers(headers, access_token, account_id)
     require_route_or_direct_egress_opt_in(
@@ -917,7 +928,7 @@ async def _connect_upstream_websocket(
                     retry_network_errors=policy.retry_routed_network_errors,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=settings.max_sse_event_bytes,
+                    max_msg_size=MAX_SSE_EVENT_BYTES,
                     heartbeat=heartbeat,
                     compress=15,
                     native_interpret_responses=policy.include_responses_beta,
@@ -935,7 +946,7 @@ async def _connect_upstream_websocket(
                     route=route,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=settings.max_sse_event_bytes,
+                    max_msg_size=MAX_SSE_EVENT_BYTES,
                     heartbeat=heartbeat,
                     compress=15,
                     **protocol_kwargs,
@@ -1044,7 +1055,7 @@ async def _connect_upstream_websocket(
                     url=url,
                     headers=native_headers,
                     connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
-                    max_message_bytes=settings.max_sse_event_bytes,
+                    max_message_bytes=MAX_SSE_EVENT_BYTES,
                     ping_interval_seconds=20.0,
                     ping_timeout_seconds=ping_timeout,
                     proxy_url=proxy_url,
@@ -1091,7 +1102,7 @@ async def _connect_upstream_websocket(
             user_agent_header=user_agent,
             open_timeout=settings.upstream_connect_timeout_seconds,
             ping_timeout=ping_timeout,
-            max_size=settings.max_sse_event_bytes,
+            max_size=MAX_SSE_EVENT_BYTES,
             proxy=proxy_url,
             # Codex offers permessage-deflate on its upstream handshake. Keep
             # the direct path's default offer aligned with the routed aiohttp
@@ -1254,6 +1265,7 @@ async def connect_responses_websocket(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> UpstreamWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -1266,6 +1278,7 @@ async def connect_responses_websocket(
         codex_client=codex_client,
         allow_direct_egress=allow_direct_egress,
         policy=_RESPONSES_WEBSOCKET_POLICY,
+        routing_hint=routing_hint,
     )
 
 

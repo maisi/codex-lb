@@ -788,14 +788,22 @@ from app.modules.proxy.load_balancer import (
     AccountLeaseKind,
     AccountSelection,
     LoadBalancer,
+    RoutingTunables,
     effective_account_concurrency_caps,
+    effective_routing_tunables,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
 from app.modules.proxy.selection_errors import selection_failure_response
-from app.modules.proxy.work_admission import WorkAdmissionController
+from app.modules.proxy.work_admission import (
+    ADMISSION_WAIT_TIMEOUT_SECONDS,
+    COMPACT_RESPONSE_CREATE_LIMIT,
+    TOKEN_REFRESH_LIMIT,
+    UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+    WorkAdmissionController,
+)
 
 
 def get_settings() -> _Settings:
@@ -818,21 +826,12 @@ _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 # error probe window. If a keepalive becomes the first yielded chunk, the HTTP
 # status is committed as 200 and startup ProxyResponseError handling is masked.
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
-_DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    settings = settings or get_settings()
-    raw_timeout = getattr(
-        settings,
-        "proxy_admission_wait_timeout_seconds",
-        _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS,
-    )
-    try:
-        timeout = float(raw_timeout)
-    except (TypeError, ValueError):
-        timeout = _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS
-    return max(0.001, timeout)
+def _proxy_admission_wait_timeout_seconds() -> float:
+    # Module-level indirection so the HTTP bridge helpers and tests share one
+    # patch point for the fixed admission wait.
+    return ADMISSION_WAIT_TIMEOUT_SECONDS
 
 
 # Maximum time (seconds) to wait for a prewarm upstream response before
@@ -995,13 +994,12 @@ class ProxyService(
 
     def _get_work_admission(self) -> WorkAdmissionController:
         if self._work_admission is None:
-            settings = get_settings()
             self._work_admission = WorkAdmissionController(
-                token_refresh_limit=settings.proxy_token_refresh_limit,
-                websocket_connect_limit=settings.proxy_upstream_websocket_connect_limit,
-                response_create_limit=settings.proxy_response_create_limit,
-                compact_response_create_limit=settings.proxy_compact_response_create_limit,
-                admission_wait_timeout_seconds=getattr(settings, "proxy_admission_wait_timeout_seconds", 10.0),
+                token_refresh_limit=TOKEN_REFRESH_LIMIT,
+                websocket_connect_limit=UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+                response_create_limit=get_settings().proxy_response_create_limit,
+                compact_response_create_limit=COMPACT_RESPONSE_CREATE_LIMIT,
+                admission_wait_timeout_seconds=_proxy_admission_wait_timeout_seconds(),
                 scheduler=self._scheduler,
             )
         return self._work_admission
@@ -1312,6 +1310,7 @@ class ProxyService(
         compact: bool = False,
         account_id: str | None = None,
         surface: str = "websocket",
+        routing_tunables: RoutingTunables | None = None,
     ) -> None:
         scheduler = self._scheduler
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
@@ -1322,12 +1321,15 @@ class ProxyService(
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = self._clock.monotonic()
         if account_id is not None:
+            # One cached snapshot for this lease operation; a caller that already
+            # resolved the tunables for the same turn (bridge submit) passes them.
             settings = await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=account_id,
                 request_id=request_state.request_id,
                 surface=surface,
                 concurrency_caps=effective_account_concurrency_caps(settings),
+                routing_tunables=routing_tunables or effective_routing_tunables(settings),
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
@@ -1854,6 +1856,7 @@ class ProxyService(
             with self._scheduler.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
                 concurrency_caps = effective_account_concurrency_caps(settings)
+                routing_tunables = effective_routing_tunables(settings)  # C2-2 routing/overload
                 stream_reserve_slots = (
                     (
                         get_settings().proxy_account_stream_recovery_reserve
@@ -1956,6 +1959,7 @@ class ProxyService(
                         routing_strategy=routing_strategy,
                         relative_availability_power=_relative_availability_power(settings),
                         relative_availability_top_k=_relative_availability_top_k(settings),
+                        routing_tunables=routing_tunables,
                         model=model,
                         service_tier=service_tier,
                         additional_limit_name=additional_limit_name,
@@ -2044,6 +2048,7 @@ class ProxyService(
                     redact_sensitive_details=redact_sensitive_details,
                     api_key_id=api_key_id,
                     api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
+                    routing_tunables=routing_tunables,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(
@@ -2085,11 +2090,13 @@ class ProxyService(
         request_id: str,
         surface: str,
         concurrency_caps: AccountConcurrencyCaps,
+        routing_tunables: RoutingTunables | None = None,
     ) -> AccountLease:
         lease = await self._load_balancer.acquire_account_lease(
             account_id,
             kind="response_create",
             concurrency_caps=concurrency_caps,
+            routing_tunables=routing_tunables,
         )
         if lease is not None:
             return lease
@@ -2138,6 +2145,7 @@ class ProxyService(
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,
             concurrency_caps=effective_account_concurrency_caps(settings),
+            routing_tunables=effective_routing_tunables(settings),
             stream_reserve_slots=(
                 (
                     get_settings().proxy_account_stream_recovery_reserve
@@ -2174,6 +2182,7 @@ class ProxyService(
                 code,
                 http_status=exc.status_code,
                 privacy_policy=privacy_policy,
+                retry_after_seconds=exc.retry_after_seconds,
             )
             return
         await self._handle_stream_error(
@@ -2181,6 +2190,7 @@ class ProxyService(
             _upstream_error_from_openai(error),
             code,
             http_status=exc.status_code,
+            retry_after_seconds=exc.retry_after_seconds,
         )
 
 
