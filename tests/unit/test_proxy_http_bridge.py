@@ -43,7 +43,11 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.clock import REAL_SCHEDULER, RealScheduler
 from app.core.config.settings import Settings
-from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
+from app.core.errors import (
+    HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
+    openai_error,
+)
 from app.core.openai.models import OpenAIError, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
@@ -17817,7 +17821,7 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
             "error": {
                 "type": "server_error",
                 "code": owner_error_code,
-                "message": "Previous response owner account is unavailable; retry later.",
+                "message": PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
             }
         },
     )
@@ -29072,7 +29076,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
         502,
         proxy_service.openai_error(
             "previous_response_owner_unavailable",
-            "Previous response owner account is unavailable; retry later.",
+            PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
             error_type="server_error",
         ),
     )
@@ -29478,7 +29482,7 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
         502,
         openai_error(
             "previous_response_owner_unavailable",
-            "Previous response owner account is unavailable; retry later.",
+            PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
         ),
     )
     first_session: proxy_service._HTTPBridgeSession | None = None

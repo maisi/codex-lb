@@ -90,6 +90,11 @@ class ResponseFailedEvent(TypedDict):
     _codex_lb_synthetic_transport_failure: NotRequired[bool]
 
 
+PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE = (
+    "Previous response owner account is unavailable. Retry with complete account-neutral history "
+    "without previous_response_id, or start a new session."
+)
+
 PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE = "Upstream websocket closed before response.completed"
 # Local bridge recovery (fresh replay, context-overflow rollover, previous
 # response rebind) tears down our own upstream session. It is not an upstream

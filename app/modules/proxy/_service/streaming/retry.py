@@ -22,6 +22,7 @@ from app.core.clients.proxy import (
 )
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
     openai_error,
     synthetic_transport_failure_event,
@@ -1178,7 +1179,7 @@ class _StreamingRetryMixin:
                         account_ids=None,
                     )
                     if len(selection_inputs.accounts) != 1:
-                        message = "Previous response owner account is unavailable; retry later."
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         _record_continuity_fail_closed(
                             surface="http_stream",
                             reason="owner_account_unavailable",
@@ -1607,7 +1608,7 @@ class _StreamingRetryMixin:
                         return
                     if require_preferred_account and preferred_account_id is not None:
                         error_code = "previous_response_owner_unavailable"
-                        message = "Previous response owner account is unavailable; retry later."
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         reason = "owner_account_unavailable"
                         upstream_error_code = "no_accounts"
                         if selection.error_code == "continuity_owner_conflict":
@@ -1758,7 +1759,7 @@ class _StreamingRetryMixin:
                         )
                     else:
                         error_code = "previous_response_owner_unavailable"
-                        message = "Previous response owner account is unavailable; retry later."
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         reason = "owner_account_unavailable"
                         upstream_error_code = "upstream_unavailable"
                         if selection.error_code == "continuity_owner_conflict":

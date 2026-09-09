@@ -16,6 +16,7 @@ import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
+from app.core.errors import PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
@@ -1613,7 +1614,7 @@ async def test_v1_responses_missing_previous_response_owner_fails_closed_before_
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
-    assert response.json()["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert response.json()["error"]["message"] == PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
 
 
 @pytest.mark.asyncio

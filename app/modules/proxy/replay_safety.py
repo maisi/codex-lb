@@ -423,6 +423,18 @@ def responses_input_suffix_matches_pending_tool_calls(
         and _fresh_developer_interleave_is_bounded(suffix, index=1)
     ):
         suffix = [suffix[0], suffix[2]]
+    # Fresh user input may follow a complete manifest, but cannot replace
+    # missing results or relax the canonical ownership/known-fields checks.
+    first_followup = next(
+        (index for index, item in enumerate(suffix) if isinstance(item, dict) and _is_fresh_followup_input(item)),
+        len(suffix),
+    )
+    followup = suffix[first_followup:]
+    if not all(isinstance(item, dict) and _is_fresh_followup_input(item) for item in followup):
+        return False
+    if not responses_input_items_are_self_contained_fresh_replay(followup):
+        return False
+    suffix = suffix[:first_followup]
     if not all(
         isinstance(item, dict)
         and isinstance(item.get("type"), str)

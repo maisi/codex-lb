@@ -52,7 +52,12 @@ from app.core.clients.proxy_websocket import (
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
-from app.core.errors import SYNTHETIC_TRANSPORT_FAILURE_MARKER, OpenAIErrorParam, openai_error
+from app.core.errors import (
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
+    SYNTHETIC_TRANSPORT_FAILURE_MARKER,
+    OpenAIErrorParam,
+    openai_error,
+)
 from app.core.exceptions import ProxyReasoningEffortNotAllowed
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
@@ -24346,7 +24351,7 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
     sent_payload = json.loads(await_args.args[0])
     assert sent_payload["status"] == 502
     assert sent_payload["error"]["code"] == "previous_response_owner_unavailable"
-    assert sent_payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert sent_payload["error"]["message"] == PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
     assert request_logs.calls[0]["request_id"] == "ws_req_prev_owner_handshake_429"
     assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
     assert request_logs.calls[0]["account_id"] == account_owner.id
@@ -25062,7 +25067,7 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
     sent_payload = json.loads(await_args.args[0])
     assert sent_payload["status"] == 502
     assert sent_payload["error"]["code"] == "previous_response_owner_unavailable"
-    assert sent_payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert sent_payload["error"]["message"] == PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
     assert request_logs.calls[0]["account_id"] == "acc_owner"
     assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
     assert "continuity_fail_closed surface=websocket_connect reason=owner_account_unavailable" in caplog.text
@@ -32351,7 +32356,7 @@ async def test_process_upstream_websocket_text_maps_previous_response_usage_limi
     response_payload = cast(dict[str, JsonValue], payload["response"])
     error_payload = cast(dict[str, JsonValue], response_payload["error"])
     assert error_payload["code"] == "upstream_unavailable"
-    assert error_payload["message"] == "Previous response owner account is unavailable; retry later."
+    assert error_payload["message"] == PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
     assert upstream_control.reconnect_requested is False
     assert upstream_control.suppress_downstream_event is False
     assert upstream_control.replay_request_state is None
@@ -39863,11 +39868,11 @@ async def test_emit_websocket_connect_failure_releases_response_create_gate(monk
         status_code=502,
         payload=openai_error(
             "upstream_unavailable",
-            "Previous response owner account is unavailable; retry later.",
+            PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
             error_type="server_error",
         ),
         error_code="upstream_unavailable",
-        error_message="Previous response owner account is unavailable; retry later.",
+        error_message=PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
     )
 
     release_reservation.assert_awaited_once_with(None)
@@ -41095,7 +41100,7 @@ async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypat
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
-    assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert event["response"]["error"]["message"] == PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
     assert request_logs.lookup_calls == [("resp_prev_anchor", None, "sid-stream")]
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
@@ -41535,7 +41540,7 @@ async def test_stream_prompt_cache_key_does_not_soften_previous_response_owner(m
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
-    assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert event["response"]["error"]["message"] == PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
     assert request_logs.lookup_calls == [("resp_prev_anchor", None, "sid-stream")]
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
@@ -41581,7 +41586,7 @@ async def test_stream_selection_fail_closed_records_owner_unavailable_metric(mon
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
-    assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert event["response"]["error"]["message"] == PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["account_id"] == "acc_prev_owner_stream"
     assert "continuity_fail_closed surface=http_stream reason=owner_account_unavailable" in caplog.text
@@ -41638,7 +41643,7 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
-    assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert event["response"]["error"]["message"] == PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
     assert request_logs.lookup_calls == [("resp_missing_owner", None, "sid-stream")]
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
