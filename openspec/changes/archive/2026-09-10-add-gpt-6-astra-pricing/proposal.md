@@ -55,6 +55,6 @@ change how every other model is read:
 - Codex does not apply the long-context multiplier above 272,000 input tokens and
   does not charge for cache writes.
 
-Codex-routed Astra cost will therefore read slightly high for Fast traffic and
-for prompts past the long-context boundary. Aligning the table with per-surface
+API-equivalent estimates therefore differ from Codex subscription accounting
+for Fast traffic and prompts past the long-context boundary. Aligning the table with per-surface
 rate cards is a larger contract change and belongs in its own proposal.

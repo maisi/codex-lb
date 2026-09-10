@@ -37,3 +37,10 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+
+## Astra pricing
+
+Astra and its dated snapshots use the imported API rate card through the same pricing path as other models. Standard input/cached-input/output rates are $10/$1/$50 per million tokens; priority uses $20/$2/$100 and Flex $5/$0.50/$25. Above 272,000 input tokens, standard long-context rates are $20/$2/$75. These are API-equivalent estimates, not Codex subscription charges. Existing recorded request-log costs are not retroactively rewritten.
+
+For example, a standard request with 200,000 input tokens, including 100,000 cached tokens, and 1,000,000 output tokens costs $51.10. Pricing now contributes to budget reservations, settlement, request logs and reports instead of being skipped as an unknown model.
