@@ -3338,7 +3338,11 @@ async def test_compact_cost_limit_prefers_response_service_tier_over_request(
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_non_stream_finalizes_cost_limit(async_client, monkeypatch):
+@pytest.mark.parametrize(
+    ("model", "max_cost", "final_cost"),
+    [("gpt-5.4", 30_000_000, 55_000_000), ("gpt-6-astra", 100_000_000, 190_000_000)],
+)
+async def test_v1_responses_non_stream_finalizes_cost_limit(async_client, monkeypatch, model, max_cost, final_cost):
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -3355,7 +3359,7 @@ async def test_v1_responses_non_stream_finalizes_cost_limit(async_client, monkey
         json={
             "name": "v1-responses-cost-limit",
             "limits": [
-                {"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 30_000_000},
+                {"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": max_cost},
             ],
         },
     )
@@ -3374,28 +3378,28 @@ async def test_v1_responses_non_stream_finalizes_cost_limit(async_client, monkey
             'data: {"type":"response.completed","response":{"id":"resp_v1_cost_limit","model":"gpt-5.4",'
             '"status":"completed","service_tier":"default","usage":{"input_tokens":1000000,"output_tokens":1000000,'
             '"total_tokens":2000000}}}\n\n'
-        )
+        ).replace("gpt-5.4", model)
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     response = await async_client.post(
         "/v1/responses",
         headers={"Authorization": f"Bearer {key}"},
-        json={"model": "gpt-5.4", "input": "hi"},
+        json={"model": model, "input": "hi"},
     )
     assert response.status_code == 200
 
     second = await async_client.post(
         "/v1/responses",
         headers={"Authorization": f"Bearer {key}"},
-        json={"model": "gpt-5.4", "input": "hi"},
+        json={"model": model, "input": "hi"},
     )
     assert second.status_code == 200
 
     blocked = await async_client.post(
         "/v1/responses",
         headers={"Authorization": f"Bearer {key}"},
-        json={"model": "gpt-5.4", "input": "hi"},
+        json={"model": model, "input": "hi"},
     )
     assert blocked.status_code == 429
     assert blocked.json()["error"]["code"] == "rate_limit_exceeded"
@@ -3405,7 +3409,7 @@ async def test_v1_responses_non_stream_finalizes_cost_limit(async_client, monkey
         repo = ApiKeysRepository(session)
         limits = await repo.get_limits_by_key(key_id)
         assert len(limits) == 1
-        assert limits[0].current_value == 55_000_000
+        assert limits[0].current_value == final_cost
 
 
 @pytest.mark.asyncio
