@@ -106,6 +106,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _classify_upstream_close,
     _find_websocket_request_state_by_response_id,
     _http_error_status_from_payload,
+    _install_verified_fresh_replay,
     _is_account_neutral_transport_drop,
     _is_missing_tool_output_error,
     _is_previous_response_not_found_error,
@@ -3395,7 +3396,26 @@ class _HTTPBridgeUpstreamEventsMixin:
             and status_request_state.fresh_upstream_request_text is not None
             and not has_other_pending_requests
         ):
-            safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
+            # Retire while the exact denied id and its proxy/full-resend
+            # provenance are still attached. Fresh-body installation clears
+            # them, and a successful retry returns before the generic terminal
+            # path below gets another opportunity to publish the fence.
+            await _retire_denied_http_bridge_anchor(
+                self,
+                session,
+                request_states=(status_request_state,),
+            )
+            if status_request_state.file_required_preferred_account:
+                # The full resend still names an account-scoped upload, so it
+                # cannot use the account-switch-only preparation path. Install
+                # the verified unanchored body while retaining its owner pin;
+                # the real pre-created retry enforces that pin on reconnect.
+                safe_request_text = _install_verified_fresh_replay(
+                    status_request_state,
+                    require_account_neutral=False,
+                )
+            else:
+                safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
             if safe_request_text is not None:
                 status_request_state.request_stage = "first_turn"
                 async with session.pending_lock:
