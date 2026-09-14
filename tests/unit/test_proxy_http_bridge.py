@@ -5343,7 +5343,9 @@ async def test_denied_prompt_cache_anchor_is_retired_before_fresh_replay_and_nex
     )
     assert reconnect_observations == [(original_account.id, True, True)]
     replay_transport.assert_awaited_once()
-    replay_text = replay_transport.await_args.args[0]
+    replay_await_args = replay_transport.await_args
+    assert replay_await_args is not None
+    replay_text = replay_await_args.args[0]
     replay_payload = json.loads(replay_text)
     assert replay_payload == json.loads(full_text)
     assert "previous_response_id" not in replay_payload
@@ -5389,7 +5391,9 @@ async def test_denied_prompt_cache_anchor_is_retired_before_fresh_replay_and_nex
     )
 
     send_text.assert_awaited_once()
-    next_wire_payload = json.loads(send_text.await_args.args[0])
+    send_await_args = send_text.await_args
+    assert send_await_args is not None
+    next_wire_payload = json.loads(send_await_args.args[0])
     assert next_wire_payload.get("previous_response_id") != denied_response_id
     assert next_wire_payload["input"] == json.loads(next_full_text)["input"]
     assert session.account is original_account
