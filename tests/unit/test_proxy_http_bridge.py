@@ -5116,22 +5116,19 @@ def _make_prompt_cache_continuation_case(
         *stored_items,
         {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
     ]
-    text_data = json.dumps(
-        {"type": "response.create", "model": "gpt-5.6-sol", "input": incoming_items},
-        separators=(",", ":"),
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": incoming_items,
+        }
     )
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="req-openclaw",
-        model="gpt-5.6-sol",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=1.0,
+    request_state, text_data = service._prepare_http_bridge_request(
+        payload,
+        {},
         api_key=api_key,
-        request_text=text_data,
-        input_item_count=len(incoming_items),
-        input_full_fingerprint=proxy_service._fingerprint_input_items(cast(Any, incoming_items)),
-        transport="http",
+        api_key_reservation=None,
+        request_id="req-openclaw",
     )
     session = _make_bridge_session(
         key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "cache-openclaw", api_key.id),
@@ -5188,6 +5185,7 @@ async def test_prompt_cache_continuation_injects_exact_prefix_and_forwards_only_
     assert payload["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}]
     assert request_state.fresh_upstream_request_text == text_data
     assert request_state.fresh_upstream_request_is_retry_safe is True
+    assert request_state.proxy_injected_anchor_had_full_resend_payload is True
     assert request_state.request_stage == "follow_up"
     assert request_state.preferred_account_id == "acc-openclaw"
     assert request_state.bridge_soft_capacity_reroute_allowed is False
@@ -5198,6 +5196,307 @@ async def test_prompt_cache_continuation_injects_exact_prefix_and_forwards_only_
         call(outcome="success", reason="exact_prefix", request_id="req-openclaw"),
     ]
     assert request_state.prompt_cache_continuation_success_recorded is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_succeeds", [True, False], ids=["retry-sent", "retry-not-sent"])
+@pytest.mark.parametrize("next_enabled", [True, False], ids=["next-enabled", "next-disabled-control"])
+async def test_denied_prompt_cache_anchor_is_retired_before_fresh_replay_and_next_submit(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    retry_succeeds: bool,
+    next_enabled: bool,
+) -> None:
+    """A replay send is not a completion and must not preserve its denied parent."""
+    file_id = "file_owner_pinned_denied_anchor_replay"
+    full_input = [
+        {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "next"},
+                {"type": "input_file", "file_id": file_id},
+            ],
+        },
+    ]
+    service, session, request_state, full_text, _stored_items = _make_prompt_cache_continuation_case(
+        input_items=full_input
+    )
+    session.durable_session_id = "durable-prompt-cache-denial"
+    session.durable_owner_epoch = 7
+    session.previous_response_ids.update({"resp-openclaw-previous", "resp-unrelated-sibling"})
+    request_state.event_queue = asyncio.Queue()
+    request_state.skip_request_log = True
+    request_state.file_required_preferred_account = True
+    request_state.account_response_create_lease = cast(Any, object())
+    original_account = session.account
+    other_session = _make_bridge_session(key_value="other-account-continuity")
+    other_session.account = cast(
+        Any,
+        SimpleNamespace(id="acc-other", status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    other_session.last_completed_response_id = "resp-other-account"
+    service._http_bridge_sessions[other_session.key] = other_session
+
+    anchored_text = await service._prepare_prompt_cache_affinity_continuation(
+        session,
+        request_state=request_state,
+        text_data=full_text,
+    )
+    denied_response_id = request_state.previous_response_id
+    assert denied_response_id == "resp-openclaw-previous"
+    assert request_state.proxy_injected_anchor_had_full_resend_payload is True
+    assert json.loads(anchored_text)["input"] != json.loads(full_text)["input"]
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+    request_state.awaiting_response_created = True
+
+    async def unregister_exact_response_id(
+        target_session: proxy_service._HTTPBridgeSession,
+        response_id: str,
+        **_kwargs: Any,
+    ) -> bool:
+        target_session.previous_response_ids.discard(response_id)
+        return True
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            clear_live_session_response_anchor_if_matches=AsyncMock(return_value=SimpleNamespace()),
+        ),
+    )
+    service._unregister_http_bridge_previous_response_id = AsyncMock(  # type: ignore[method-assign]
+        side_effect=unregister_exact_response_id
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    retirement_snapshots: list[tuple[str | None, bool, str | None]] = []
+    real_retire = http_bridge_upstream_events_module._retire_denied_http_bridge_anchor
+
+    async def observe_retirement_before_mutation(
+        target_service: Any,
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_states: Any,
+    ) -> None:
+        states = tuple(request_states)
+        retirement_snapshots.append(
+            (
+                states[0].previous_response_id,
+                states[0].proxy_injected_previous_response_id,
+                states[0].request_text,
+            )
+        )
+        await real_retire(target_service, target_session, request_states=states)
+
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_retire_denied_http_bridge_anchor",
+        observe_retirement_before_mutation,
+    )
+    reconnect_observations: list[tuple[str | None, bool, bool]] = []
+    replay_transport = AsyncMock()
+    if not retry_succeeds:
+        replay_transport.side_effect = RuntimeError("hermetic replacement transport failure")
+
+    async def reconnect(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        require_same_account: bool = False,
+        require_preferred_account: bool = False,
+        restart_reader: bool = False,
+    ) -> None:
+        assert target_session is session
+        assert target_session.account is original_account
+        assert request_state.file_required_preferred_account is True
+        assert request_state.previous_response_id is None
+        assert request_state.request_text is not None
+        reconnect_observations.append(
+            (request_state.preferred_account_id, require_same_account, require_preferred_account)
+        )
+        assert restart_reader is False
+        target_session.upstream = cast(
+            UpstreamWebSocket,
+            SimpleNamespace(send_text=replay_transport, close=AsyncMock()),
+        )
+
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "param": "previous_response_id",
+                    "message": f"Previous response with id '{denied_response_id}' not found.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+    assert reconnect_observations == [(original_account.id, True, True)]
+    replay_transport.assert_awaited_once()
+    replay_await_args = replay_transport.await_args
+    assert replay_await_args is not None
+    replay_text = replay_await_args.args[0]
+    replay_payload = json.loads(replay_text)
+    assert replay_payload == json.loads(full_text)
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == full_input
+    assert replay_payload["input"][-1]["content"][-1] == {
+        "type": "input_file",
+        "file_id": file_id,
+    }
+
+    # A successful reconnect/send is not response.completed. Model an
+    # interruption or a later turn before any replacement completion exists.
+    await proxy_service._release_websocket_response_create_gate(
+        request_state,
+        session.response_create_gate,
+        scheduler=REAL_SCHEDULER,
+    )
+    session.pending_requests.clear()
+    session.queued_request_count = 0
+    _, _, next_request_state, next_full_text, _ = _make_prompt_cache_continuation_case(enabled=next_enabled)
+    next_request_state.started_at = time.monotonic()
+    next_request_state.skip_request_log = True
+    next_request_state.event_queue = asyncio.Queue()
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    session.upstream_control.reconnect_requested = False
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_reacquire_snapshot", AsyncMock(return_value=(0, None)))
+    monkeypatch.setattr(service, "_ensure_http_bridge_session_stream_lease_locked", AsyncMock())
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+
+    await service._submit_http_bridge_request_with_handoff(
+        session,
+        request_state=next_request_state,
+        text_data=next_full_text,
+        queue_limit=8,
+        request_scope_id=f"denied-prompt-cache-next-{retry_succeeds}-{next_enabled}",
+        owned_unanchored_handoff=False,
+    )
+
+    send_text.assert_awaited_once()
+    send_await_args = send_text.await_args
+    assert send_await_args is not None
+    next_wire_payload = json.loads(send_await_args.args[0])
+    assert next_wire_payload.get("previous_response_id") != denied_response_id
+    assert next_wire_payload["input"] == json.loads(next_full_text)["input"]
+    assert session.account is original_account
+    assert other_session.last_completed_response_id == "resp-other-account"
+    assert "resp-unrelated-sibling" in session.previous_response_ids
+    assert request_state.file_required_preferred_account is True
+    if next_enabled:
+        assert retirement_snapshots[0] == (denied_response_id, True, anchored_text)
+        assert all(snapshot[0] is None and snapshot[1] is False for snapshot in retirement_snapshots[1:])
+        assert session.last_completed_response_id != denied_response_id
+        assert denied_response_id not in session.previous_response_ids
+    else:
+        assert next_request_state.prompt_cache_continuation_attempted is False
+
+
+@pytest.mark.asyncio
+async def test_denied_prompt_cache_retirement_preserves_newer_sibling_and_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session, request_state, full_text, _stored_items = _make_prompt_cache_continuation_case()
+    session.durable_session_id = "durable-prompt-cache-sibling"
+    session.durable_owner_epoch = 9
+    session.previous_response_ids.update({"resp-openclaw-previous", "resp-newer-sibling", "resp-unrelated-alias"})
+    request_state.event_queue = asyncio.Queue()
+    request_state.skip_request_log = True
+    request_state.file_required_preferred_account = True
+    original_account = session.account
+    anchored_text = await service._prepare_prompt_cache_affinity_continuation(
+        session,
+        request_state=request_state,
+        text_data=full_text,
+    )
+    denied_response_id = request_state.previous_response_id
+    assert denied_response_id == "resp-openclaw-previous"
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+    request_state.awaiting_response_created = True
+
+    # Model a sibling completion that wins before the older denial is handled.
+    sibling_fingerprint = "newer-sibling-prefix"
+    session.last_completed_response_id = "resp-newer-sibling"
+    session.last_completed_response_account_id = original_account.id
+    session.last_completed_input_count = 17
+    session.last_completed_input_prefix_fingerprint = sibling_fingerprint
+    session.last_pending_tool_calls = {"call-newer": "tool-newer"}
+    other_session = _make_bridge_session(key_value="other-account-sibling-preservation")
+    other_session.account = cast(
+        Any,
+        SimpleNamespace(id="acc-other", status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    other_session.last_completed_response_id = "resp-other-account"
+    service._http_bridge_sessions[other_session.key] = other_session
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(clear_live_session_response_anchor_if_matches=AsyncMock()),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    async def retry_fresh(target_session: proxy_service._HTTPBridgeSession) -> bool:
+        assert target_session is session
+        assert request_state.request_text is not None
+        assert json.loads(request_state.request_text) == json.loads(full_text)
+        assert request_state.file_required_preferred_account is True
+        assert target_session.account is original_account
+        return True
+
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_fresh)
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "param": "previous_response_id",
+                    "message": f"Previous response with id '{denied_response_id}' not found.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert json.loads(anchored_text)["previous_response_id"] == denied_response_id
+    assert session.last_completed_response_id == "resp-newer-sibling"
+    assert session.last_completed_response_account_id == original_account.id
+    assert session.last_completed_input_count == 17
+    assert session.last_completed_input_prefix_fingerprint == sibling_fingerprint
+    assert session.last_pending_tool_calls == {"call-newer": "tool-newer"}
+    assert session.previous_response_ids == {
+        "resp-openclaw-previous",
+        "resp-newer-sibling",
+        "resp-unrelated-alias",
+    }
+    assert denied_response_id in session.denied_proxy_injected_anchor_ids
+    assert denied_response_id in service._http_bridge_denied_anchor_fences
+    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_not_awaited()
+    assert other_session.last_completed_response_id == "resp-other-account"
+    assert request_state.file_required_preferred_account is True
+    assert session.account is original_account
 
 
 @pytest.mark.asyncio
