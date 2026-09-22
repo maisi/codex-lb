@@ -17,6 +17,7 @@ from app.modules.reports.filters import (
 from app.modules.reports.rollup import MEASURES
 from app.modules.reports.rollup_read import report_source
 from app.modules.reports.schemas import ApiKeyReportOption
+from app.modules.reports.thread_identity import ThreadIdentityFacetRow, aggregate_thread_identity
 
 _SQLITE_COMPOUND_SELECT_LIMIT = 500
 MAX_DAILY_REPORT_DAYS = 730
@@ -309,6 +310,19 @@ class ReportsRepository:
             for row in result.all()
         ]
 
+    async def aggregate_thread_identity(
+        self,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> dict[bool, ThreadIdentityFacetRow]:
+        """Keyed and unkeyed thread-identity counters for one bounded window.
+
+        Deliberately unfiltered by account, API key, model or user agent: an
+        account filter would force every conversation to one account and make
+        the accounts-per-conversation factor read 1.0 by construction.
+        """
+        return await aggregate_thread_identity(self._session, start_at, end_at)
+
     async def earliest_report_activity_at(
         self,
         account_ids: list[str] | None = None,
@@ -387,8 +401,6 @@ def _report_conditions(
         conditions.append(RequestLog.account_id.in_(account_ids))
     if model:
         conditions.append(RequestLog.model == model)
-    if api_key_ids:
-        conditions.append(RequestLog.api_key_id.in_(api_key_ids))
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     if useragent_group_clause is not None:
         conditions.append(useragent_group_clause)
@@ -429,7 +441,6 @@ def _daily_speed_medians_stmt(
             *([RequestLog.model == model] if model else []),
             *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
             *([useragent_group_clause] if useragent_group_clause is not None else []),
-            *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
         ),
     )
     token_count = RequestLog.output_tokens - func.coalesce(RequestLog.reasoning_tokens, 0)

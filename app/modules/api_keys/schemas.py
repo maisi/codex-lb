@@ -38,6 +38,7 @@ class ApiKeyCreateRequest(DashboardModel):
     enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|(ultra)?fast)$")
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
     transport_policy_override: str | None = None
+    thread_cache_identity_override: str | None = None
     usage_sections: str | None = None
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
@@ -64,6 +65,7 @@ class ApiKeyUpdateRequest(DashboardModel):
     enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|(ultra)?fast)$")
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
     transport_policy_override: str | None = None
+    thread_cache_identity_override: str | None = None
     usage_sections: str | None = None
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
@@ -99,6 +101,7 @@ class ApiKeyResponse(DashboardModel):
     enforced_service_tier: str | None
     traffic_class: str
     transport_policy_override: str | None = None
+    thread_cache_identity_override: str | None = None
     usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None
     is_active: bool

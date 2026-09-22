@@ -21,7 +21,11 @@ const ALL_CHART_LABELS = [
   "Time to First Token",
   "Tokens per Second",
   "Queue Wait",
+  "Thread Identity & Cache Locality",
 ];
+// Derived so adding a card to REPORT_CHART_DEFINITIONS does not silently
+// leave these assertions checking a stale count.
+const ALL_CHARTS_BUTTON = `Charts (${ALL_CHART_IDS.length})`;
 
 describe("ReportsFilters", () => {
   afterEach(() => {
@@ -291,7 +295,7 @@ describe("ReportsFilters", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Charts (5)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: ALL_CHARTS_BUTTON })).toBeInTheDocument();
   });
 
   it("places the chart selector before the start date", () => {
@@ -310,7 +314,7 @@ describe("ReportsFilters", () => {
       />,
     );
 
-    const chartButton = screen.getByRole("button", { name: "Charts (5)" });
+    const chartButton = screen.getByRole("button", { name: ALL_CHARTS_BUTTON });
     const startDate = container.querySelector('input[name="report-start-date"]');
 
     expect(startDate).not.toBeNull();
@@ -336,14 +340,14 @@ describe("ReportsFilters", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Charts (5)" }));
+    await user.click(screen.getByRole("button", { name: ALL_CHARTS_BUTTON }));
 
     expect(screen.getAllByRole("menuitemcheckbox").map((item) => item.textContent)).toEqual(
       ALL_CHART_LABELS,
     );
   });
 
-  it("returns the other four chart IDs when Queue Wait is toggled off", async () => {
+  it("returns the remaining chart IDs when Queue Wait is toggled off", async () => {
     const user = userEvent.setup();
     const onVisibleChartIdsChange = vi.fn();
     render(
@@ -361,7 +365,7 @@ describe("ReportsFilters", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Charts (5)" }));
+    await user.click(screen.getByRole("button", { name: ALL_CHARTS_BUTTON }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: "Queue Wait" }));
 
     expect(onVisibleChartIdsChange).toHaveBeenCalledWith(

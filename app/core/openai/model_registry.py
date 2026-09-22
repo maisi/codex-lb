@@ -733,8 +733,13 @@ class ModelRegistry:
         *,
         per_account_results: dict[str, tuple[str, list[UpstreamModel]]] | None = None,
         active_account_plans: dict[str, str] | None = None,
+        retained_account_plans: dict[str, str] | None = None,
     ) -> None:
-        if not per_plan_results:
+        # An explicit empty account result is used when every account is
+        # temporarily capacity-limited. It must still reconcile removals and
+        # retain last-known catalogs; the legacy plan-only empty update remains
+        # a no-op for callers that have no account coverage.
+        if not per_plan_results and not (per_account_results is not None and active_account_plans is not None):
             logger.warning("Model registry refresh produced no plan results; keeping cached snapshot")
             return
 
@@ -750,6 +755,13 @@ class ModelRegistry:
                 suppressed_model_slugs: set[str] = (
                     set(previous.suppressed_model_slugs) if previous is not None else set()
                 )
+                catalog_account_plans = dict(active_account_plans or {})
+                if previous is not None and retained_account_plans:
+                    for account_id, plan_type in retained_account_plans.items():
+                        # A capacity-limited account may retain evidence only
+                        # while it remains on the plan that produced it.
+                        if previous.account_plans.get(account_id) == plan_type:
+                            catalog_account_plans[account_id] = plan_type
 
                 # Carry over data from plans not present in per_plan_results
                 if previous is not None:
@@ -757,25 +769,25 @@ class ModelRegistry:
                     refreshed_plans = set(per_plan_results.keys())
                     stale_plans = previous_plans - refreshed_plans
                     if active_account_plans is not None:
-                        stale_plans.intersection_update(active_account_plans.values())
+                        stale_plans.intersection_update(catalog_account_plans.values())
                         stale_account_ids = {
                             account_id
                             for account_id, plan_type in previous.account_plans.items()
-                            if account_id in active_account_plans
+                            if account_id in catalog_account_plans
                             and plan_type in stale_plans
-                            and active_account_plans[account_id] == plan_type
+                            and catalog_account_plans[account_id] == plan_type
                         }
                         refreshed_account_ids = set(per_account_results or {})
                         stale_account_ids.update(
                             account_id
                             for account_id, previous_plan_type in previous.account_plans.items()
-                            if account_id in active_account_plans
+                            if account_id in catalog_account_plans
                             and account_id not in refreshed_account_ids
                             # A retained catalog proves capabilities only for the
                             # plan that produced it. A plan change without a fresh
                             # catalog leaves the active account unknown instead of
                             # re-labeling old entitlements as new-plan support.
-                            and active_account_plans[account_id] == previous_plan_type
+                            and catalog_account_plans[account_id] == previous_plan_type
                         )
                     else:
                         stale_account_ids = {
@@ -811,7 +823,8 @@ class ModelRegistry:
                                 if account_id not in stale_account_ids:
                                     continue
                                 plan_of_account = active_account_plans.get(
-                                    account_id, previous.account_plans.get(account_id)
+                                    account_id,
+                                    catalog_account_plans.get(account_id, previous.account_plans.get(account_id)),
                                 )
                                 if plan_of_account in stale_plans:
                                     supported_stale_slugs.setdefault(plan_of_account, set()).add(slug)
@@ -838,9 +851,13 @@ class ModelRegistry:
                                     model_service_tier_plans.setdefault(slug, {}).setdefault(service_tier, set()).add(
                                         plan_type
                                     )
+                    # ``stale_account_ids`` includes capacity-limited accounts
+                    # even when their plan was refreshed by another account. A
+                    # plan-level refresh cannot prove that this specific account
+                    # lost a private model or service tier.
                     for account_id in stale_account_ids:
                         plan_type = (
-                            active_account_plans.get(account_id)
+                            catalog_account_plans.get(account_id)
                             if active_account_plans is not None
                             else previous.account_plans.get(account_id)
                         )

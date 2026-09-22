@@ -109,7 +109,7 @@ async def test_fetch_models_for_plan_marks_transport_errors(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-async def test_refresh_access_token_marks_transport_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_access_token_marks_transport_errors() -> None:
     session = MagicMock()
     session.post.side_effect = aiohttp.ClientError("dns failed")
 
@@ -124,19 +124,9 @@ async def test_refresh_access_token_marks_transport_errors(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_refresh_access_token_preserves_transient_dns_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_access_token_preserves_transient_dns_classification() -> None:
     session = MagicMock()
     session.post.side_effect = socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
-    monkeypatch.setattr(
-        refresh_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            auth_base_url="https://auth.example.test",
-            oauth_client_id="client-id",
-            oauth_scope="openid profile",
-        ),
-    )
-
     with pytest.raises(refresh_module.RefreshError) as exc_info:
         await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
 
@@ -147,25 +137,13 @@ async def test_refresh_access_token_preserves_transient_dns_classification(monke
 
 
 @pytest.mark.asyncio
-async def test_refresh_access_token_marks_typed_connector_dns_failure_replay_safe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_refresh_access_token_marks_typed_connector_dns_failure_replay_safe() -> None:
     session = MagicMock()
     key = ConnectionKey("auth.example.test", 443, True, True, None, None, None)
     session.post.side_effect = aiohttp.ClientConnectorError(
         key,
         socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
     )
-    monkeypatch.setattr(
-        refresh_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            auth_base_url="https://auth.example.test",
-            oauth_client_id="client-id",
-            oauth_scope="openid profile",
-        ),
-    )
-
     with pytest.raises(refresh_module.RefreshError) as exc_info:
         await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
 
@@ -175,9 +153,7 @@ async def test_refresh_access_token_marks_typed_connector_dns_failure_replay_saf
 
 
 @pytest.mark.asyncio
-async def test_refresh_access_token_network_body_read_failure_is_not_replay_safe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_refresh_access_token_network_body_read_failure_is_not_replay_safe() -> None:
     class _BodyReadFailureResponse:
         status = 200
 
@@ -196,16 +172,6 @@ async def test_refresh_access_token_network_body_read_failure_is_not_replay_safe
 
     session = MagicMock()
     session.post.return_value = _BodyReadFailureResponse()
-    monkeypatch.setattr(
-        refresh_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            auth_base_url="https://auth.example.test",
-            oauth_client_id="client-id",
-            oauth_scope="openid profile",
-        ),
-    )
-
     with pytest.raises(refresh_module.RefreshError) as exc_info:
         await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
 
@@ -645,6 +611,59 @@ async def test_refresh_once_clears_registry_when_no_active_accounts(
 
     clear.assert_awaited_once_with()
     invalidate.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED])
+async def test_refresh_once_reconciles_catalogs_when_all_accounts_are_capacity_limited(
+    monkeypatch: pytest.MonkeyPatch,
+    status: AccountStatus,
+) -> None:
+    account = _account()
+    account.status = status
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @contextlib.asynccontextmanager
+    async def _background_session():
+        yield _Session()
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self) -> list[Account]:
+            return [account]
+
+    update = AsyncMock()
+    clear = AsyncMock()
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: SimpleNamespace(update=update, clear=clear))
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_account_selection_cache",
+        lambda: SimpleNamespace(invalidate=MagicMock()),
+    )
+    monkeypatch.setattr(scheduler_module, "_persist_registry_state_and_bump", AsyncMock())
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
+    await scheduler._refresh_once()
+
+    clear.assert_not_awaited()
+    update.assert_awaited_once_with(
+        {},
+        per_account_results={},
+        active_account_plans={},
+        retained_account_plans={account.id: account.plan_type},
+    )
 
 
 @pytest.mark.asyncio

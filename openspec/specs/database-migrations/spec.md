@@ -234,6 +234,13 @@ When an upstream synchronization combines independently advanced fork and upstre
 - **THEN** the graph adds another no-op merge revision joining the current heads
 - **AND** previously published revisions remain unchanged
 
+#### Scenario: Imported upstream lineage is accepted only with explicit convergence
+- **GIVEN** an upstream release continues from a revision that the fork's base ref has already advanced beyond
+- **AND** the synchronized checkout contains a merge revision whose one parent is the current base-ref head and whose other parent is the imported upstream head
+- **WHEN** the migration topology guard checks the checkout against the base ref
+- **THEN** it accepts the imported lineage as an intentional release synchronization
+- **AND** it continues to reject the same lineage when no explicit convergence merge is present
+
 ### Requirement: Startup migrations are mutually exclusive across processes
 
 The system SHALL serialize schema upgrades and stamps across all processes sharing a database using a backend-appropriate cross-process mutex: a PostgreSQL session-level advisory lock held on a dedicated connection for the full upgrade sequence, or an exclusive write transaction on a sentinel SQLite file adjacent to a file-backed SQLite database (no-op for in-memory SQLite). After acquiring the mutex, the upgrader MUST re-inspect migration state and MUST skip applying revisions when the target is head and the schema is already at head with no legacy bootstrap or revision remap pending, completing startup successfully. Waiting for the mutex MUST be bounded by `database_migration_lock_timeout_seconds` (default 300); on timeout the system SHALL raise an explicit error naming the migration lock and the timeout setting, honoring `database_migrations_fail_fast` on the startup path.
@@ -582,3 +589,31 @@ Upgrading the integrated beta5 fork or the new upstream beta6 schema MUST conver
 - **WHEN** a database at the new upstream head upgrades to the integrated head
 - **THEN** existing rows remain intact and fork fields receive compatible defaults
 - **AND** Alembic reports one head
+
+### Requirement: Beta9 fork integration preserves deployed migration histories
+
+The integrated beta9 fork MUST provide a single Alembic head reachable from
+the deployed beta6 fork and upstream beta9 migration histories. Integration
+MUST NOT rewrite deployed revision identifiers or their parent relationships.
+Any merge revision MUST perform no schema or data operations. Upgrades MUST
+preserve existing accounts, credentials, ranked API-key assignments,
+continuation policies, and fork configuration while applying missing schema
+changes.
+
+#### Scenario: Upgrade a populated beta6 fork database
+- **GIVEN** a deployed beta6 fork database with account priorities and API-key continuation settings
+- **WHEN** it upgrades to the integrated beta9 head
+- **THEN** existing policy values and records remain intact
+- **AND** migration status reports one head with all imported schema additions
+
+#### Scenario: Upgrade an upstream beta9 database
+- **GIVEN** a database at the upstream beta9 migration heads
+- **WHEN** it upgrades to the integrated fork head
+- **THEN** existing records remain intact and missing fork fields receive compatible defaults
+- **AND** migration status reports one head
+
+#### Scenario: Imported migration lineage has an explicit convergence
+- **GIVEN** the imported release continues an ancestor of the fork's deployed migration head
+- **WHEN** a no-op merge revision explicitly joins the imported lineage to that fork head
+- **THEN** topology validation accepts the converged history without rewriting released migrations
+- **AND** a divergent lineage without that explicit convergence still fails validation

@@ -488,7 +488,6 @@ async def _persist_http_bridge_operation_event(
                                 )
                             ),
                             state=terminal_state,
-                            expected_recovery_dispatch_count=request_state.operation_attempt_generation,
                             response_id=response_id,
                         ),
                         None,
@@ -538,7 +537,6 @@ async def _persist_http_bridge_operation_event(
                             owner_epoch=owner_epoch,
                             state=terminal_state,
                             expected_response_id=expected_response_id,
-                            expected_recovery_dispatch_count=request_state.operation_attempt_generation,
                             alternate_expected_response_id=alternate_expected_response_id,
                             response_id=response_id,
                         )
@@ -2541,9 +2539,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             # Preserve its SSE-field semantics for whitespace/multiline text.
             payload = message.payload
             event_type = message.event_type
+            routing = message.routing
         else:
             payload = parse_sse_data_json_text(text)
             event_type = classify_event_type(payload)
+            routing = None
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []
@@ -2555,6 +2555,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 payload=payload,
                 event=event,
                 event_type=event_type,
+                response_id=_websocket_response_id(event, payload, routing=routing),
                 completed_delivery_scope=completed_delivery_scope,
                 claimed_terminal_request_states=claimed_terminal_request_states,
                 scheduler=scheduler,
@@ -2670,13 +2671,13 @@ class _HTTPBridgeUpstreamEventsMixin:
         payload: dict[str, JsonValue] | None,
         event: OpenAIEvent | None,
         event_type: str | None,
+        response_id: str | None,
         completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None,
         claimed_terminal_request_states: list[_WebSocketRequestState],
         scheduler: Scheduler,
         clock: Clock,
     ) -> None:
         original_text = text
-        response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
             isinstance(payload, dict)
@@ -2736,6 +2737,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     error_message=error_message,
                     allow_unanchored_previous_response_error=is_previous_response_not_found_event,
                     prefer_draining_requests=anonymous_event_prefers_draining,
+                    event_type=event_type,
                 )
                 release_create_gate = False
             else:
@@ -2856,6 +2858,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                         allow_precreated_terminal_fallback=True,
                         prefer_draining_requests=anonymous_event_prefers_draining,
                     )
+                if terminal_request_state is not None:
+                    # Upstream generation ends here; the durable alias, operation,
+                    # recovery and circuit-settlement writes below and the
+                    # finalizer's settlement are local and must not stretch the
+                    # throughput sample's span. A later terminal for the same turn
+                    # (capacity retry) replaces it; those rows are not sampled.
+                    terminal_request_state.upstream_terminal_at = clock.monotonic()
                 if (
                     matched_request_state is None
                     and terminal_request_state is not None
