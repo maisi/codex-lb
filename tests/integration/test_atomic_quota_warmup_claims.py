@@ -793,6 +793,7 @@ async def test_postgres_warmup_claim_waits_for_older_replica(
                 account_id="acc-rolling-warmup",
                 window=old_window,
                 reset_at=reset_at,
+                transition_key=f"legacy-replica:{old_window}",
                 status="pending",
                 model="gpt-5.4-mini",
                 attempted_at=utcnow(),

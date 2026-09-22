@@ -93,3 +93,29 @@ that release import. A single-parent revision from the same old parent remains
 an error until the import is converged. This keeps ordinary branch forks
 fail-closed while allowing the additive beta9 merge revision to preserve both
 published histories.
+
+## Beta9 integration
+
+The September 2026 beta9 synchronization ends at
+`20260922_000000_merge_upstream_beta9_and_fork`. Its parents are the deployed
+fork beta6 merge (`20260909_080000_merge_upstream_beta6_and_fork`) and the
+imported beta9 head (`20260913_000000_add_oidc_provider_flow`). The revision is
+an operation-free convergence marker: it records one Alembic head while
+leaving both parent histories and their already-applied schema operations
+unchanged.
+
+The migration integration is tested from both directions. Populated fork
+databases retain account credentials, API-key priority, forced-usage, and
+continuation values; populated upstream databases retain their authentication
+rows while receiving the fork's compatible defaults. A downgrade from the
+merge exposes both parent stamps, and upgrading again restores the single
+head without repeating either parent's operations. See the beta9 delta and
+`tests/integration/test_upstream_fork_migration.py` for the preservation
+contract and executable scenarios.
+
+This merge is intentionally separate from the model-catalog retention fix.
+The catalog fix changes runtime interpretation of temporary quota or
+rate-limit state and does not add a migration, setting, or persisted schema
+field. Deployment therefore needs both the migration graph and the runtime
+behavior to be validated together, while database rollback remains governed
+by the existing pre-upgrade backup procedure.
