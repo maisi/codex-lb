@@ -62,6 +62,11 @@ from app.core.clients.native_egress import (
     discover_native_egress_client,
 )
 from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.clients.thread_cache_identity import (
+    ThreadCacheIdentity,
+    apply_thread_cache_identity,
+    scope_session_headers,
+)
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
@@ -293,6 +298,10 @@ _HOP_BY_HOP_HEADER_NAMES = frozenset(
         "upgrade",
     }
 )
+# ``Accept`` and ``Content-Type`` are included above because the WebSocket
+# handshake policy rejects them. They are end-to-end HTTP fields, so filter
+# caller supplied copies while the builder regenerates their canonical values.
+_HTTP_HOP_BY_HOP_HEADER_NAMES = _HOP_BY_HOP_HEADER_NAMES - frozenset({"accept", "content-type"})
 _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({426})
 _WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS = frozenset({"background", "stream"})
 _WEBSOCKET_HANDSHAKE_ERROR_HINTS = (
@@ -586,6 +595,7 @@ class ProxyResponseError(Exception):
         retry_after_seconds: int | None = None,
         retry_after_header: str | None = None,
         reservation_released: bool = False,
+        local_pre_dispatch_refusal: bool = False,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -600,6 +610,14 @@ class ProxyResponseError(Exception):
         self.retry_after_seconds = retry_after_seconds
         self.retry_after_header = retry_after_header
         self.reservation_released = reservation_released
+        # True when the proxy refused the request itself before any upstream
+        # frame was sent, so the failure is not an observed upstream transport
+        # failure: the native Codex transport-failure lifecycle, which ends the
+        # body without a terminal event, must not be applied to it (issue
+        # #2364, where such a refusal reached the client as an empty 200). The
+        # refusing instance may be another replica: an internal bridge forward
+        # carries the provenance back so the origin reaches the same verdict.
+        self.local_pre_dispatch_refusal = local_pre_dispatch_refusal
 
 
 def _safe_retry_after_header(headers: Mapping[str, object] | None) -> str | None:
@@ -940,6 +958,17 @@ def _native_responses_header_order(headers: Mapping[str, str]) -> tuple[str, ...
     return tuple(order)
 
 
+def _connection_named_header_names(headers: Mapping[str, str]) -> set[str]:
+    """Return header names explicitly scoped to the inbound connection."""
+
+    named: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() != "connection" or not isinstance(value, str):
+            continue
+        named.update(token.strip().lower() for token in value.split(",") if token.strip())
+    return named
+
+
 def _build_upstream_headers(
     inbound: Mapping[str, str],
     access_token: str,
@@ -947,11 +976,18 @@ def _build_upstream_headers(
     accept: str = "text/event-stream",
     routing_hint: tuple[str, str | None] | None = None,
 ) -> dict[str, str]:
-    native = _is_native_codex_request(inbound)
+    connection_named_header_names = _connection_named_header_names(inbound)
+    blocked_header_names = _HTTP_HOP_BY_HOP_HEADER_NAMES | connection_named_header_names
+    sanitized_identity_headers = {
+        key: value for key, value in inbound.items() if key.lower() not in blocked_header_names
+    }
+    native = _is_native_codex_request(sanitized_identity_headers)
     if native:
         headers = {}
         for key, value in inbound.items():
             lowered = key.lower()
+            if lowered in blocked_header_names:
+                continue
             if lowered == "authorization":
                 if not any(existing.lower() == lowered for existing in headers):
                     headers[key] = f"Bearer {access_token}"
@@ -961,7 +997,11 @@ def _build_upstream_headers(
             elif not _should_drop_inbound_header(key):
                 headers[key] = value
     else:
-        headers = filter_inbound_headers(inbound)
+        headers = {
+            key: value
+            for key, value in filter_inbound_headers(inbound).items()
+            if key.lower() not in blocked_header_names
+        }
     lower_keys = {key.lower() for key in headers}
     if not native and "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
@@ -3591,6 +3631,7 @@ async def stream_responses(
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
     synthesize_routing_hint: bool = False,
+    thread_cache_identity: ThreadCacheIdentity | None = None,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     # aclosing() at every hop lets a consumer's aclose() reach the upstream
@@ -3617,6 +3658,7 @@ async def stream_responses(
                 suppress_live_usage=suppress_live_usage,
                 native_egress_client=native_egress_client,
                 synthesize_routing_hint=synthesize_routing_hint,
+                thread_cache_identity=thread_cache_identity,
             )
         ) as upstream_events,
     ):
@@ -3649,6 +3691,7 @@ async def _stream_responses_with_session(
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
     synthesize_routing_hint: bool = False,
+    thread_cache_identity: ThreadCacheIdentity | None = None,
 ) -> AsyncGenerator[str, None]:
     settings = with_dashboard_overrides(get_settings())
     headers = apply_codex_installation_headers(
@@ -3699,6 +3742,12 @@ async def _stream_responses_with_session(
     )
     payload_dict = dict(payload.to_payload())
     apply_codex_installation_metadata(payload_dict, codex_installation_id)
+    # ``shared`` (the default) returns immediately, so the bytes below are
+    # unchanged. ``isolated`` must land here: above the http/websocket fork, so
+    # one call covers HTTP streaming, non-streaming HTTP and ``response.create``,
+    # and above ``payload_size_estimate_bytes`` so the transport decision sees
+    # the size actually sent.
+    apply_thread_cache_identity(payload_dict, thread_cache_identity)
     payload_dict = await _inline_input_image_urls(
         payload_dict,
         _as_image_fetch_session(client_session),
@@ -3774,6 +3823,11 @@ async def _stream_responses_with_session(
             if transport == "websocket"
             else CODEX_0150_RESPONSES_HTTP_WIRE_PROFILE
         ),
+    )
+    scope_session_headers(
+        upstream_headers,
+        thread_cache_identity,
+        replace=_replace_header_preserving_position,
     )
     remaining_request_timeout = _remaining_total_timeout(
         request_total_timeout,
@@ -4169,6 +4223,16 @@ async def _stream_responses_with_session(
             upstream_headers,
             codex_installation_id,
             wire_profile=CODEX_0150_RESPONSES_HTTP_WIRE_PROFILE,
+        )
+        # This fallback rebuilds the headers from the raw inbound set, which
+        # drops the scoping the websocket attempt applied. The body keeps it
+        # (``http_payload_dict`` was derived after ``apply_thread_cache_identity``),
+        # so without this the retry would go out with a scoped body and unscoped
+        # headers -- one thread presenting two identities on one account.
+        scope_session_headers(
+            upstream_headers,
+            thread_cache_identity,
+            replace=_replace_header_preserving_position,
         )
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
@@ -4718,6 +4782,7 @@ async def compact_responses(
     chatgpt_account_id: str | None = None,
     allow_direct_egress: bool = True,
     synthesize_routing_hint: bool = False,
+    thread_cache_identity: ThreadCacheIdentity | None = None,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
         transport = _CompactCommandTransport(
@@ -4732,6 +4797,7 @@ async def compact_responses(
             chatgpt_account_id=chatgpt_account_id,
             allow_direct_egress=allow_direct_egress,
             synthesize_routing_hint=synthesize_routing_hint,
+            thread_cache_identity=thread_cache_identity,
         )
         return await transport.execute()
 
@@ -4749,6 +4815,7 @@ class _CompactCommandTransport:
     chatgpt_account_id: str | None = None
     allow_direct_egress: bool = False
     synthesize_routing_hint: bool = False
+    thread_cache_identity: ThreadCacheIdentity | None = None
 
     async def execute(self) -> CompactResponsePayload:
         settings = with_dashboard_overrides(get_settings())
@@ -4770,6 +4837,11 @@ class _CompactCommandTransport:
             accept="text/event-stream",
             routing_hint=(self.payload.model, self.payload.service_tier) if self.synthesize_routing_hint else None,
         )
+        scope_session_headers(
+            upstream_headers,
+            self.thread_cache_identity,
+            replace=_replace_header_preserving_position,
+        )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout()
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
@@ -4790,6 +4862,10 @@ class _CompactCommandTransport:
             payload_dict,
             preferred_order=native_header_order,
         )
+        # Strictly before the wire-budget check: a request sitting on the
+        # response.create byte ceiling must be validated against the size it is
+        # actually sent at, not the pre-injection size.
+        apply_thread_cache_identity(payload_dict, self.thread_cache_identity)
         try:
             validate_compact_input_wire_budget(payload_dict)
         except ClientPayloadError as exc:

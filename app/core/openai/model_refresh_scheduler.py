@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # scheduler keeps ``interval_seconds`` as a constructor field so tests can
 # exercise the loop with a short interval.
 _REFRESH_INTERVAL_SECONDS = 300
+_CAPACITY_LIMITED_CATALOG_STATUSES = frozenset((AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED))
 
 
 @dataclass(slots=True)
@@ -119,10 +120,27 @@ class ModelRefreshScheduler:
                 accounts = await accounts_repo.list_accounts()
                 detach_session_objects(session)
             grouped = _group_by_plan(accounts)
+            retained_account_plans = _retained_catalog_account_plans(accounts)
             if not grouped:
-                await get_model_registry().clear()
+                registry = get_model_registry()
+                if not retained_account_plans:
+                    await registry.clear()
+                    logger.info("Model registry cleared because no active accounts remain")
+                else:
+                    # Capacity exhaustion is temporary routing state. Reconcile
+                    # the last-known catalogs so a plan change still invalidates
+                    # old evidence even while every account is unavailable.
+                    await registry.update(
+                        {},
+                        per_account_results={},
+                        active_account_plans={},
+                        retained_account_plans=retained_account_plans,
+                    )
+                    logger.info(
+                        "Model registry retained catalogs for temporarily unavailable accounts plans=%d",
+                        len(retained_account_plans),
+                    )
                 get_account_selection_cache().invalidate()
-                logger.info("Model registry cleared because no active accounts remain")
                 await _persist_registry_state_and_bump()
                 return True
 
@@ -155,6 +173,7 @@ class ModelRefreshScheduler:
                     per_plan_results,
                     per_account_results=per_account_results,
                     active_account_plans=active_account_plans,
+                    retained_account_plans=retained_account_plans,
                 )
                 snapshot = registry.get_snapshot()
                 total_models = len(snapshot.models) if snapshot else 0
@@ -227,6 +246,18 @@ def _group_by_plan(accounts: list[Account]) -> dict[str, list[Account]]:
             continue
         grouped.setdefault(plan_type, []).append(account)
     return grouped
+
+
+def _retained_catalog_account_plans(accounts: list[Account]) -> dict[str, str]:
+    """Return temporarily capacity-limited accounts whose catalogs may survive.
+
+    These accounts remain excluded from the upstream discovery pass and from
+    request selection. Their last-known model evidence is retained separately
+    by the registry so a transient quota window cannot become a policy change.
+    """
+    return {
+        account.id: account.plan_type for account in accounts if account.status in _CAPACITY_LIMITED_CATALOG_STATUSES
+    }
 
 
 def _error_summary(exc: BaseException) -> str:

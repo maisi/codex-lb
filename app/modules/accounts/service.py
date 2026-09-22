@@ -31,6 +31,7 @@ from app.core.clients.usage import (
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.openai.host_models import resolve_default_host_model
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.upstream_proxy.cache import get_upstream_route_cache
@@ -83,10 +84,6 @@ logger = logging.getLogger(__name__)
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
 
-# Current, widely-available model for the operator Force Probe. Must be a model
-# real accounts can serve, or the upstream probe 400s and usage-404 / rate-limit
-# recovery silently no-ops (the old "gpt-5.5" default went stale — see #probe).
-DEFAULT_PROBE_MODEL = "gpt-5.6-luna"
 PROBE_REQUEST_TIMEOUT_SECONDS = 30.0
 PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
 # Codex rejects probe completions below this output-token floor (1 → 400, 16 → 200).
@@ -136,7 +133,12 @@ class AccountsService:
         self._encryptor = TokenEncryptor()
         self._auth_manager = auth_manager
 
-    async def list_accounts(self, *, account_ids: list[str] | None = None) -> list[AccountSummary]:
+    async def list_accounts(
+        self,
+        *,
+        account_ids: list[str] | None = None,
+        redact_identity: bool = False,
+    ) -> list[AccountSummary]:
         accounts = (
             await self._repo.list_accounts_by_ids(account_ids)
             if account_ids is not None
@@ -236,6 +238,7 @@ class AccountsService:
             additional_quotas_by_account=additional_quotas_by_account,
             limit_warmups_by_account=limit_warmups_by_account,
             encryptor=self._encryptor,
+            redact_identity=redact_identity,
         )
 
     async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:
@@ -723,12 +726,13 @@ class AccountsService:
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         status_before = account.status.value
+        probe_model = model or resolve_default_host_model()
         logger.info(
             "Account force probe started account_id=%s account_status=%s usage_404_recovery=%s model=%s",
             account_id,
             status_before,
             usage_404_recovery,
-            model or DEFAULT_PROBE_MODEL,
+            probe_model,
         )
 
         probe_account = account
@@ -764,13 +768,12 @@ class AccountsService:
         if borrowed_recovery:
             # For a borrowed account the successful vend above IS the recovery
             # signal: the owner can mint a token, so the account is usable. Do NOT
-            # send an upstream probe — it would only exercise DEFAULT_PROBE_MODEL
+            # send an upstream probe — it would only exercise the default probe model
             # (counting against the owner's usage), and a stale/unavailable probe
             # model returns 400 and would wrongly block recovery.
             probe_status = 200
         else:
             access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
-            probe_model = model or DEFAULT_PROBE_MODEL
             probe_status = await self._send_probe_request(
                 access_token=access_token,
                 chatgpt_account_id=probe_account.chatgpt_account_id,

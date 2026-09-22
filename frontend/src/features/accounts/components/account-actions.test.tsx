@@ -3,9 +3,42 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { AccountActions } from "@/features/accounts/components/account-actions";
-import { createAccountSummary } from "@/test/mocks/factories";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import {
+  ADMIN_PERMISSIONS,
+  OPERATOR_PERMISSIONS,
+  createAccountSummary,
+} from "@/test/mocks/factories";
 
 describe("AccountActions", () => {
+  it.each([
+    ["shows", ADMIN_PERMISSIONS, true],
+    ["hides", OPERATOR_PERMISSIONS, false],
+  ])("%s the Export action according to accounts:export", (_label, permissions, visible) => {
+    useAuthStore.setState({ permissions });
+
+    render(
+      <AccountActions
+        account={createAccountSummary()}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onWarmup={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /Export/ }) !== null).toBe(visible);
+    useAuthStore.setState({ permissions: [] });
+  });
+
   it("renders an explicit routing policy selector", async () => {
     const onRoutingPolicyChange = vi.fn();
     const account = createAccountSummary({ routingPolicy: "normal" });
@@ -128,6 +161,37 @@ describe("AccountActions", () => {
     expect(
       screen.queryByRole("button", { name: "Re-authenticate" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("resumes a local deactivated account alongside re-authentication", async () => {
+    const user = userEvent.setup();
+    const onResume = vi.fn();
+    const account = createAccountSummary({
+      accountId: "acc_deactivated",
+      status: "deactivated",
+    });
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={onResume}
+        onProbe={vi.fn()}
+        onWarmup={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Re-authenticate" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Resume" }));
+    expect(onResume).toHaveBeenCalledWith("acc_deactivated");
   });
 
   it("fires the per-account probe callback for active accounts", async () => {

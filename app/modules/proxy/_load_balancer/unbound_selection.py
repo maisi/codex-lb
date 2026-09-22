@@ -84,6 +84,8 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     api_key_stream_fair_share_threshold_pct: int = 0
     # Per-API-key account ranks (lower wins); orders fresh selection only.
     account_priority: Mapping[str, int] | None = None
+    # Requested model; scopes the per-model latency cohort weight of fresh draws.
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +163,7 @@ async def run_unbound_selection_path(
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
                 routing_tunables=routing_tunables,
+                model=request.model,
             )
             effective_routing_costs = (
                 routing_costs_by_account_id

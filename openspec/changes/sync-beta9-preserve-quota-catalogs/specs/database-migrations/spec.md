@@ -15,3 +15,9 @@ The integrated beta9 fork MUST provide a single Alembic head reachable from the 
 - **WHEN** it upgrades to the integrated fork head
 - **THEN** existing records remain intact and missing fork fields receive compatible defaults
 - **AND** migration status reports one head
+
+#### Scenario: Imported migration lineage has an explicit convergence
+- **GIVEN** the imported release continues an ancestor of the fork's deployed migration head
+- **WHEN** a no-op merge revision explicitly joins the imported lineage to that fork head
+- **THEN** topology validation accepts the converged history without rewriting released migrations
+- **AND** a divergent lineage without that explicit convergence still fails validation

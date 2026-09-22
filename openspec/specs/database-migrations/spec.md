@@ -234,6 +234,13 @@ When an upstream synchronization combines independently advanced fork and upstre
 - **THEN** the graph adds another no-op merge revision joining the current heads
 - **AND** previously published revisions remain unchanged
 
+#### Scenario: Imported upstream lineage is accepted only with explicit convergence
+- **GIVEN** an upstream release continues from a revision that the fork's base ref has already advanced beyond
+- **AND** the synchronized checkout contains a merge revision whose one parent is the current base-ref head and whose other parent is the imported upstream head
+- **WHEN** the migration topology guard checks the checkout against the base ref
+- **THEN** it accepts the imported lineage as an intentional release synchronization
+- **AND** it continues to reject the same lineage when no explicit convergence merge is present
+
 ### Requirement: Startup migrations are mutually exclusive across processes
 
 The system SHALL serialize schema upgrades and stamps across all processes sharing a database using a backend-appropriate cross-process mutex: a PostgreSQL session-level advisory lock held on a dedicated connection for the full upgrade sequence, or an exclusive write transaction on a sentinel SQLite file adjacent to a file-backed SQLite database (no-op for in-memory SQLite). After acquiring the mutex, the upgrader MUST re-inspect migration state and MUST skip applying revisions when the target is head and the schema is already at head with no legacy bootstrap or revision remap pending, completing startup successfully. Waiting for the mutex MUST be bounded by `database_migration_lock_timeout_seconds` (default 300); on timeout the system SHALL raise an explicit error naming the migration lock and the timeout setting, honoring `database_migrations_fail_fast` on the startup path.

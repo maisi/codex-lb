@@ -716,6 +716,74 @@ async def test_partial_update_drops_capabilities_for_inactive_accounts():
 
 
 @pytest.mark.asyncio
+async def test_partial_update_retains_quota_limited_account_catalog_and_tiers():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    private = replace(
+        _model("gpt-6-astra"),
+        raw={"service_tiers": [{"slug": "priority"}], "additional_speed_tiers": ["priority"]},
+    )
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"plus": [private], "business-prolite": [shared]},
+        per_account_results={
+            "account-plus": ("plus", [private]),
+            "account-business": ("business-prolite", [shared]),
+        },
+        active_account_plans={"account-plus": "plus", "account-business": "business-prolite"},
+    )
+
+    # The Plus owner is temporarily quota-exhausted. The business account still
+    # refreshes successfully, but that plan refresh cannot invalidate the Plus
+    # owner's account-specific capability evidence.
+    await registry.update(
+        {"business-prolite": [shared]},
+        per_account_results={"account-business": ("business-prolite", [shared])},
+        active_account_plans={"account-business": "business-prolite"},
+        retained_account_plans={"account-plus": "plus"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is True
+    assert snapshot.account_plans["account-plus"] == "plus"
+    assert registry.account_ids_for_model("gpt-6-astra") == frozenset({"account-plus"})
+    assert registry.account_ids_for_model_service_tier("gpt-6-astra", "priority") == frozenset({"account-plus"})
+    assert registry.plan_types_for_model("gpt-6-astra") == frozenset({"plus"})
+
+
+@pytest.mark.asyncio
+async def test_quota_catalog_retention_drops_on_plan_change():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    private = _model("gpt-6-astra")
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"plus": [private], "business-prolite": [shared]},
+        per_account_results={
+            "account-plus": ("plus", [private]),
+            "account-business": ("business-prolite", [shared]),
+        },
+        active_account_plans={"account-plus": "plus", "account-business": "business-prolite"},
+    )
+
+    # A plan change is a genuine capability boundary; a quota-limited account
+    # must not carry its old Plus catalog into the new plan.
+    await registry.update(
+        {"business-prolite": [shared]},
+        per_account_results={"account-business": ("business-prolite", [shared])},
+        active_account_plans={"account-business": "business-prolite"},
+        retained_account_plans={"account-plus": "pro"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert "account-plus" not in snapshot.account_plans
+    assert "gpt-6-astra" not in snapshot.models
+    assert registry.account_ids_for_model("gpt-6-astra") == frozenset()
+
+
+@pytest.mark.asyncio
 async def test_stale_plan_drops_models_only_removed_account_advertised():
     # Regression for the Codex P2 finding: a stale plan (its only refresh failed)
     # must not re-advertise a model that only a now-removed/paused account served.

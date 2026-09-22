@@ -82,3 +82,14 @@ The September 2026 upstream integration joins the account-priority fork head and
 The operation-free revision `20260909_050000_merge_upstream_beta5_and_fork` joins the deployed beta4 fork merge with upstream's dashboard-timeout migration. Both parent histories remain valid. For example, an existing fork database retains API-key priority 7 and opt-in forced usage/continuation when upgrading; an upstream database receives compatible fork defaults.
 
 Direct downgrade of the upstream overflow/transport merge retains the independent fork head. Tests compare both schemas and application rows rather than assuming that upstream history is the only active branch. See [spec.md](spec.md) for the normative preservation contract.
+
+## Imported upstream lineage guard
+
+An upstream prerelease can contain migrations authored from an older upstream
+parent after the fork has already published its own merge revision. The
+author-time topology guard therefore treats a checked-in merge joining the
+current fork head and the imported upstream head as explicit provenance for
+that release import. A single-parent revision from the same old parent remains
+an error until the import is converged. This keeps ordinary branch forks
+fail-closed while allowing the additive beta9 merge revision to preserve both
+published histories.

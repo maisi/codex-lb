@@ -53,6 +53,7 @@ class LimitWarmupRepository:
         attempted_at: datetime,
         status: str = "pending",
         reset_at_tolerance_seconds: int = 0,
+        require_no_prior_attempt: bool = False,
     ) -> AccountLimitWarmup | None:
         tolerance = max(0, reset_at_tolerance_seconds)
         table = AccountLimitWarmup.__table__
@@ -70,7 +71,9 @@ class LimitWarmupRepository:
                 duplicate_predicate,
                 AccountLimitWarmup.reset_at.between(reset_at - tolerance, reset_at + tolerance),
             )
-        duplicate_attempt = (
+        # COMMITTED, so an advisory transaction lock keyed on account serializes
+        # both ordinary claims and the cross-window initial-attempt guard.
+        duplicate_in_tolerance_window = (
             select(AccountLimitWarmup.id)
             .where(
                 AccountLimitWarmup.account_id == account_id,
@@ -79,6 +82,12 @@ class LimitWarmupRepository:
             )
             .exists()
         )
+        insert_conditions = [~duplicate_in_tolerance_window]
+        if require_no_prior_attempt:
+            prior_account_attempt = (
+                select(AccountLimitWarmup.id).where(AccountLimitWarmup.account_id == account_id).exists()
+            )
+            insert_conditions.append(~prior_account_attempt)
         insert_stmt = (
             insert(AccountLimitWarmup)
             .from_select(
@@ -91,7 +100,7 @@ class LimitWarmupRepository:
                     literal(status, type_=table.c.status.type),
                     literal(model, type_=table.c.model.type),
                     literal(attempted_at, type_=table.c.attempted_at.type),
-                ).where(~duplicate_attempt),
+                ).where(*insert_conditions),
             )
             .returning(AccountLimitWarmup.id)
         )
@@ -100,8 +109,19 @@ class LimitWarmupRepository:
                 if self._dialect_name() == "postgresql":
                     await self._session.execute(
                         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-                        {"key": f"limit_warmup:{account_id}:{window}"},
+                        {"key": f"limit_warmup:{account_id}"},
                     )
+                    # Older replicas use only window locks. Take every window
+                    # for the account-wide guard, in a fixed order, so their
+                    # in-flight inserts are visible before our next statement.
+                    lock_windows = (
+                        ("monthly", "primary", "primary_idle", "secondary") if require_no_prior_attempt else (window,)
+                    )
+                    for lock_window in lock_windows:
+                        await self._session.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                            {"key": f"limit_warmup:{account_id}:{lock_window}"},
+                        )
                 inserted_id = await self._session.scalar(insert_stmt)
                 await self._session.commit()
         except IntegrityError:
