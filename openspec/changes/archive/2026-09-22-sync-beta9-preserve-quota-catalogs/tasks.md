@@ -11,9 +11,9 @@
 
 ## 3. Verification and delivery
 
-- [ ] 3.1 Run integration, unit, migration, frontend, packaging, lint, type, and strict OpenSpec checks; resolve regressions.
+- [x] 3.1 Run integration, unit, migration, frontend, packaging, lint, type, and strict OpenSpec checks; resolve regressions.
 - [x] 3.2 Record dashboard comparison and fork-capability verification evidence.
-- [ ] 3.3 Verify implementation, sync stable specifications/context, and archive this change.
+- [x] 3.3 Verify implementation, sync stable specifications/context, and archive this change.
 - [x] 3.4 Publish the combined integration/fix PR and record the final-head merge and image-delivery gates in its delivery checklist.
 
 Release execution is tracked in [PR #35](https://github.com/maisi/codex-lb/pull/35):

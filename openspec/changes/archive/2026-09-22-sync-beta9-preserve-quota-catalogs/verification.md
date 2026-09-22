@@ -4,16 +4,14 @@
 
 | Dimension | Status |
 | --- | --- |
-| Completeness | 7/9 implementation and evidence tasks complete; final verification and archive remain pending; release execution is tracked in PR #35 |
+| Completeness | 9/9 implementation and evidence tasks complete; release execution is tracked in PR #35 |
 | Correctness | 2/2 delta requirements have implementation evidence; focused regression coverage exercises the principal migration, retention, and public continuation paths |
 | Coherence | Implementation follows the design: operation-free migration convergence, separate fetch and retention sets, same-plan provenance, and existing snapshot persistence |
 
 ## Completeness
 
-Tasks 1.1–1.2, 2.1–2.3, 3.2, and 3.4 are complete in
-[tasks.md](tasks.md). Task 3.1 remains open for the final integration matrix
-and corrections to imported OpenSpec deltas and the Rust dependency audit.
-Task 3.3 remains open for archive after verification. External merge, image
+All implementation tasks in [tasks.md](tasks.md) are complete and the main
+specifications and stable context are synchronized. External merge, image
 publication, and deployed-health checks remain gated separately in PR #35.
 
 The dashboard comparison evidence required by task 3.2 is stored in
@@ -84,17 +82,22 @@ The implementation matches the design decisions and the stable specifications:
 - request selection and hard continuity ownership continue to reject an
   exhausted owner even while its capability evidence is retained.
 
-## Remaining warnings
+## Correction verification
 
-1. The imported live-row facet delta now preserves its missing canonical
-   scenario. Strict validation of every active changed folder and all 65 main
-   specs passes locally; the next CI run must confirm it.
-2. The imported Rust TLS dependency is updated for RUSTSEC-2026-0285. The native
-   egress tests and dependency audit must confirm the patched dependency set.
-3. PostgreSQL initially passed 237 tests and failed eight older-replica warmup
-   fixtures because they omitted the fork's required transition key. The
-   corrected fixture passes the SQLite selection (13 passed, eight PostgreSQL
-   cases skipped); the PostgreSQL rerun remains required.
+The follow-up GitHub run on `96191bba` passed OpenSpec validation, the full
+PostgreSQL suite, all core/bridge integration suites, frontend validation,
+both migration backends, and the packaging/deployment checks. Patched Rust
+dependencies passed 28 Rust tests, 361 native-egress integration tests,
+clippy/build, and all dependency advisory/license/source gates.
+
+Its unit slice passed 10,515 tests and identified one lockfile assertion still
+expecting the vulnerable TLS versions. Updating that assertion to the patched
+versions passed the focused native-packaging tests locally. The complete
+matrix must pass again on the final PR head before merge.
+
+There are no unresolved implementation findings. The dependency correction
+keeps the native transport's existing feature flags and OpenAI WebSocket fork
+revisions; `aws-lc-rs` moves to 1.18.1 because patched rustls requires `^1.18`.
 
 The initial macOS-only capture-tool guard failure is covered by the successful
 Linux cloud unit suite. Local socket checks and post-commit topology tests also
