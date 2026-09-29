@@ -15,6 +15,8 @@ pytestmark = pytest.mark.integration
 _FORK_HEAD = "20260909_080000_merge_upstream_beta6_and_fork"
 _UPSTREAM_BETA9_HEAD = "20260913_000000_add_oidc_provider_flow"
 _MERGE_HEAD = "20260922_000000_merge_upstream_beta9_and_fork"
+_UPSTREAM_POST_BETA9_HEAD = "20260918_000000_merge_scim_and_overflow_heads"
+_HEAD = "20260929_000000_merge_upstream_post_beta9_and_fork"
 
 
 @pytest.mark.asyncio
@@ -84,7 +86,7 @@ async def test_upstream_fork_merge_preserves_existing_key_policy(tmp_path: Path,
             ).scalar_one()
             assert priority == (7 if is_fork else 0)
             revisions = (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
-            assert revisions == [_MERGE_HEAD]
+            assert revisions == [_HEAD]
     finally:
         await engine.dispose()
 
@@ -110,7 +112,7 @@ async def test_populated_upstream_beta9_head_reaches_merged_head(tmp_path: Path)
             assert providers_after == providers_before
             assert (await connection.execute(text("SELECT COUNT(*) FROM dashboard_oidc_login_flows"))).scalar_one() == 0
             revisions = (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
-            assert revisions == [_MERGE_HEAD]
+            assert revisions == [_HEAD]
     finally:
         await engine.dispose()
 
@@ -195,7 +197,7 @@ async def test_merge_round_trip_preserves_auth_and_continuity_rows(tmp_path: Pat
                 .scalars()
                 .all()
             )
-            assert revisions_after_downgrade == [_FORK_HEAD, _UPSTREAM_BETA9_HEAD]
+            assert revisions_after_downgrade == [_FORK_HEAD, _UPSTREAM_POST_BETA9_HEAD]
             assert (
                 await connection.execute(
                     text("SELECT id, slug, name, kind FROM dashboard_roles WHERE id = 'synthetic-role'")
@@ -228,7 +230,7 @@ async def test_merge_round_trip_preserves_auth_and_continuity_rows(tmp_path: Pat
             assert continuity_rows == before["continuity"]
 
         result = await to_thread.run_sync(lambda: run_upgrade(database_url, "head", bootstrap_legacy=False))
-        assert result.current_revision == _MERGE_HEAD
+        assert result.current_revision == _HEAD
     finally:
         await engine.dispose()
 
@@ -237,7 +239,10 @@ def test_beta9_fork_migration_graph_converges_to_one_head(tmp_path: Path) -> Non
     config = _build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.db'}")
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_MERGE_HEAD]
+    assert script.get_heads() == [_HEAD]
     merge = script.get_revision(_MERGE_HEAD)
     assert merge is not None
     assert merge.down_revision == (_FORK_HEAD, _UPSTREAM_BETA9_HEAD)
+    head = script.get_revision(_HEAD)
+    assert head is not None
+    assert head.down_revision == (_MERGE_HEAD, _UPSTREAM_POST_BETA9_HEAD)

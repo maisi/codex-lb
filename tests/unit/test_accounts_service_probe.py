@@ -12,11 +12,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.accounts.service import (
-    PROBE_MAX_OUTPUT_TOKENS,
-    AccountNotProbableError,
-    AccountsService,
-)
+from app.modules.accounts.service import AccountNotProbableError, AccountsService
 from app.modules.usage.updater import AccountRefreshResult
 
 pytestmark = pytest.mark.unit
@@ -487,8 +483,7 @@ async def test_send_probe_request_uses_shared_http_client(monkeypatch):
     assert captured["headers"]["Authorization"] == f"Bearer {_PROBE_TOKEN_PLAINTEXT}"
     assert captured["headers"]["chatgpt-account-id"] == _CHATGPT_ACCOUNT_ID
     assert captured["json"]["model"] == "gpt-5.5-test"
-    assert captured["json"]["max_output_tokens"] == PROBE_MAX_OUTPUT_TOKENS
-    assert captured["json"]["max_output_tokens"] == 16
+    assert "max_output_tokens" not in captured["json"]
     assert captured["json"]["stream"] is True
     assert captured["json"]["store"] is False
     assert captured["timeout"].total == 30.0

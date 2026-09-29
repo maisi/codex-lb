@@ -119,3 +119,14 @@ rate-limit state and does not add a migration, setting, or persisted schema
 field. Deployment therefore needs both the migration graph and the runtime
 behavior to be validated together, while database rollback remains governed
 by the existing pre-upgrade backup procedure.
+
+## Post-beta9 integration
+
+The September 2026 sync of upstream `main` past beta9 ends at
+`20260929_000000_merge_upstream_post_beta9_and_fork`. Its parents are the fork
+beta9 merge (`20260922_000000_merge_upstream_beta9_and_fork`) and upstream's
+`20260918_000000_merge_scim_and_overflow_heads`, which carries the SCIM token
+table and the subscription-overflow schema withdrawal. Like earlier sync
+merges it is an operation-free convergence marker. Downgrading from it to the
+fork beta6 merge leaves that revision and the upstream post-beta9 head stamped;
+see `tests/integration/test_upstream_fork_migration.py`.

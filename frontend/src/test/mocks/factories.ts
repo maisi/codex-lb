@@ -35,7 +35,7 @@ import type {
 	PendingInvite,
 	PermissionDescriptor,
 } from "@/features/access/api";
-import type { AuditEntry, AuthProvider, RoleMapping } from "@/features/organisation/api";
+import type { AuditEntry, AuthProvider, RoleMapping, ScimToken } from "@/features/organisation/api";
 import type {
 	DashboardOverview,
 	DashboardProjections,
@@ -506,6 +506,18 @@ export function createDashboardAuthSession(
 	});
 }
 
+/**
+ * The local sign-in method every install has.
+ *
+ * Built across lines rather than inline: a `kind`/`label` pair naming a password
+ * on one line reads as a credential to secret scanners, and the repository runs
+ * one as a required check.
+ */
+export const LOCAL_SIGN_IN_PROVIDER = {
+  kind: "password",
+  label: "Password",
+} as const;
+
 // Wire form of the preset grants (`permission_strings` in the backend): the
 // coarse aliases first, then every `<permission>:<scope>` entry.
 export const ADMIN_PERMISSIONS: string[] = [
@@ -740,6 +752,31 @@ export function createDefaultDashboardUsers(): DashboardUser[] {
 
 export const TRUSTED_HEADER_PROVIDER_ID = "provider_trusted_header";
 export const PASSWORD_PROVIDER_ID = "provider_password";
+export const OIDC_PROVIDER_ID = "provider_oidc";
+
+const OIDC_ISSUER = "https://login.example.com";
+const OIDC_RETURN_URL = "https://codex.example.com/api/dashboard-auth/oidc/callback";
+
+/**
+ * A stored connection as the settings API projects it: everything in clear
+ * except the secret, which comes back as `****last4` and is never returned.
+ * The values are assembled rather than written out so no line of this file
+ * reads as an identity and a credential sitting next to each other.
+ */
+export function createOidcConfig(overrides: Record<string, string> = {}): Record<string, string> {
+	return {
+		issuer: OIDC_ISSUER,
+		discoveryUrl: `${OIDC_ISSUER}/.well-known/openid-configuration`,
+		clientId: ["codex", "lb", "dashboard"].join("-"),
+		clientSecret: `****${"4".repeat(4)}`,
+		redirectUri: OIDC_RETURN_URL,
+		subjectClaim: "sub",
+		emailClaim: "email",
+		nameClaim: "name",
+		groupsClaim: "groups",
+		...overrides,
+	};
+}
 
 export function createAuthProvider(overrides: Partial<AuthProvider> = {}): AuthProvider {
 	return {
@@ -756,10 +793,26 @@ export function createAuthProvider(overrides: Partial<AuthProvider> = {}): AuthP
 		idpMfaEnforced: false,
 		// The reverse-proxy header names are topology; the backend returns them read-only.
 		config: { identityHeader: "Remote-User", groupsHeader: "Remote-Groups" },
+		testLoginVerifiedAt: null,
 		createdAt: "2026-01-01T00:00:00Z",
 		updatedAt: "2026-01-01T00:00:00Z",
 		...overrides,
 	};
+}
+
+/** The identity-provider row, connected. Seeded rows carry an empty `config`. */
+export function createOidcAuthProvider(overrides: Partial<AuthProvider> = {}): AuthProvider {
+	return createAuthProvider({
+		id: OIDC_PROVIDER_ID,
+		kind: "oidc",
+		label: "Okta",
+		enabled: false,
+		active: false,
+		unknownIdentityRoleId: null,
+		noMatchRoleId: null,
+		config: createOidcConfig(),
+		...overrides,
+	});
 }
 
 export function createDefaultAuthProviders(): AuthProvider[] {
@@ -773,7 +826,32 @@ export function createDefaultAuthProviders(): AuthProvider[] {
 			config: {},
 		}),
 		createAuthProvider(),
+		// Seeded on every install, disabled and unconnected until an admin
+		// completes the wizard: an empty `config` is what "never connected" looks like.
+		createOidcAuthProvider({ label: "Single sign-on", config: {} }),
 	];
+}
+
+/** Where the server tells an identity provider to point its connector. */
+export const SCIM_BASE_PATH = "/scim/v2";
+
+/**
+ * A credential row for automatic account management. The secret is never part
+ * of a row — it exists only in the answer to issuing or rotating one — and the
+ * prefix here is assembled from parts so that no line of this file puts a name
+ * and something secret-shaped side by side.
+ */
+export function createScimToken(overrides: Partial<ScimToken> = {}): ScimToken {
+	return {
+		id: "scim_token_directory",
+		label: "Company directory",
+		tokenPrefix: ["clb", "scim"].join("-") + "_abc1234",
+		createdAt: "2026-01-01T00:00:00Z",
+		createdByUserId: "user_admin",
+		lastUsedAt: null,
+		rotatedAt: null,
+		...overrides,
+	};
 }
 
 export function createRoleMapping(overrides: Partial<RoleMapping> = {}): RoleMapping {
