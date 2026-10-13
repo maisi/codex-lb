@@ -52,3 +52,20 @@ Verification mapping:
 All seven tasks are complete; the four requirements and their scenarios are
 implemented and covered. Design, implementation and main context agree. The
 broader relocation change is untouched. Deployment remains separate.
+
+## CI follow-up (2026-10-13)
+
+The first GitHub run passed integration, migration, packaging, OpenSpec, lint,
+and type checks. Its full unit job exposed three completed-delivery regressions:
+the optional root-capture call read settings before rejecting sessions without
+durable ownership metadata. Persistence now returns before root capture when
+the durable session ID or owner epoch is missing. The existing three failing
+stream-lifecycle tests reproduce the issue and pass after this correction;
+all 1144 tests across cancel/drain, HTTP bridge, transcript recovery, and owner
+recovery routes pass locally. Ruff, ty, architecture, cancellation, and
+whitespace checks also pass.
+
+The Docker image built successfully, but its Trivy gate separately rejected
+the unchanged urllib3 2.7.0 dependency for CVE-2026-97687 and CVE-2026-97689.
+The scan lists 2.8.0 as the fixed version. This dependency blocker is separate
+from the proxy recovery correction.

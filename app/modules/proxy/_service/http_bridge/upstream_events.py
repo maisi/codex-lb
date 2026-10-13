@@ -393,6 +393,8 @@ async def _persist_http_bridge_operation_event(
     operation_id = getattr(request_state, "operation_id", None)
     session_id = getattr(session, "durable_session_id", None)
     owner_epoch = getattr(session, "durable_owner_epoch", None)
+    if session_id is None or owner_epoch is None:
+        return False
     scheduler = scheduler_for(service)
     if operation_id is None and terminal and terminal_state in ("completed", "incomplete"):
         root = await capture_settled_root(
@@ -409,7 +411,7 @@ async def _persist_http_bridge_operation_event(
             request_state.operation_fingerprint = root.request_fingerprint
     batcher_enqueue = getattr(getattr(service, "_http_bridge_operation_event_batcher", None), "enqueue", None)
     append_event = getattr(getattr(service, "_durable_bridge", None), "append_operation_event", None)
-    if not operation_id or session_id is None or owner_epoch is None:
+    if not operation_id:
         return False
     append_barrier_task: asyncio.Task[None] | None = None
     delivery_barrier_task: asyncio.Task[None] | None = None
