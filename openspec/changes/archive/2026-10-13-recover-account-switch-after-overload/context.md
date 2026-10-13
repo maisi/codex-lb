@@ -69,3 +69,15 @@ The Docker image built successfully, but its Trivy gate separately rejected
 the unchanged urllib3 2.7.0 dependency for CVE-2026-97687 and CVE-2026-97689.
 The scan lists 2.8.0 as the fixed version. This dependency blocker is separate
 from the proxy recovery correction.
+
+The maintainer requested the dependency update in the fork. The urllib3
+minimum is now 2.8.0, and the lockfile pins 2.8.0 with registry-provided artifact
+hashes. Other dependency versions and the project version are unchanged.
+Frozen installation, offline lock validation, package compatibility and
+application imports pass. All 199 selected HTTP client, OAuth, tracing,
+telemetry, release and cancel/drain tests pass with the existing database-reset
+fixture and an isolated test data directory. The initial partial-suite run
+lacked database tables for several lifespan tests; rerunning with that fixture
+resolved those failures. Ruff and whitespace checks pass. The preceding cloud
+run already confirms the completed-delivery unit correction; the updated image
+still requires a fresh Trivy result.
