@@ -716,12 +716,16 @@ class DurableBridgeSessionCoordinator:
         self,
         *,
         response_id: str,
+        session_id: str | None = None,
+        account_id: str | None = None,
         max_turns: int = 128,
         max_bytes: int = 8 * 1024 * 1024,
     ) -> list[DurableBridgeTranscriptTurn] | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).get_replayable_transcript(
                 response_id=response_id,
+                session_id=session_id,
+                account_id=account_id,
                 max_turns=max_turns,
                 max_bytes=max_bytes,
             )

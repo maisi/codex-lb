@@ -714,6 +714,36 @@ def _is_one_of(value: JsonValue | None, options: Container[str]) -> bool:
     return isinstance(value, str) and value in options
 
 
+def responses_input_items_have_account_neutral_shape(input_items: list[JsonValue]) -> bool:
+    """Validate portable history items without requiring every tool to be settled yet."""
+    if any(not isinstance(item, dict) for item in input_items):
+        return False
+    for item_value in input_items:
+        item = cast(dict[str, JsonValue], item_value)
+        item_type = item.get("type")
+        if item_type is not None and (
+            not isinstance(item_type, str) or item_type not in _ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES
+        ):
+            return False
+        if not _input_item_has_only_known_fields(item, item_type):
+            return False
+        if not _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)):
+            return False
+        if item_type in _TOOL_CALL_TYPES and (
+            not _caller_is_self_contained(item) or not _tool_call_is_self_contained(item_type, item)
+        ):
+            return False
+        if item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE and (
+            not _caller_is_self_contained(item) or not _tool_output_is_self_contained(item_type, item)
+        ):
+            return False
+    return (
+        not extract_input_file_ids(input_items)
+        and _input_items_have_valid_account_neutral_shape(input_items)
+        and not _contains_account_scoped_input_state(input_items)
+    )
+
+
 def responses_payload_is_account_neutral_fresh_replay(payload: Mapping[str, JsonValue]) -> bool:
     """Return whether a full request can move accounts without stored upstream state."""
 
