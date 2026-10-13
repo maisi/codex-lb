@@ -486,6 +486,13 @@ def _known_expired_reauth(state: AccountState, current: float) -> bool:
     )
 
 
+def transient_error_backoff_until(state: AccountState) -> float | None:
+    if state.error_count < ERROR_BACKOFF_THRESHOLD or state.last_error_at is None:
+        return None
+    backoff = min(300, 30 * (2 ** min(4, state.error_count - ERROR_BACKOFF_THRESHOLD)))
+    return state.last_error_at + backoff
+
+
 def select_account(
     states: Iterable[AccountState],
     now: float | None = None,
@@ -628,8 +635,8 @@ def select_account(
         if state.cooldown_until and current < state.cooldown_until:
             continue
         if state.error_count >= ERROR_BACKOFF_THRESHOLD:
-            backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
-            if state.last_error_at and current - state.last_error_at < backoff:
+            backoff_until = transient_error_backoff_until(state)
+            if backoff_until is not None and current < backoff_until:
                 in_error_backoff.append(state)
                 continue
             # Error backoff expired — reset error state so recovery is
@@ -667,8 +674,7 @@ def select_account(
         if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
 
             def _backoff_expires_at(s: AccountState) -> float:
-                backoff = min(300, 30 * (2 ** (s.error_count - ERROR_BACKOFF_THRESHOLD)))
-                return (s.last_error_at or 0.0) + backoff
+                return transient_error_backoff_until(s) or 0.0
 
             available.append(min(in_error_backoff, key=_backoff_expires_at))
             if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:

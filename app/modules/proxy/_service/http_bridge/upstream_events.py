@@ -140,6 +140,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_precreated_retry_error_code,
     _websocket_response_id,
 )
+from app.modules.proxy._service.http_bridge.transcript_recovery import capture_settled_root
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -392,6 +393,20 @@ async def _persist_http_bridge_operation_event(
     operation_id = getattr(request_state, "operation_id", None)
     session_id = getattr(session, "durable_session_id", None)
     owner_epoch = getattr(session, "durable_owner_epoch", None)
+    scheduler = scheduler_for(service)
+    if operation_id is None and terminal and terminal_state in ("completed", "incomplete"):
+        root = await capture_settled_root(
+            service._durable_bridge,
+            session=session,
+            request_state=request_state,
+            event_block=event_block,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            scheduler=scheduler,
+        )
+        if root is not None:
+            operation_id = root.operation_id
+            request_state.operation_id = operation_id
+            request_state.operation_fingerprint = root.request_fingerprint
     batcher_enqueue = getattr(getattr(service, "_http_bridge_operation_event_batcher", None), "enqueue", None)
     append_event = getattr(getattr(service, "_durable_bridge", None), "append_operation_event", None)
     if not operation_id or session_id is None or owner_epoch is None:
@@ -400,7 +415,6 @@ async def _persist_http_bridge_operation_event(
     delivery_barrier_task: asyncio.Task[None] | None = None
     terminal_enqueued = False
     deferred_cancellation: asyncio.CancelledError | None = None
-    scheduler = scheduler_for(service)
 
     async def release_terminal_append_barrier() -> asyncio.CancelledError | None:
         nonlocal append_barrier_task

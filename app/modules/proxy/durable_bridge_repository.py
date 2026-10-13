@@ -2470,6 +2470,8 @@ class DurableBridgeRepository:
         self,
         *,
         response_id: str,
+        session_id: str | None = None,
+        account_id: str | None = None,
         max_turns: int = 128,
         max_bytes: int = 8 * 1024 * 1024,
     ) -> list[DurableBridgeTranscriptTurn] | None:
@@ -2487,7 +2489,13 @@ class DurableBridgeRepository:
                 return None
             visited.add(current_response_id)
             operation = await self.get_operation_by_response_id(response_id=current_response_id)
-            if operation is None or operation.request_text is None or not operation.event_spool_complete:
+            if (
+                operation is None
+                or operation.request_text is None
+                or not operation.event_spool_complete
+                or (session_id is not None and operation.session_id != session_id)
+                or (account_id is not None and operation.account_id != account_id)
+            ):
                 return None
             remaining_event_bytes = max_bytes - total_bytes - len(operation.request_text.encode("utf-8"))
             if remaining_event_bytes < 0:

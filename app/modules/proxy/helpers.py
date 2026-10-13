@@ -66,7 +66,7 @@ _MESSAGE_CLASSIFIED_CODES = frozenset({"upstream_error"})
 _TRANSIENT_CODES = frozenset(
     {"server_error", "upstream_error", "stream_incomplete", "overloaded_error", "server_is_overloaded"}
 )
-_MODEL_CAPACITY_MESSAGE_MARKERS = ("selected model is at capacity",)
+_MODEL_CAPACITY_MESSAGE_MARKERS = ("selected model is at capacity", "codex is at capacity")
 _SAFETY_BLOCK_MESSAGE_PREFIX = "This request was blocked by our safety systems."
 _MODEL_UNSUPPORTED_MESSAGE_RE = re.compile(
     r"^The '.+' model is not supported when using Codex with a ChatGPT account\.$"

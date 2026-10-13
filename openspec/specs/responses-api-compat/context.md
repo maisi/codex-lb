@@ -334,3 +334,41 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Recovery after upstream capacity and account backoff
+
+Native Codex capacity wording (including a `turn_rate_limit_exceeded` carrying
+“Codex is at capacity”) follows the bridge's existing bounded wait/retry path.
+If admission rejects a still-active conversation owner with known local
+backoff, the bridge gives that owner one 30-second recovery window within the
+original request deadline. It releases account capacity and database sessions
+while sleeping, then rechecks normal selection.
+
+When that owner remains unavailable, complete settled durable turns can supply
+conversation context that a client delta or rolling resend omitted. For
+example, `[user: first] -> [assistant: answer]` followed by `[user: next]`
+becomes all three messages on an eligible replacement, without the old
+`previous_response_id`. A matching stored tail is replaced by the current
+client prefix; client input is preserved. The replacement uses the existing
+fenced recovery lane, strips stale affinity headers, excludes the old owner,
+and keeps API-key account restrictions and reservation settlement.
+
+Successful unanchored roots are captured after their terminal response supplies
+complete output. Recording is optional for the live success and uses distinct
+identities for independent identical requests. It does not introduce new
+acceptance or reconnect fences. Anchored operation capture stays unchanged.
+
+Reconstruction is bounded to 128 turns, 8 MiB, and 8192 items, with a five-second
+load budget inside the original request deadline. Missing historical roots,
+truncated spools, invalid parent chains, unsettled tools, unknown fields, opaque
+file handles, or incompatible routing keep their ordinary failure behavior.
+Empty output annotations/logprobs are recording metadata; nonempty annotations
+are not treated as portable. Ambiguous already-dispatched failures and visible
+output do not activate this selection-time recovery lane.
+
+No setting or migration is added. Existing conversations may lack a recorded
+root, so deployment improves new complete chains without manufacturing old
+context. Monitor backoff waits and `owner_unavailable_transcript_replay` events
+alongside owner-unavailable failures after rollout. See [spec.md](spec.md) for
+the governing requirements and the archived
+`recover-account-switch-after-overload` change for verification evidence.

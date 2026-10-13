@@ -65,6 +65,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy._load_balancer.continuity_recovery import continuity_owner_recovery_delay
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -156,6 +157,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _response_create_client_metadata,
     _responses_request_contains_input_image,
     _responses_request_uses_image_generation,
+    _routing_strategy,
     _service_get_settings,
     _service_get_settings_cache,
     _stream_keepalive_max_count,
@@ -165,6 +167,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_event_error_param,
     _websocket_event_error_type,
 )
+from app.modules.proxy._service.http_bridge.transcript_recovery import load_transcript_replay
 from app.modules.proxy._service.http_bridge.upstream_events import (
     _abandon_durable_http_bridge_continuity,
 )
@@ -308,6 +311,7 @@ _HTTP_BRIDGE_CONTINUITY_OWNER_ERROR_CODES = frozenset(
         "continuity_owner_conflict",
     }
 )
+_CONTINUITY_OWNER_RECOVERY_MAX_WAIT_SECONDS = 30.0
 
 
 def _durable_full_resend_anchor_rejection(
@@ -2091,6 +2095,76 @@ class _HTTPBridgeStreamingMixin:
         model_transition_owner_conflict_fork_attempted = False
         unanchored_fork_spill_attempted = False
         owner_retirement_attempted = False
+        owner_recovery_wait_deadline: float | None = None
+        transcript_recovery_attempted = False
+
+        async def transient_owner_wait_seconds(exc: ProxyResponseError) -> float | None:
+            nonlocal owner_recovery_wait_deadline
+            owner_id = request_state.preferred_account_id
+            if (
+                not _http_bridge_is_previous_response_owner_unavailable(exc)
+                or owner_id is None
+                or owner_id in request_state.excluded_account_ids
+            ):
+                return None
+            now = clock.monotonic()
+            if now >= request_deadline:
+                return None
+            if owner_recovery_wait_deadline is not None and now >= owner_recovery_wait_deadline:
+                return None
+            try:
+                delay = await scheduler.wait_for(
+                    continuity_owner_recovery_delay(self._load_balancer, owner_id),
+                    timeout=min(5.0, request_deadline - now),
+                )
+            except Exception:
+                logger.warning("Continuity owner backoff lookup failed; keeping ordinary recovery", exc_info=True)
+                return None
+            if delay is None:
+                return None
+            if owner_recovery_wait_deadline is None:
+                owner_recovery_wait_deadline = min(request_deadline, now + _CONTINUITY_OWNER_RECOVERY_MAX_WAIT_SECONDS)
+            remaining = owner_recovery_wait_deadline - clock.monotonic()
+            return min(delay, remaining) if remaining > 0 else None
+
+        async def recover_from_stored_transcript(exc: ProxyResponseError) -> bool:
+            nonlocal transcript_recovery_attempted
+            nonlocal durable_full_resend_fresh_payload
+            if (
+                transcript_recovery_attempted
+                or not _http_bridge_is_previous_response_owner_unavailable(exc)
+                or durable_lookup is None
+                or durable_lookup.account_id is None
+                or request_state.preferred_account_id != durable_lookup.account_id
+                or rewritten_file_account_id is not None
+                or _routing_strategy(dashboard_settings) == "single_account"
+                or forwarded_request
+                or request_state.downstream_visible
+                or request_state.response_event_count != 0
+            ):
+                return False
+            anchor = request_state.previous_response_id or durable_lookup.latest_response_id
+            if anchor is None:
+                return False
+            transcript_recovery_attempted = True
+            fresh = await load_transcript_replay(
+                self._durable_bridge,
+                lookup=durable_lookup,
+                payload=payload,
+                anchor_response_id=anchor,
+                deadline=request_deadline,
+                scheduler=scheduler,
+                clock=clock,
+            )
+            if fresh is None:
+                return False
+            durable_full_resend_fresh_payload = fresh
+            switch_to_account_neutral_replay(
+                event="owner_unavailable_transcript_replay",
+                detail="outcome=verified_durable_transcript_without_anchor",
+            )
+            return True
+
         verified_stale_anchor_generation_captured = False
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
         verified_stale_anchor_generation: tuple[int, float, int, float, int, float, float] | None = None
@@ -2545,7 +2619,29 @@ class _HTTPBridgeStreamingMixin:
                     setattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, True)
                 if switch_model_transition_to_account_neutral_fork(exc):
                     continue
+                owner_wait = await transient_owner_wait_seconds(exc)
+                if owner_wait is not None:
+                    logger.info(
+                        "Waiting for transient continuity owner backoff request_id=%s sleep_seconds=%.1f",
+                        request_id,
+                        owner_wait,
+                    )
+                    async for line in _iter_account_capacity_wait_sse(
+                        request_id=request_id,
+                        reason="Previous response owner is recovering from temporary upstream overload.",
+                        sleep_seconds=owner_wait,
+                        emit_keepalives=not propagate_http_errors,
+                        request_state=request_state,
+                        scheduler=scheduler,
+                        clock=clock,
+                    ):
+                        yield line
+                    if clock.monotonic() >= request_deadline:
+                        raise
+                    continue
                 if not owner_unavailable_allows_account_neutral_replay(exc):
+                    if await recover_from_stored_transcript(exc):
+                        continue
                     if await retire_unavailable_continuity_owner(exc):
                         continue
                     exc_code, _exc_message = _proxy_error_code_message(exc)

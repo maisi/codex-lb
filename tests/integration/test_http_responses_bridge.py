@@ -8400,6 +8400,8 @@ async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_
     async_client, monkeypatch
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
+    # Historical sessions can lack a recorded root; keep covering that refusal.
+    monkeypatch.setattr(http_bridge_streaming_module, "load_transcript_replay", AsyncMock(return_value=None))
     owner_account_id = await _import_account(
         async_client,
         "acc_http_bridge_required_owner",
@@ -8503,13 +8505,14 @@ async def test_v1_responses_http_bridge_attributes_and_logs_unavailable_required
     monkeypatch,
     caplog,
 ):
-    """An unroutable continuity owner must name the refusing proof and leave a row.
+    """An owner without replayable material must name the refusing proof and leave a row.
 
     Before this, the bridge surface raised this 502 out of session creation with
     no request-log write and no reason, so the only evidence was a rotating
     container log.
     """
     _install_bridge_settings(monkeypatch, enabled=True)
+    monkeypatch.setattr(http_bridge_streaming_module, "load_transcript_replay", AsyncMock(return_value=None))
     owner_account_id = await _import_account(
         async_client,
         "acc_http_bridge_owner_attribution",
@@ -8839,9 +8842,11 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
 
     The scheduled sweep frees a dormant thread six hours after its last turn.
     That is too late for the turn a user is actually waiting on, so the connect
-    failure retires the owner in place and rebinds within the same request.
+    failure retires the owner in place and rebinds within the same request
+    when no complete stored transcript exists.
     """
     _install_bridge_settings(monkeypatch, enabled=True)
+    monkeypatch.setattr(http_bridge_streaming_module, "load_transcript_replay", AsyncMock(return_value=None))
     owner_account_id = await _import_account(
         async_client,
         "acc_http_bridge_instant_retire",
@@ -18031,6 +18036,7 @@ def _assert_single_response_lifecycle_completed(events: list[dict]) -> str:
     [
         ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
         ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+        ("turn_rate_limit_exceeded", "Codex is at capacity, please try again later"),
     ],
 )
 async def test_backend_responses_http_bridge_retries_accepted_output_free_capacity_error_on_another_account(
@@ -19110,7 +19116,7 @@ async def test_smart_single_turn_stays_http_before_history_promotes(async_client
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
-async def test_http_bridge_quota_catalog_refresh_keeps_required_owner_out_of_policy_conflict(
+async def test_http_bridge_quota_catalog_refresh_preserves_eligibility_for_transcript_recovery(
     async_client, app_instance, monkeypatch, path
 ):
     import app.core.openai.model_refresh_scheduler as model_scheduler
@@ -19136,6 +19142,7 @@ async def test_http_bridge_quota_catalog_refresh_keeps_required_owner_out_of_pol
     owner = await _get_account(owner_id)
     assert await scheduler._refresh_as_leader()
     upstream = _ClosingBridgeUpstreamWebSocket("resp_catalog_bridge")
+    replacement = _FakeBridgeUpstreamWebSocket("resp_catalog_replacement")
     connected = []
 
     async def ensure_fresh(self, account, **kwargs):
@@ -19145,8 +19152,7 @@ async def test_http_bridge_quota_catalog_refresh_keeps_required_owner_out_of_pol
     async def connect(headers, access_token, account_id, **kwargs):
         del headers, access_token, kwargs
         connected.append(account_id)
-        assert account_id == owner.chatgpt_account_id
-        return upstream
+        return upstream if account_id == owner.chatgpt_account_id else replacement
 
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
@@ -19170,8 +19176,17 @@ async def test_http_bridge_quota_catalog_refresh_keeps_required_owner_out_of_pol
     response = await async_client.post(
         path, json={**body, "input": "continue", "previous_response_id": response_id}, headers=headers
     )
-    assert response.status_code == 502, response.text
-    assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+    assert response.status_code == 200, response.text
+    assert "response.completed" in response.text
     assert len(upstream.sent_text) == 1
-    assert connected == [owner.chatgpt_account_id]
+    assert len(replacement.sent_text) == 1
+    sibling = await _get_account(sibling_id)
+    assert connected == [owner.chatgpt_account_id, sibling.chatgpt_account_id]
+    replay = json.loads(replacement.sent_text[0])
+    assert "previous_response_id" not in replay
+    assert replay["input"] == [
+        *json.loads(upstream.sent_text[0])["input"],
+        first[-1]["response"]["output"][0],
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
     assert registry.account_ids_for_model("gpt-6-astra") == frozenset({owner_id, sibling_id})
