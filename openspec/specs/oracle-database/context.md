@@ -2,7 +2,7 @@
 
 ## Scope
 
-Oracle Autonomous Transaction Processing Always Free is the intended target: one application instance initially, then two sharing the database. The current draft provides connection validation, an offline schema inventory, Oracle timestamp/hash/sequence representations, and tested coordination groundwork. Application startup and schema mutation remain disabled for Oracle until installation, runtime queries and accounting have been ported and verified. The supported production backends remain SQLite and PostgreSQL.
+Oracle Autonomous Transaction Processing Always Free is the intended target: one application instance initially, then two sharing the database. The current draft provides connection validation, an offline schema inventory, Oracle timestamp/hash/sequence representations, a migration mutex, file ownership and scheduler leader coordination. Application startup and schema mutation remain disabled for Oracle until installation, runtime queries and accounting have been ported and verified. The supported production backends remain SQLite and PostgreSQL.
 
 The preparation requirements are defined in [the specification](spec.md). The full-port work remains tracked in [the active change](../../changes/add-oracle-autonomous-backend/tasks.md). A successful connection check is not evidence that codex-lb can run on Oracle.
 
@@ -54,6 +54,6 @@ Official limits: [Oracle Always Free Autonomous Database](https://docs.oracle.co
 
 ## Developer verification
 
-`make test-oracle` requires `CODEX_LB_TEST_ORACLE_URL` pointing to an owned, disposable Oracle test schema. The test suite creates and removes its own probe objects and requires no pre-existing `file_account_pins` table. Do not supply production credentials. Migration-lock tests additionally require EXECUTE on SYS.DBMS_LOCK. The pinned Oracle Free CI container receives that permission only for its disposable test user.
+`make test-oracle` requires `CODEX_LB_TEST_ORACLE_URL` pointing to an owned, disposable Oracle test schema. The test suite creates and removes its own probe objects and requires no pre-existing `file_account_pins` or `scheduler_leader` table. Do not supply production credentials. Migration-lock tests additionally require EXECUTE on SYS.DBMS_LOCK. The pinned Oracle Free CI container receives that permission only for its disposable test user.
 
 Until the full runtime and installation checklist passes against Oracle, the active change remains unarchived and the PR remains draft.

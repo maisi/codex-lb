@@ -17,6 +17,7 @@
 - [x] 3.1.1 Add Oracle DBMS_LOCK migration serialization with a dedicated session, bounded waits and explicit package-privilege errors; verify concurrent migrators, timeout, DDL-commit survival, exception cleanup and process loss on real Oracle.
 - [ ] 3.2 Port upserts, refresh/file ownership, leader leases, identity locks and account accounting; verify concurrent winners, failure cleanup and settlement ordering on real Oracle.
 - [x] 3.2.1 Prepare Oracle file pin ownership with database-time expiry and row-lock serialization; verify concurrent different-account winners, same-owner refresh, expiry takeover, post-lock TTL and rollback cleanup on real Oracle while application startup remains disabled.
+- [x] 3.2.2 Prepare Oracle scheduler leader acquisition and renewal; verify concurrent first owners, expiry takeover, non-owner demotion, lock-wait TTL and no expired-lease resurrection on real Oracle.
 - [ ] 3.3 Port timestamp/report functions, schema discovery, retention and empty-string storage; verify product API contracts against SQLite/PostgreSQL equivalents.
 - [ ] 3.4 Run real Oracle single-instance API smoke and two-instance failover tests; verify host loss, lease expiry, duplicate-refresh prevention and connection-budget peaks.
 

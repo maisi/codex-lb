@@ -89,3 +89,16 @@ Oracle file-ownership operations, when invoked against a prepared test schema, M
 - **GIVEN** an Oracle file pin has expired according to database time
 - **WHEN** a different account claims that file
 - **THEN** it becomes the live owner with a full TTL measured after any lock wait
+
+### Requirement: Prepared Oracle leader leases preserve exclusive ownership
+
+Oracle leader coordination against a prepared test schema MUST grant an unexpired scheduler lease to at most one distinct leader. Acquisition and renewal MUST evaluate expiry on the database clock after any row-lock wait. Renewal MUST NOT resurrect an expired lease, and a definitive non-owner result MUST demote the caller. The returned remaining lifetime MUST be measured in the database before commit and anchored to the caller's monotonic clock. Prepared coordination MUST NOT enable unsupported Oracle application startup.
+
+#### Scenario: Concurrent initial leader acquisition
+- **WHEN** two leaders independently acquire the same absent Oracle scheduler lease
+- **THEN** exactly one becomes the leader and the other remains a follower
+
+#### Scenario: A renewal waits past lease expiry
+- **GIVEN** a renewal waits behind a row lock until its lease expires
+- **WHEN** it can continue
+- **THEN** the lease is not renewed and the instance relinquishes leadership

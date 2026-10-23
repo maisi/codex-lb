@@ -6,10 +6,13 @@ on:
     paths:
       - .github/workflows/oracle-preparation.yml
       - app/db/**
+      - app/core/scheduling/**
+      - app/modules/proxy/file_pin_repository.py
       - tests/integration/test_oracle*.py
       - tests/unit/test_oracle*.py
       - pyproject.toml
       - uv.lock
+      - Makefile
 
 permissions:
   contents: read
@@ -38,8 +41,6 @@ jobs:
           --health-timeout 5s
           --health-retries 18
           --health-start-period 60s
-    env:
-      CODEX_LB_TEST_ORACLE_URL: oracle+oracledb://codex_test:codex_test@127.0.0.1:${{ job.services.oracle.ports[1521] }}/?service_name=FREEPDB1
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -60,4 +61,6 @@ jobs:
           EXIT;
           SQL
       - name: Test Oracle preparation on an isolated database
+        env:
+          CODEX_LB_TEST_ORACLE_URL: oracle+oracledb://codex_test:codex_test@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
         run: make test-oracle
