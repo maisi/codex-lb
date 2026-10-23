@@ -152,6 +152,7 @@ def test_schema_report_identifies_representation_decisions_without_mutating_meta
         (OracleSchemaBlockerKind.UNBOUNDED_STRING, "key"),
         (OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION, "key"),
         (OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION, "alias"),
+        (OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION, "description"),
         (OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION, "bounded_variant"),
         (OracleSchemaBlockerKind.PARTIAL_INDEX, "uq_example_active_key"),
     }

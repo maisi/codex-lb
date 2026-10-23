@@ -2,7 +2,7 @@
 
 ## Scope
 
-Oracle Autonomous Transaction Processing Always Free is the intended target: one application instance initially, then two sharing the database. The current draft provides connection validation, an offline schema inventory, Oracle timestamp/hash/sequence representations, a migration mutex, file ownership and scheduler leader coordination. Application startup and schema mutation remain disabled for Oracle until installation, runtime queries and accounting have been ported and verified. The supported production backends remain SQLite and PostgreSQL.
+Oracle Autonomous Transaction Processing Always Free is the intended target: one application instance initially, then two sharing the database. The current draft provides connection validation, an offline schema inventory, Oracle timestamp/hash/sequence representations, a migration mutex, file ownership, scheduler leader coordination and token-refresh ownership. Application startup and schema mutation remain disabled for Oracle until installation, runtime queries and accounting have been ported and verified. The supported production backends remain SQLite and PostgreSQL.
 
 The preparation requirements are defined in [the specification](spec.md). The full-port work remains tracked in [the active change](../../changes/add-oracle-autonomous-backend/tasks.md). A successful connection check is not evidence that codex-lb can run on Oracle.
 
@@ -28,7 +28,7 @@ uv run codex-lb-db oracle-schema
 uv run codex-lb-db oracle-schema --json
 ```
 
-The inventory exits unsuccessfully while blockers remain. It reports unbounded strings, filtered-index semantics and empty-VARCHAR semantics. The entries are review items, not independent engineering tasks; several entries can be resolved by one explicit storage design.
+The inventory exits unsuccessfully while blockers remain. It reports unbounded strings, filtered-index semantics and empty-string semantics for VARCHAR and Text/CLOB columns. Binding an empty Python string to a nullable CLOB reads back as NULL, and the same bind into a NOT NULL CLOB fails; moving a VARCHAR to CLOB therefore does not resolve empty-string compatibility. The entries are review items, not independent engineering tasks; several entries can be resolved by one explicit storage design.
 
 ## Connection and wallet configuration
 
@@ -54,6 +54,10 @@ Official limits: [Oracle Always Free Autonomous Database](https://docs.oracle.co
 
 ## Developer verification
 
-`make test-oracle` requires `CODEX_LB_TEST_ORACLE_URL` pointing to an owned, disposable Oracle test schema. The test suite creates and removes its own probe objects and requires no pre-existing `file_account_pins` or `scheduler_leader` table. Do not supply production credentials. Migration-lock tests additionally require EXECUTE on SYS.DBMS_LOCK. The pinned Oracle Free CI container receives that permission only for its disposable test user.
+`make test-oracle` requires `CODEX_LB_TEST_ORACLE_URL` pointing to an owned, disposable Oracle test schema. The test suite creates and removes its own probe objects and requires no pre-existing `file_account_pins`, `scheduler_leader` or `account_refresh_claims` table. Do not supply production credentials. Migration-lock tests additionally require EXECUTE on SYS.DBMS_LOCK. The pinned Oracle Free CI container receives that permission only for its disposable test user.
+
+A canceled row-lock wait currently exceeds the five-second test deadline with the frozen SQLAlchemy 2.0.52 and python-oracledb 26.0.1 stack. An isolated SQLAlchemy 2.0.55 check also exceeded that deadline. The test releases its competing transaction before joining cleanup, so the known failure cannot deadlock its own teardown. It is retained as a strict expected failure: an unexpected success fails CI until the limitation is reviewed and the marker removed. All other refresh ownership tests must pass. This is an unresolved runtime blocker, including for scheduler/file row-lock paths; a successful coordination test does not establish bounded connection reclamation.
+
+Related upstream reports describe [unbounded cancellation recovery](https://github.com/oracle/python-oracledb/issues/623) and [Oracle termination integration](https://github.com/sqlalchemy/sqlalchemy/issues/13578). Their scenarios differ from this local row-lock regression; neither is treated as proof of a released fix.
 
 Until the full runtime and installation checklist passes against Oracle, the active change remains unarchived and the PR remains draft.

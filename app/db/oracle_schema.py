@@ -37,8 +37,9 @@ def inspect_oracle_schema(metadata: MetaData | None = None) -> OracleSchemaRepor
 
     Nullable strings also need review: silently turning an empty value into NULL
     changes returned values and equality queries even without a NOT NULL error.
-    Enumerations already reject empty values and Text maps to a separate LOB
-    representation, so neither is treated as an unbounded VARCHAR.
+    Enumerations already reject empty values. Text maps to a LOB rather than an
+    unbounded VARCHAR, but binding an empty Python string still stores NULL and
+    needs an explicit representation decision.
     """
     selected_metadata = Base.metadata if metadata is None else metadata
     oracle_dialect = oracle.dialect()
@@ -47,9 +48,9 @@ def inspect_oracle_schema(metadata: MetaData | None = None) -> OracleSchemaRepor
         for column in table.columns:
             column_type = column.type.dialect_impl(oracle_dialect)
             # Oracle-specific variants may already supply bounds or a LOB.
-            if not isinstance(column_type, String) or isinstance(column_type, (Text, SqlEnum)):
+            if not isinstance(column_type, String) or isinstance(column_type, SqlEnum):
                 continue
-            if column_type.length is None:
+            if column_type.length is None and not isinstance(column_type, Text):
                 blockers.append(
                     OracleSchemaBlocker(
                         OracleSchemaBlockerKind.UNBOUNDED_STRING,
@@ -64,7 +65,8 @@ def inspect_oracle_schema(metadata: MetaData | None = None) -> OracleSchemaRepor
                     OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION,
                     table.fullname,
                     column.name,
-                    f"Oracle stores an empty VARCHAR as NULL; review {nullability} storage, equality and API values.",
+                    f"Oracle stores an empty Python string bind as NULL; "
+                    f"review {nullability} storage, equality and API values.",
                 )
             )
         for index in sorted(table.indexes, key=lambda index: index.name or ""):

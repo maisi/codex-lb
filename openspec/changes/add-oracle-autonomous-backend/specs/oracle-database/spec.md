@@ -102,3 +102,16 @@ Oracle leader coordination against a prepared test schema MUST grant an unexpire
 - **GIVEN** a renewal waits behind a row lock until its lease expires
 - **WHEN** it can continue
 - **THEN** the lease is not renewed and the instance relinquishes leadership
+
+### Requirement: Prepared Oracle refresh claims preserve token ownership
+
+Oracle refresh claims against a prepared test schema MUST allow at most one distinct claimant/refresh-owner pair to hold an unexpired account claim. Re-entry by the same pair MUST remain allowed, while another refresh owner from the same process MUST remain excluded. Acquisition and expiry MUST use database UTC time after any row-lock wait. Release MUST affect only the exact claimant/owner pair and MUST leave foreign claims intact. Claim acquisition MUST commit before returning so upstream token exchange does not hold a database transaction or row lock. Prepared claims MUST NOT enable unsupported Oracle application startup.
+
+#### Scenario: Concurrent token refresh ownership
+- **WHEN** independent Oracle sessions claim one account for different refresh-owner pairs
+- **THEN** exactly one pair acquires the claim and the other cannot exchange under that claim
+
+#### Scenario: A different owner attempts release
+- **GIVEN** an unexpired account claim belongs to one refresh-owner pair
+- **WHEN** another pair releases the account claim
+- **THEN** the original claim remains intact

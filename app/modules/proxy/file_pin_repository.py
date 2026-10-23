@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import TextClause
 
+from app.db.oracle_errors import is_oracle_unique_violation
 from app.db.session import sqlite_writer_section
 
 _TABLE = "file_account_pins"
@@ -220,9 +221,7 @@ class FileAccountPinRepository:
                         async with self._session.begin_nested():
                             await self._session.execute(_ORACLE_INSERT, params)
                     except IntegrityError as exc:
-                        original = exc.orig
-                        error = original.args[0] if original is not None and original.args else None
-                        if getattr(error, "code", None) != 1:
+                        if not is_oracle_unique_violation(exc):
                             raise
                         continue
                     persisted_account_id = account_id

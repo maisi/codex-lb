@@ -10,10 +10,12 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, Sequence, Table, create_engine, func, insert, select, text
+from sqlalchemy import Column, Integer, MetaData, Sequence, Table, Text, create_engine, func, insert, select, text
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.db.oracle_schema import OracleSchemaBlockerKind, inspect_oracle_schema
 from app.db.oracle_types import database_datetime, sha256_binary
 
 _ORACLE_URL = os.environ.get("CODEX_LB_TEST_ORACLE_URL", "")
@@ -174,3 +176,34 @@ def test_oracle_upgrade_cli_refuses_incomplete_backend(oracle_probe: tuple[Engin
     assert "oracle-check" in result.stderr
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(table)) == 0
+
+
+def test_oracle_schema_inventory_covers_empty_text_binds(oracle_probe: tuple[Engine, Table]) -> None:
+    engine, _ = oracle_probe
+    metadata = MetaData()
+    table = Table(
+        f"codex_text_{uuid4().hex[:12]}",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("optional_text", Text, nullable=True),
+        Column("required_text", Text, nullable=False),
+    )
+    report = inspect_oracle_schema(metadata)
+    assert {(blocker.kind, blocker.object_name) for blocker in report.blockers} == {
+        (OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION, "optional_text"),
+        (OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION, "required_text"),
+    }
+
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(insert(table).values(id=1, optional_text="", required_text="present"))
+            row = connection.execute(select(table.c.optional_text, table.c.optional_text.is_(None))).one()
+            assert row[0] is None
+            assert row[1] is True
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(insert(table).values(id=2, optional_text="present", required_text=""))
+            assert connection.scalar(select(func.count()).select_from(table)) == 1
+    finally:
+        metadata.drop_all(engine)

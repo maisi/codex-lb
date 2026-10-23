@@ -18,11 +18,13 @@
 - [ ] 3.2 Port upserts, refresh/file ownership, leader leases, identity locks and account accounting; verify concurrent winners, failure cleanup and settlement ordering on real Oracle.
 - [x] 3.2.1 Prepare Oracle file pin ownership with database-time expiry and row-lock serialization; verify concurrent different-account winners, same-owner refresh, expiry takeover, post-lock TTL and rollback cleanup on real Oracle while application startup remains disabled.
 - [x] 3.2.2 Prepare Oracle scheduler leader acquisition and renewal; verify concurrent first owners, expiry takeover, non-owner demotion, lock-wait TTL and no expired-lease resurrection on real Oracle.
+- [x] 3.2.3 Prepare Oracle token-refresh claims; verify concurrent owners, same-pair re-entry, distinct-token exclusion, exact-owner release, expiry takeover and post-lock database-clock TTL on real Oracle.
+- [ ] 3.2.4 Bound Oracle query cancellation and connection reclamation under row-lock waits and network loss; resolve the strict expected-failure regression before enabling runtime.
 - [ ] 3.3 Port timestamp/report functions, schema discovery, retention and empty-string storage; verify product API contracts against SQLite/PostgreSQL equivalents.
 - [ ] 3.4 Run real Oracle single-instance API smoke and two-instance failover tests; verify host loss, lease expiry, duplicate-refresh prevention and connection-budget peaks.
 
 ## 4. Reviewable delivery
 
 - [x] 4.1 Document preparation commands, support boundaries, Free-tier limits and HA topology in OpenSpec context and linked published docs; verify examples and documentation links.
-- [ ] 4.2 Run relevant regression tests, lint/type checks and strict OpenSpec validation; record exact results and remaining live verification in the change context.
+- [x] 4.2 Run relevant regression tests, lint/type checks and strict OpenSpec validation; record exact results and remaining live verification in the change context.
 - [ ] 4.3 Open a draft PR with implemented scope, deferred tasks, validation evidence and a two-hour status report; verify its GitHub URL and head state.

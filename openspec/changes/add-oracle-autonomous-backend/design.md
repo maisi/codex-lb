@@ -1,6 +1,6 @@
 ## Context
 
-The application uses SQLAlchemy 2.0.52, async request/background engines, and synchronous Alembic migrations. Oracle's native asynchronous driver is available, but runtime SQL and the 289-revision migration history assume SQLite/PostgreSQL. Always Free allows 30 database sessions and 20 GB of storage. No live Oracle database has been supplied for this spike.
+The application uses SQLAlchemy 2.0.52, async request/background engines, and synchronous Alembic migrations. Oracle's native asynchronous driver is available, but runtime SQL and the 289-revision migration history assume SQLite/PostgreSQL. Always Free allows 30 database sessions and 20 GB of storage. No OCI test database has been supplied; an owned local Oracle Free container verifies driver and SQL semantics during the spike.
 
 ## Goals / Non-Goals
 
@@ -12,7 +12,7 @@ The application uses SQLAlchemy 2.0.52, async request/background engines, and sy
 
 ### Opt-in Thin driver and bounded read-only preflight
 
-Provide an `oracle` extra and `codex-lb-db oracle-check` entry point. Use SQLAlchemy's native `oracle+oracledb` URL for synchronous and asynchronous engines. An explicit preflight may open a connection and query server identity/time, but never creates, stamps, alters, or drops application schema. It must release connections on success and failure, avoid printing credentials/wallet secrets, and distinguish connectivity from application readiness.
+Provide an `oracle` extra and `codex-lb-db oracle-check` entry point. Parse SQLAlchemy's native `oracle+oracledb` URL and check native synchronous and asynchronous Thin connections in a bounded subprocess. An explicit preflight queries `SELECT 1 FROM DUAL` and driver-provided server information, but never creates, stamps, alters, or drops application schema. It must release connections on success and failure, avoid printing credentials/wallet secrets, and distinguish connectivity from application readiness.
 
 Use existing pool settings. Show a total budget of `2 * (pool_size + max_overflow) * replicas`, with additional replicas counted explicitly for update overlap. Recommend pool size four and zero overflow for the planned two-instance Free deployment. A SQL session budget is not a throughput guarantee.
 
@@ -30,7 +30,8 @@ Future Oracle runtime support must implement conditional lease ownership, databa
 
 ## Risks / Trade-offs
 
-- Offline-only verification cannot demonstrate Oracle transactions or failover: keep the PR draft and retain live verification tasks.
+- Local Oracle Free verifies transactions and prepared coordination but cannot demonstrate OCI TLS/network permissions or full application failover: keep the PR draft and retain those verification tasks.
+- Native cancellation while waiting for a row lock exceeds the observed five-second bound on both frozen SQLAlchemy 2.0.52 and isolated 2.0.55. Keep a strict expected-failure regression and block runtime until cancellation/connection reclamation is bounded.
 - Oracle treats empty strings as NULL: design reversible storage encoding before enabling affected request/report paths.
 - Oracle DDL commits implicitly: use an Alembic-owned Oracle baseline and test interrupted migrations before supporting installation.
 - Shared Oracle is a common dependency for both application hosts: document the Free-tier recovery limitations and external export requirements.

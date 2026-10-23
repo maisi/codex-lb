@@ -8,6 +8,8 @@ from sqlalchemy import CursorResult, Float, bindparam, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.oracle_errors import is_oracle_unique_violation
+
 _LOCK = text("SELECT id FROM scheduler_leader WHERE id = 1 FOR UPDATE")
 _INSERT = text(
     "INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at) "
@@ -41,9 +43,7 @@ async def acquire_oracle_leader_lease(session: AsyncSession, *, leader_id: str, 
                 async with session.begin_nested():
                     await session.execute(_INSERT, parameters)
             except IntegrityError as exc:
-                original = exc.orig
-                error = original.args[0] if original is not None and original.args else None
-                if getattr(error, "code", None) != 1:
+                if not is_oracle_unique_violation(exc):
                     raise
                 continue
         # Evaluate the clock only after the row-lock or first-insert race has
