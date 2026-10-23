@@ -1830,9 +1830,16 @@ class ProxyService(
         )
         # Account priority orders selection independently of the allowlist
         # above: ranking an account must never silently narrow what the key can
-        # reach. Assignments load most-preferred first, so position is the rank.
+        # reach. Accounts in one tier share a rank, so the routing strategy
+        # balances between them.
         account_priority = (
-            {account_id: rank for rank, account_id in enumerate(api_key.assigned_account_ids)}
+            {
+                account_id: rank
+                for rank, tier in enumerate(
+                    api_key.assigned_account_tiers or [[account_id] for account_id in api_key.assigned_account_ids]
+                )
+                for account_id in tier
+            }
             if api_key is not None and api_key.assigned_account_ids
             else None
         )

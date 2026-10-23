@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { ChevronDown, ChevronsUpDown, ChevronUp, X } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, ChevronUp, Link2, Unlink2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -15,24 +15,44 @@ import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/status-badge";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import {
+  addAccountToTiers,
+  moveAccountInTiers,
+  removeAccountFromTiers,
+  sharesRankWithAbove,
+  toggleShareRankWithAbove,
+  type AccountTiers,
+} from "@/features/api-keys/account-tiers";
 import { cn } from "@/lib/utils";
 import { isAccountAssignmentSelectable, normalizeStatus } from "@/utils/account-status";
 import { formatPercentNullable, formatSlug, formatWindowLabel } from "@/utils/formatters";
 
-export type AccountMultiSelectProps = {
-  value: string[];
-  onChange: (value: string[]) => void;
+type AccountSelection =
+  | {
+      value: string[];
+      onChange: (value: string[]) => void;
+      priorityTiers?: undefined;
+      onPriorityTiersChange?: undefined;
+    }
+  | {
+      /**
+       * Edit the selection as a ranked priority list, where adjacent accounts
+       * can share a rank. Opt-in: other callers (automation jobs) treat the
+       * selection as an unordered set.
+       */
+      priorityTiers: AccountTiers;
+      onPriorityTiersChange: (tiers: AccountTiers) => void;
+      value?: undefined;
+      onChange?: undefined;
+    };
+
+export type AccountMultiSelectProps = AccountSelection & {
   placeholder?: string;
   triggerId?: string;
   ariaInvalid?: boolean;
   ariaDescribedBy?: string;
   triggerClassName?: string;
   allowPausedAccounts?: boolean;
-  /**
-   * Render the selection as an ordered priority list. Opt-in: other callers
-   * (automation jobs) treat the selection as an unordered set.
-   */
-  showPriorityOrder?: boolean;
 };
 type LimitChip = {
   key: string;
@@ -139,15 +159,16 @@ function AccountOption({ account }: { account: AccountSummary }) {
 }
 
 export function AccountMultiSelect({
-  value,
+  value: flatValue,
   onChange,
+  priorityTiers,
+  onPriorityTiersChange,
   placeholder,
   triggerId,
   ariaInvalid = false,
   ariaDescribedBy,
   triggerClassName,
   allowPausedAccounts = false,
-  showPriorityOrder = false,
 }: AccountMultiSelectProps) {
   const { t } = useTranslation();
   const placeholderLabel = placeholder ?? t("apiKeys.accountSelect.all");
@@ -162,6 +183,7 @@ export function AccountMultiSelect({
     [accounts, allowPausedAccounts],
   );
   const [search, setSearch] = useState("");
+  const value = useMemo(() => priorityTiers?.flat() ?? flatValue ?? [], [flatValue, priorityTiers]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return selectableAccounts;
@@ -183,49 +205,50 @@ export function AccountMultiSelect({
     [accounts, value],
   );
 
-  const orderedSelection = useMemo(
-    () =>
-      value.map((accountId) => ({
+  const rankedSelection = useMemo(() => {
+    let position = 0;
+    return (priorityTiers ?? []).map((tier) =>
+      tier.map((accountId) => ({
         accountId,
+        position: position++,
         account: accounts.find((account) => account.accountId === accountId),
       })),
-    [accounts, value],
-  );
+    );
+  }, [accounts, priorityTiers]);
 
-  const move = useCallback(
-    (index: number, delta: number) => {
-      const target = index + delta;
-      if (target < 0 || target >= value.length) {
+  const remove = useCallback(
+    (accountId: string) => {
+      if (priorityTiers) {
+        onPriorityTiersChange(removeAccountFromTiers(priorityTiers, accountId));
         return;
       }
-      const next = [...value];
-      [next[index], next[target]] = [next[target], next[index]];
-      onChange(next);
+      onChange(value.filter((current) => current !== accountId));
     },
-    [onChange, value],
+    [onChange, onPriorityTiersChange, priorityTiers, value],
   );
 
   const toggle = useCallback(
     (accountId: string) => {
       if (selectedSet.has(accountId)) {
-        onChange(value.filter((current) => current !== accountId));
+        remove(accountId);
+        return;
+      }
+      if (priorityTiers) {
+        onPriorityTiersChange(addAccountToTiers(priorityTiers, accountId));
         return;
       }
       onChange([...value, accountId]);
     },
-    [onChange, selectedSet, value],
-  );
-
-  const remove = useCallback(
-    (accountId: string) => {
-      onChange(value.filter((current) => current !== accountId));
-    },
-    [onChange, value],
+    [onChange, onPriorityTiersChange, priorityTiers, remove, selectedSet, value],
   );
 
   const selectAll = useCallback(() => {
+    if (priorityTiers) {
+      onPriorityTiersChange([]);
+      return;
+    }
     onChange([]);
-  }, [onChange]);
+  }, [onChange, onPriorityTiersChange, priorityTiers]);
 
   const label =
     value.length === 0 ? placeholderLabel : t("apiKeys.accountSelect.selected", { count: value.length });
@@ -286,53 +309,87 @@ export function AccountMultiSelect({
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {value.length > 0 && showPriorityOrder ? (
+      {priorityTiers && value.length > 0 ? (
         <div className="space-y-1.5">
           <p className="text-xs font-medium">{t("apiKeys.accountSelect.priorityTitle")}</p>
-          <ol className="space-y-1">
-            {orderedSelection.map(({ accountId, account }, index) => (
+          <ol className="space-y-1" aria-label={t("apiKeys.accountSelect.priorityTitle")}>
+            {rankedSelection.map((tier, tierIndex) => (
               <li
-                key={accountId}
-                className="flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1"
+                key={tier[0].accountId}
+                className="flex items-start gap-1.5 rounded-md border bg-muted/40 px-2 py-1"
               >
-                <span className="w-4 shrink-0 text-center text-xs font-semibold tabular-nums text-muted-foreground">
-                  {index + 1}
+                <span className="w-4 shrink-0 pt-1 text-center text-xs font-semibold tabular-nums text-muted-foreground">
+                  {tierIndex + 1}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-xs" title={accountId}>
-                  {account?.email ?? accountId}
-                </span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="size-6"
-                  disabled={index === 0}
-                  aria-label={t("apiKeys.accountSelect.moveUp", { name: account?.email ?? accountId })}
-                  onClick={() => move(index, -1)}
-                >
-                  <ChevronUp className="size-3.5" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="size-6"
-                  disabled={index === value.length - 1}
-                  aria-label={t("apiKeys.accountSelect.moveDown", { name: account?.email ?? accountId })}
-                  onClick={() => move(index, 1)}
-                >
-                  <ChevronDown className="size-3.5" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="size-6"
-                  aria-label={t("apiKeys.accountSelect.removeAccount", { name: account?.email ?? accountId })}
-                  onClick={() => remove(accountId)}
-                >
-                  <X className="size-3.5" />
-                </Button>
+                <ul className="min-w-0 flex-1 space-y-0.5">
+                  {tier.map(({ accountId, account, position }) => {
+                    const name = account?.email ?? accountId;
+                    const rankToggleLabel = t(
+                      sharesRankWithAbove(priorityTiers, position)
+                        ? "apiKeys.accountSelect.ownRank"
+                        : "apiKeys.accountSelect.shareRankWithAbove",
+                      { name },
+                    );
+                    return (
+                      <li key={accountId} className="flex items-center gap-1.5">
+                        <span className="min-w-0 flex-1 truncate text-xs" title={accountId}>
+                          {name}
+                        </span>
+                        {position > 0 ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-6"
+                            aria-label={rankToggleLabel}
+                            title={rankToggleLabel}
+                            onClick={() => onPriorityTiersChange(toggleShareRankWithAbove(priorityTiers, position))}
+                          >
+                            {sharesRankWithAbove(priorityTiers, position) ? (
+                              <Unlink2 className="size-3.5" />
+                            ) : (
+                              <Link2 className="size-3.5" />
+                            )}
+                          </Button>
+                        ) : (
+                          <span className="size-6 shrink-0" aria-hidden="true" />
+                        )}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-6"
+                          disabled={position === 0}
+                          aria-label={t("apiKeys.accountSelect.moveUp", { name })}
+                          onClick={() => onPriorityTiersChange(moveAccountInTiers(priorityTiers, position, -1))}
+                        >
+                          <ChevronUp className="size-3.5" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-6"
+                          disabled={position === value.length - 1}
+                          aria-label={t("apiKeys.accountSelect.moveDown", { name })}
+                          onClick={() => onPriorityTiersChange(moveAccountInTiers(priorityTiers, position, 1))}
+                        >
+                          <ChevronDown className="size-3.5" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-6"
+                          aria-label={t("apiKeys.accountSelect.removeAccount", { name })}
+                          onClick={() => remove(accountId)}
+                        >
+                          <X className="size-3.5" />
+                        </Button>
+                      </li>
+                    );
+                  })}
+                </ul>
               </li>
             ))}
           </ol>

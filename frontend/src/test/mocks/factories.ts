@@ -1264,6 +1264,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		accountAssignmentScopeEnabled: false,
 		sourceAssignmentScopeEnabled: false,
 		assignedAccountIds: [],
+		assignedAccountTiers: [],
 		assignedSourceIds: [],
 		createdAt: offsetIso(-60),
 		lastUsedAt: offsetIso(-5),

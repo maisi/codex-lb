@@ -73,7 +73,7 @@ describe("ApiKeyEditDialog", () => {
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Renamed key");
     expect(payload.applyToCodexModel).toBe(false);
-    expect("assignedAccountIds" in payload).toBe(false);
+    expect("assignedAccountTiers" in payload).toBe(false);
     expect("limits" in payload).toBe(false);
   });
 
@@ -103,7 +103,7 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.isActive).toBe(false);
-    expect("assignedAccountIds" in payload).toBe(false);
+    expect("assignedAccountTiers" in payload).toBe(false);
     expect("limits" in payload).toBe(false);
   });
 
@@ -162,7 +162,7 @@ describe("ApiKeyEditDialog", () => {
     });
 
     const payload = onSubmit.mock.calls[0][0];
-    expect("assignedAccountIds" in payload).toBe(false);
+    expect("assignedAccountTiers" in payload).toBe(false);
     expect(payload.limits).toEqual([
       {
         limitType: "total_tokens",
@@ -267,7 +267,7 @@ describe("ApiKeyEditDialog", () => {
     });
 
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+    expect(payload.assignedAccountTiers).toEqual([["acc_primary"], ["acc_secondary"]]);
   });
 
   it("keeps the dialog open when selecting portalled model and account menu items", async () => {
@@ -329,7 +329,7 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Renamed key");
-    expect("assignedAccountIds" in payload).toBe(false);
+    expect("assignedAccountTiers" in payload).toBe(false);
   });
 
   it("submits an empty assigned account list when clearing scoped accounts", async () => {
@@ -356,7 +356,7 @@ describe("ApiKeyEditDialog", () => {
     });
 
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.assignedAccountIds).toEqual([]);
+    expect(payload.assignedAccountTiers).toEqual([]);
   });
 
   it("submits an empty assigned account list when a scoped key loses its assigned accounts", async () => {
@@ -387,7 +387,7 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Renamed key");
-    expect(payload.assignedAccountIds).toEqual([]);
+    expect(payload.assignedAccountTiers).toEqual([]);
   });
 
   it("keeps a deny-all source scope when editing an unrelated field", async () => {
@@ -602,7 +602,7 @@ describe("ApiKeyEditDialog account priority", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     // A set-based diff would treat this as no change and drop the new order.
-    expect(payload.assignedAccountIds).toEqual(["acc_secondary", "acc_primary"]);
+    expect(payload.assignedAccountTiers).toEqual([["acc_secondary"], ["acc_primary"]]);
     expect(payload.accountAssignmentScopeEnabled).toBe(true);
   });
 
@@ -624,7 +624,7 @@ describe("ApiKeyEditDialog account priority", () => {
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.accountAssignmentScopeEnabled).toBe(false);
     // Order did not change, so the assignment list stays out of the payload.
-    expect("assignedAccountIds" in payload).toBe(false);
+    expect("assignedAccountTiers" in payload).toBe(false);
   });
 
   it("keeps ranking from re-enabling a restriction the operator turned off", async () => {
@@ -652,9 +652,63 @@ describe("ApiKeyEditDialog account priority", () => {
     });
 
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.assignedAccountIds).toEqual(["acc_secondary", "acc_primary"]);
+    expect(payload.assignedAccountTiers).toEqual([["acc_secondary"], ["acc_primary"]]);
     // The backend derives the flag from "has assignments" when it is absent,
     // which would silently restrict this key again.
     expect(payload.accountAssignmentScopeEnabled).toBe(false);
+  });
+
+  it("submits accounts that now share a rank", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog open busy={false} apiKey={scopedKey()} onOpenChange={vi.fn()} onSubmit={onSubmit} />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Give secondary@example.com the same rank as the account above",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.assignedAccountTiers).toEqual([["acc_primary", "acc_secondary"]]);
+    expect(payload.accountAssignmentScopeEnabled).toBe(true);
+  });
+
+  it("leaves unchanged shared ranks out of the payload", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({
+          assignedAccountIds: ["acc_primary", "acc_secondary"],
+          assignedAccountTiers: [["acc_primary", "acc_secondary"]],
+          accountAssignmentScopeEnabled: true,
+        })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Give secondary@example.com its own rank" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect("assignedAccountTiers" in onSubmit.mock.calls[0][0]).toBe(false);
   });
 });

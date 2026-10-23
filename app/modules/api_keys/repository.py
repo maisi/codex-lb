@@ -545,7 +545,14 @@ class ApiKeysRepository:
             await self._session.refresh(parent, attribute_names=["limits"])
         return await self.get_limits_by_key(key_id)
 
-    async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
+    async def replace_account_assignments(
+        self,
+        key_id: str,
+        account_ids: list[str],
+        *,
+        ranks: Sequence[int] | None = None,
+        commit: bool = True,
+    ) -> None:
         # Re-check the pending-deletion marker atomically with the write:
         # validation ran in an earlier transaction, and an account DELETE can
         # commit in between — the marked row still exists (background drain),
@@ -567,9 +574,13 @@ class ApiKeysRepository:
         if account_ids:
             # ``account_ids`` is ordered most-preferred first. The INSERT..SELECT
             # cannot preserve that order on its own, so carry each account's
-            # position across as its selection rank.
+            # selection rank across: its position, or the caller's ``ranks``
+            # (parallel to ``account_ids``) when several accounts share one.
             priority_case = case(
-                {account_id: index for index, account_id in enumerate(account_ids)},
+                {
+                    account_id: (ranks[index] if ranks is not None else index)
+                    for index, account_id in enumerate(account_ids)
+                },
                 value=Account.id,
                 else_=len(account_ids),
             )

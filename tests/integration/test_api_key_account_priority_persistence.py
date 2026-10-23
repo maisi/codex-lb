@@ -14,6 +14,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, ApiKeyAccountAssignment
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import _to_api_key_data
 
 ACCOUNTS = ["acc_prio_a", "acc_prio_b", "acc_prio_c"]
 KEY_ID = "key_prio"
@@ -88,7 +89,7 @@ async def test_reordering_rewrites_the_rank(db_setup):
 
 @pytest.mark.asyncio
 async def test_rank_map_derived_from_read_order_matches_request(db_setup):
-    """The proxy builds its rank map by enumerating the loaded assignment list."""
+    """Without shared ranks every loaded assignment is its own tier, in request order."""
     await _seed()
     requested = ["acc_prio_b", "acc_prio_c", "acc_prio_a"]
     async with SessionLocal() as session:
@@ -100,3 +101,33 @@ async def test_rank_map_derived_from_read_order_matches_request(db_setup):
         "acc_prio_c": 1,
         "acc_prio_a": 2,
     }
+
+
+async def _loaded_tiers() -> list[list[str]]:
+    async with SessionLocal() as session:
+        key = (await session.execute(select(ApiKey).where(ApiKey.id == KEY_ID))).scalar_one()
+        return _to_api_key_data(key).assigned_account_tiers
+
+
+@pytest.mark.asyncio
+async def test_shared_ranks_are_read_back_as_tiers(db_setup):
+    await _seed()
+    async with SessionLocal() as session:
+        await ApiKeysRepository(session).replace_account_assignments(
+            KEY_ID,
+            ["acc_prio_c", "acc_prio_a", "acc_prio_b"],
+            ranks=[0, 0, 1],
+        )
+
+    assert await _stored_ranks() == {"acc_prio_c": 0, "acc_prio_a": 0, "acc_prio_b": 1}
+    # Inside a tier the listing order is only kept stable (by account id).
+    assert await _loaded_tiers() == [["acc_prio_a", "acc_prio_c"], ["acc_prio_b"]]
+
+
+@pytest.mark.asyncio
+async def test_distinct_ranks_read_back_as_one_account_per_tier(db_setup):
+    await _seed()
+    async with SessionLocal() as session:
+        await ApiKeysRepository(session).replace_account_assignments(KEY_ID, ACCOUNTS)
+
+    assert await _loaded_tiers() == [[account_id] for account_id in ACCOUNTS]

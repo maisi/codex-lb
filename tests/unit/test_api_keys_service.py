@@ -272,9 +272,23 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             row.limits = updated
         return updated
 
-    async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
+    async def replace_account_assignments(
+        self,
+        key_id: str,
+        account_ids: list[str],
+        *,
+        ranks: list[int] | None = None,
+        commit: bool = True,
+    ) -> None:
         del commit
-        assignments = [ApiKeyAccountAssignment(api_key_id=key_id, account_id=account_id) for account_id in account_ids]
+        assignments = [
+            ApiKeyAccountAssignment(
+                api_key_id=key_id,
+                account_id=account_id,
+                priority=ranks[index] if ranks is not None else index,
+            )
+            for index, account_id in enumerate(account_ids)
+        ]
         self._account_assignments[key_id] = assignments
         row = self.rows.get(key_id)
         if row is not None:
@@ -535,8 +549,15 @@ class _TransactionalAssignmentFailureRepo(_FakeApiKeysRepository):
             row.source_assignments = self._source_assignments.get(key_id, [])
         return row
 
-    async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
-        del account_ids, commit
+    async def replace_account_assignments(
+        self,
+        key_id: str,
+        account_ids: list[str],
+        *,
+        ranks: list[int] | None = None,
+        commit: bool = True,
+    ) -> None:
+        del account_ids, ranks, commit
         raise RuntimeError("assignment insert failed")
 
     async def commit(self) -> None:

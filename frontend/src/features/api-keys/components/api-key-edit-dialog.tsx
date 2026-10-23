@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/select";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
+import { accountTiersEqual, tiersFromAccountIds, type AccountTiers } from "@/features/api-keys/account-tiers";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import { ReasoningEffortsMultiSelect } from "@/features/api-keys/components/reasoning-efforts-multi-select";
@@ -90,16 +91,16 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
   return nextIds.some((accountId) => !initialIdSet.has(accountId));
 }
 
-function hasOrderedSelectionChange(initialIds: string[], nextIds: string[]): boolean {
-  if (initialIds.length !== nextIds.length) {
-    return true;
-  }
-  return nextIds.some((accountId, index) => initialIds[index] !== accountId);
+function assignedAccountTiers(apiKey: ApiKey): AccountTiers {
+  // Older responses carry only the flat order, where every account has its own rank.
+  return apiKey.assignedAccountTiers.length > 0
+    ? apiKey.assignedAccountTiers
+    : tiersFromAccountIds(apiKey.assignedAccountIds);
 }
 
 type ApiKeyEditDraft = {
   selectedModels: string[];
-  selectedAccountIds: string[];
+  selectedAccountTiers: AccountTiers;
   restrictToAssignedAccounts: boolean;
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
@@ -120,7 +121,7 @@ type ApiKeyEditDraft = {
 function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
   return {
     selectedModels: apiKey.allowedModels || [],
-    selectedAccountIds: apiKey.assignedAccountIds,
+    selectedAccountTiers: assignedAccountTiers(apiKey),
     restrictToAssignedAccounts: apiKey.accountAssignmentScopeEnabled,
     selectedSourceIds: apiKey.assignedSourceIds,
     selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
@@ -166,9 +167,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(draft.limitRules);
-    const shouldSubmitAssignedAccountIds =
-      hasOrderedSelectionChange(apiKey.assignedAccountIds, draft.selectedAccountIds) ||
-      (apiKey.accountAssignmentScopeEnabled && draft.selectedAccountIds.length === 0);
+    const shouldSubmitAssignedAccounts =
+      !accountTiersEqual(assignedAccountTiers(apiKey), draft.selectedAccountTiers) ||
+      (apiKey.accountAssignmentScopeEnabled && draft.selectedAccountTiers.length === 0);
     // A source-scoped key whose assigned sources were all deleted comes back
     // as scopeEnabled=true with an empty id list (deny-all). Submitting an
     // empty list would make the backend disable scoping and silently broaden
@@ -197,13 +198,13 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       expiresAt: draft.expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
-    if (shouldSubmitAssignedAccountIds) {
-      payload.assignedAccountIds = draft.selectedAccountIds;
-      if (draft.selectedAccountIds.length > 0) {
+    if (shouldSubmitAssignedAccounts) {
+      payload.assignedAccountTiers = draft.selectedAccountTiers;
+      if (draft.selectedAccountTiers.length > 0) {
         payload.accountAssignmentScopeEnabled = draft.restrictToAssignedAccounts;
       }
     } else if (
-      draft.selectedAccountIds.length > 0 &&
+      draft.selectedAccountTiers.length > 0 &&
       draft.restrictToAssignedAccounts !== apiKey.accountAssignmentScopeEnabled
     ) {
       payload.accountAssignmentScopeEnabled = draft.restrictToAssignedAccounts;
@@ -290,11 +291,10 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</div>
               <AccountMultiSelect
-                value={draft.selectedAccountIds}
-                onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })}
-                showPriorityOrder
+                priorityTiers={draft.selectedAccountTiers}
+                onPriorityTiersChange={(selectedAccountTiers) => updateDraft({ selectedAccountTiers })}
               />
-              {draft.selectedAccountIds.length > 0 ? (
+              {draft.selectedAccountTiers.length > 0 ? (
                 <div className="space-y-1 rounded-md border p-2 text-sm">
                   <div className="flex items-center gap-2">
                     <Checkbox

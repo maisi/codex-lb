@@ -582,6 +582,154 @@ async def test_key_account_order_outranks_account_routing_policy(
 
 
 @pytest.mark.asyncio
+async def test_key_account_tier_lets_its_accounts_compete_and_keeps_lower_tiers_waiting(async_client, monkeypatch):
+    await _populate_test_registry()
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model",
+        lambda accounts, model, *, service_tier=None: accounts,
+    )
+    policies = {"acc-tier-listed-first": "normal", "acc-tier-burn": "burn_first", "acc-tier-lower": "burn_first"}
+    account_ids: dict[str, str] = {}
+    for chatgpt_id, policy in policies.items():
+        account_ids[chatgpt_id] = await _import_account(async_client, chatgpt_id, f"{chatgpt_id}@example.com")
+        policy_update = await async_client.put(
+            f"/api/accounts/{account_ids[chatgpt_id]}/routing-policy",
+            json={"routingPolicy": policy},
+        )
+        assert policy_update.status_code == 200
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "tiered-key",
+            "assignedAccountTiers": [
+                [account_ids["acc-tier-listed-first"], account_ids["acc-tier-burn"]],
+                [account_ids["acc-tier-lower"]],
+            ],
+        },
+    )
+    assert create.status_code == 200
+    key = create.json()["key"]
+
+    served_by: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        served_by.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+    )
+
+    # Inside the first tier burn_first decides, not listing order; the
+    # lower tier's burn_first account does not jump ahead of the tier.
+    assert response.status_code == 200
+    assert served_by == ["acc-tier-burn"]
+
+
+def _sorted_tiers(tiers: list[list[str]]) -> list[list[str]]:
+    # Accounts inside a tier share a rank; their listing order carries no meaning.
+    return [sorted(tier) for tier in tiers]
+
+
+@pytest.mark.asyncio
+async def test_api_key_assigned_account_tiers_round_trip(async_client):
+    first = await _import_account(async_client, "acc-tiers-a", "tiers-a@example.com")
+    second = await _import_account(async_client, "acc-tiers-b", "tiers-b@example.com")
+    third = await _import_account(async_client, "acc-tiers-c", "tiers-c@example.com")
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "tiers-key", "assignedAccountTiers": [[first, second], [third]]},
+    )
+    assert create.status_code == 200
+    created = create.json()
+    assert _sorted_tiers(created["assignedAccountTiers"]) == _sorted_tiers([[first, second], [third]])
+    assert created["assignedAccountIds"] == [account for tier in created["assignedAccountTiers"] for account in tier]
+    assert created["accountAssignmentScopeEnabled"] is True
+    key_id = created["id"]
+
+    regroup = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"assignedAccountTiers": [[third], [first, second]]},
+    )
+    assert regroup.status_code == 200
+    assert _sorted_tiers(regroup.json()["assignedAccountTiers"]) == _sorted_tiers([[third], [first, second]])
+
+    # A flat list keeps its meaning: every account its own rank.
+    flat = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"assignedAccountIds": [second, third, first]},
+    )
+    assert flat.status_code == 200
+    assert flat.json()["assignedAccountTiers"] == [[second], [third], [first]]
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["assignedAccountTiers"] == [[second], [third], [first]]
+
+
+@pytest.mark.asyncio
+async def test_api_key_assigned_account_tiers_drop_blanks_duplicates_and_empty_tiers(async_client):
+    first = await _import_account(async_client, "acc-tiers-dup-a", "tiers-dup-a@example.com")
+    second = await _import_account(async_client, "acc-tiers-dup-b", "tiers-dup-b@example.com")
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "tiers-normalized-key", "assignedAccountTiers": [[first, " "], [], [first, second]]},
+    )
+
+    assert create.status_code == 200
+    assert create.json()["assignedAccountTiers"] == [[first], [second]]
+
+
+@pytest.mark.asyncio
+async def test_api_key_rejects_assigned_account_ids_and_tiers_together(async_client):
+    account = await _import_account(async_client, "acc-tiers-both", "tiers-both@example.com")
+    both = {"assignedAccountIds": [account], "assignedAccountTiers": [[account]]}
+
+    create = await async_client.post("/api/api-keys/", json={"name": "tiers-both-key", **both})
+    assert create.status_code == 400
+    assert create.json()["error"]["code"] == "invalid_api_key_payload"
+
+    created = await async_client.post("/api/api-keys/", json={"name": "tiers-both-key"})
+    assert created.status_code == 200
+    update = await async_client.patch(f"/api/api-keys/{created.json()['id']}", json=both)
+    assert update.status_code == 400
+    assert update.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
+async def test_api_key_rejects_unknown_account_in_tiers(async_client):
+    account = await _import_account(async_client, "acc-tiers-known", "tiers-known@example.com")
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "tiers-unknown-key", "assignedAccountTiers": [[account, "missing-account"]]},
+    )
+
+    assert create.status_code == 400
+    assert create.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_rejects_unknown_assigned_account_ids(async_client):
     create = await async_client.post(
         "/api/api-keys/",
@@ -670,8 +818,10 @@ async def test_api_key_update_rolls_back_base_fields_when_assignment_write_fails
 
     original_replace = ApiKeysRepository.replace_account_assignments
 
-    async def fail_replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True):
-        del account_ids, commit
+    async def fail_replace_account_assignments(
+        self, key_id: str, account_ids: list[str], *, ranks=None, commit: bool = True
+    ):
+        del account_ids, ranks, commit
         await original_replace(self, key_id, [], commit=False)
         raise RuntimeError("simulated assignment write failure")
 

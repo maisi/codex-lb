@@ -43,6 +43,9 @@ class ApiKeyCreateRequest(DashboardModel):
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
+    # Alternative to ``assigned_account_ids``: tiers most-preferred first, and
+    # the accounts inside one tier share a rank. Send one or the other.
+    assigned_account_tiers: list[list[str]] | None = None
     # Ordering the accounts above sets selection priority. Restriction is a
     # separate switch: omit this and it defaults to "restrict when accounts are
     # assigned", preserving the previous behavior.
@@ -71,6 +74,9 @@ class ApiKeyUpdateRequest(DashboardModel):
     expires_at: datetime | None = None
     is_active: bool | None = None
     assigned_account_ids: list[str] | None = None
+    # Alternative to ``assigned_account_ids``: tiers most-preferred first, and
+    # the accounts inside one tier share a rank. Send one or the other.
+    assigned_account_tiers: list[list[str]] | None = None
     # Ordering the accounts above sets selection priority. Restriction is a
     # separate switch: omit this and it defaults to "restrict when accounts are
     # assigned", preserving the previous behavior.
@@ -108,6 +114,7 @@ class ApiKeyResponse(DashboardModel):
     account_assignment_scope_enabled: bool = False
     source_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = Field(default_factory=list)
+    assigned_account_tiers: list[list[str]] = Field(default_factory=list)
     assigned_source_ids: list[str] = Field(default_factory=list)
     created_at: datetime
     last_used_at: datetime | None

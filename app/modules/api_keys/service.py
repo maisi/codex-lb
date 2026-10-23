@@ -25,7 +25,17 @@ from app.core.usage.pricing import (
 )
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, ModelSource, UsageHistory
+from app.db.models import (
+    Account,
+    AccountStatus,
+    ApiKey,
+    ApiKeyAccountAssignment,
+    ApiKeyLimit,
+    LimitType,
+    LimitWindow,
+    ModelSource,
+    UsageHistory,
+)
 from app.db.session import sqlite_writer_section
 from app.db.sqlite_lock_retry import should_retry_after_sqlite_lock
 from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer, get_api_key_last_used_coalescer
@@ -296,6 +306,9 @@ class ApiKeyCreateData:
     usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
+    # Alternative to ``assigned_account_ids``: most-preferred tier first, and
+    # accounts inside one tier share a rank.
+    assigned_account_tiers: list[list[str]] | None = None
     account_assignment_scope_enabled: bool | None = None
     assigned_source_ids: list[str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
@@ -335,6 +348,8 @@ class ApiKeyUpdateData:
     is_active_set: bool = False
     assigned_account_ids: list[str] | None = None
     assigned_account_ids_set: bool = False
+    assigned_account_tiers: list[list[str]] | None = None
+    assigned_account_tiers_set: bool = False
     account_assignment_scope_enabled: bool | None = None
     account_assignment_scope_enabled_set: bool = False
     assigned_source_ids: list[str] | None = None
@@ -370,6 +385,8 @@ class ApiKeyData:
     account_assignment_scope_enabled: bool = False
     source_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
+    # The same accounts grouped by selection rank, most-preferred tier first.
+    assigned_account_tiers: list[list[str]] = field(default_factory=list)
     assigned_source_ids: list[str] = field(default_factory=list)
     pooled_credits: "PooledCreditData | None" = None
 
@@ -498,7 +515,11 @@ class ApiKeysService:
         expires_at = _normalize_expires_at(payload.expires_at)
         plain_key = _generate_plain_key()
         normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
-        assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
+        assigned_account_tiers = await self._resolve_assigned_account_tiers(
+            payload.assigned_account_ids,
+            payload.assigned_account_tiers,
+            both_supplied=payload.assigned_account_ids is not None and payload.assigned_account_tiers is not None,
+        )
         assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
@@ -531,7 +552,7 @@ class ApiKeysService:
             account_assignment_scope_enabled=(
                 payload.account_assignment_scope_enabled
                 if payload.account_assignment_scope_enabled is not None
-                else bool(assigned_account_ids)
+                else bool(assigned_account_tiers)
             ),
             source_assignment_scope_enabled=bool(assigned_source_ids),
             traffic_class=traffic_class,
@@ -546,8 +567,8 @@ class ApiKeysService:
         try:
             created = await self._repository.create(row, commit=False)
 
-            if assigned_account_ids:
-                await self._repository.replace_account_assignments(created.id, assigned_account_ids, commit=False)
+            if assigned_account_tiers:
+                await self._replace_account_assignments(created.id, assigned_account_tiers)
             if assigned_source_ids:
                 await self._repository.replace_source_assignments(created.id, assigned_source_ids, commit=False)
 
@@ -640,13 +661,18 @@ class ApiKeysService:
             if payload.account_assignment_scope_enabled_set and payload.account_assignment_scope_enabled is not None
             else None
         )
-        if payload.assigned_account_ids_set:
-            assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
+        account_assignments_set = payload.assigned_account_ids_set or payload.assigned_account_tiers_set
+        if account_assignments_set:
+            assigned_account_tiers = await self._resolve_assigned_account_tiers(
+                payload.assigned_account_ids,
+                payload.assigned_account_tiers,
+                both_supplied=payload.assigned_account_ids_set and payload.assigned_account_tiers_set,
+            )
             account_assignment_scope_enabled: bool | _Unset = (
-                explicit_account_scope if explicit_account_scope is not None else bool(assigned_account_ids)
+                explicit_account_scope if explicit_account_scope is not None else bool(assigned_account_tiers)
             )
         else:
-            assigned_account_ids = None
+            assigned_account_tiers = None
             account_assignment_scope_enabled = explicit_account_scope if explicit_account_scope is not None else _UNSET
         if payload.assigned_source_ids_set:
             assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
@@ -794,9 +820,9 @@ class ApiKeysService:
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
-            if payload.assigned_account_ids_set:
-                assert assigned_account_ids is not None
-                await self._repository.replace_account_assignments(key_id, assigned_account_ids, commit=False)
+            if account_assignments_set:
+                assert assigned_account_tiers is not None
+                await self._replace_account_assignments(key_id, assigned_account_tiers)
             if payload.assigned_source_ids_set:
                 assert assigned_source_ids is not None
                 await self._repository.replace_source_assignments(key_id, assigned_source_ids, commit=False)
@@ -827,7 +853,7 @@ class ApiKeysService:
             raise
 
         if (
-            payload.assigned_account_ids_set
+            account_assignments_set
             or payload.assigned_source_ids_set
             or limit_rows is not None
             or payload.name_set
@@ -855,6 +881,34 @@ class ApiKeysService:
         if poller is not None:
             await poller.bump(NAMESPACE_API_KEY)
         return _to_api_key_data(row)
+
+    async def _resolve_assigned_account_tiers(
+        self,
+        account_ids: list[str] | None,
+        account_tiers: list[list[str]] | None,
+        *,
+        both_supplied: bool,
+    ) -> list[list[str]]:
+        """Validate the requested assignments as rank tiers, most-preferred first.
+
+        A flat ``account_ids`` list keeps its meaning: every account its own rank.
+        """
+        if both_supplied:
+            raise ApiKeyValidationError("Send either assigned_account_ids or assigned_account_tiers, not both")
+        if account_tiers is not None:
+            tiers = _normalize_assigned_account_tiers(account_tiers)
+        else:
+            tiers = [[account_id] for account_id in _normalize_assigned_account_ids(account_ids)]
+        await self._resolve_assigned_account_ids([account_id for tier in tiers for account_id in tier])
+        return tiers
+
+    async def _replace_account_assignments(self, key_id: str, account_tiers: list[list[str]]) -> None:
+        await self._repository.replace_account_assignments(
+            key_id,
+            [account_id for tier in account_tiers for account_id in tier],
+            ranks=[rank for rank, tier in enumerate(account_tiers) for _ in tier],
+            commit=False,
+        )
 
     async def _resolve_assigned_account_ids(self, account_ids: list[str] | None) -> list[str]:
         normalized_account_ids = _normalize_assigned_account_ids(account_ids)
@@ -1551,6 +1605,22 @@ def _normalize_assigned_account_ids(account_ids: list[str] | None) -> list[str]:
     return normalized
 
 
+def _normalize_assigned_account_tiers(account_tiers: list[list[str]]) -> list[list[str]]:
+    tiers: list[list[str]] = []
+    seen: set[str] = set()
+    for requested_tier in account_tiers:
+        tier: list[str] = []
+        for account_id in requested_tier:
+            value = account_id.strip()
+            if not value or value in seen:
+                continue
+            tier.append(value)
+            seen.add(value)
+        if tier:
+            tiers.append(tier)
+    return tiers
+
+
 def _normalize_assigned_source_ids(source_ids: list[str] | None) -> list[str]:
     if not source_ids:
         return []
@@ -1935,6 +2005,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         account_assignment_scope_enabled=data.account_assignment_scope_enabled,
         source_assignment_scope_enabled=data.source_assignment_scope_enabled,
         assigned_account_ids=data.assigned_account_ids,
+        assigned_account_tiers=data.assigned_account_tiers,
         assigned_source_ids=data.assigned_source_ids,
         key=key,
     )
@@ -1980,9 +2051,23 @@ def _to_api_key_data(
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
         source_assignment_scope_enabled=getattr(row, "source_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
+        assigned_account_tiers=_assignment_tiers(account_assignments),
         assigned_source_ids=[assignment.source_id for assignment in source_assignments],
         pooled_credits=pooled_credits,
     )
+
+
+def _assignment_tiers(account_assignments: list[ApiKeyAccountAssignment]) -> list[list[str]]:
+    """Group assignments, already loaded most-preferred first, by shared priority."""
+    tiers: list[list[str]] = []
+    tier_priority: int | None = None
+    for assignment in account_assignments:
+        priority = getattr(assignment, "priority", None)
+        if not tiers or priority is None or priority != tier_priority:
+            tiers.append([])
+            tier_priority = priority
+        tiers[-1].append(assignment.account_id)
+    return tiers
 
 
 def _to_usage_summary_data(summary: ApiKeyUsageSummary | None) -> ApiKeyUsageSummaryData | None:
