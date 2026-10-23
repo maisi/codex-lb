@@ -138,7 +138,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         preserve_matched_usage: bool = False,
     ) -> list[ApiKeyLimit]: ...
     async def replace_account_assignments(
-        self, key_id: str, account_ids: list[str], *, commit: bool = True
+        self, key_id: str, account_ids: list[str], *, ranks: list[int] | None = None, commit: bool = True
     ) -> None: ...
     async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None: ...
 
@@ -2055,6 +2055,12 @@ def _to_api_key_data(
         assigned_source_ids=[assignment.source_id for assignment in source_assignments],
         pooled_credits=pooled_credits,
     )
+
+
+def api_key_account_priority(api_key: ApiKeyData) -> dict[str, int] | None:
+    """Per-key account ranks for selection (lower wins); a tier shares one rank."""
+    tiers = api_key.assigned_account_tiers or [[account_id] for account_id in api_key.assigned_account_ids]
+    return {account_id: rank for rank, tier in enumerate(tiers) for account_id in tier} or None
 
 
 def _assignment_tiers(account_assignments: list[ApiKeyAccountAssignment]) -> list[list[str]]:
