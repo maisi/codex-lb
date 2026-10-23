@@ -522,6 +522,66 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_policy", "second_policy"),
+    [("normal", "burn_first"), ("preserve", "normal"), ("preserve", "burn_first")],
+)
+async def test_key_account_order_outranks_account_routing_policy(
+    async_client, monkeypatch, first_policy, second_policy
+):
+    await _populate_test_registry()
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model",
+        lambda accounts, model, *, service_tier=None: accounts,
+    )
+    first_account_id = await _import_account(async_client, "acc-ranked-first", "ranked-first@example.com")
+    second_account_id = await _import_account(async_client, "acc-ranked-second", "ranked-second@example.com")
+    for account_id, policy in ((first_account_id, first_policy), (second_account_id, second_policy)):
+        policy_update = await async_client.put(
+            f"/api/accounts/{account_id}/routing-policy",
+            json={"routingPolicy": policy},
+        )
+        assert policy_update.status_code == 200
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "ranked-key", "assignedAccountIds": [first_account_id, second_account_id]},
+    )
+    assert create.status_code == 200
+    key = create.json()["key"]
+
+    served_by: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        served_by.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+    )
+
+    assert response.status_code == 200
+    assert served_by == ["acc-ranked-first"]
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_rejects_unknown_assigned_account_ids(async_client):
     create = await async_client.post(
         "/api/api-keys/",

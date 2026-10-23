@@ -2317,6 +2317,67 @@ def _select_account_preferring_budget_safe(
         if apply_secondary_budget_threshold
         else (lambda state: _state_above_budget_threshold(state, budget_threshold_pct))
     )
+    if account_priority:
+        # Per-key account priority is a strict waterfall that outranks routing
+        # policy and budget preference. Every pass below hands ``select_account``
+        # a pre-filtered subset (burn_first only, then non-preserve under
+        # budget), and rank narrowing inside it can only order what that
+        # filter kept -- a lower-ranked burn_first account would win the
+        # burn-first pass outright. So settle the serving rank over the whole
+        # pool first and run the passes inside it. The budget threshold is the
+        # trigger to move down one rank: the rank comes from the budget-safe
+        # accounts while any of them can serve, and from the whole pool only
+        # once none can.
+        def _serving_rank_anchor(candidates: list[AccountState]) -> AccountState | None:
+            return select_account(
+                candidates,
+                prefer_earlier_reset=prefer_earlier_reset,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
+                routing_strategy=routing_strategy,
+                account_priority=account_priority,
+                allow_backoff_fallback=False,
+                deterministic_probe=True,
+                relative_availability_power=relative_availability_power,
+                relative_availability_top_k=relative_availability_top_k,
+                traffic_class=traffic_class,
+                ignore_standard_quota=ignore_standard_quota,
+                routing_costs=routing_costs_by_account_id,
+                allow_usage_exhaustion_error=False,
+                selection_seed=selection_seed,
+            ).account
+
+        budget_safe = [state for state in state_list if not state_budget_threshold(state)]
+        anchor = _serving_rank_anchor(budget_safe) if budget_safe else None
+        if anchor is None and len(budget_safe) != len(state_list):
+            anchor = _serving_rank_anchor(state_list)
+        if anchor is not None:
+            serving_rank = account_priority.get(anchor.account_id)
+            # Unranked accounts share ``None`` and so form the last tier together.
+            tier = [state for state in state_list if account_priority.get(state.account_id) == serving_rank]
+            tiered = _select_account_preferring_budget_safe(
+                tier,
+                prefer_earlier_reset=prefer_earlier_reset,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
+                routing_strategy=routing_strategy,
+                relative_availability_power=relative_availability_power,
+                relative_availability_top_k=relative_availability_top_k,
+                budget_threshold_pct=budget_threshold_pct,
+                secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                apply_secondary_budget_threshold=apply_secondary_budget_threshold,
+                allow_backoff_fallback=allow_backoff_fallback,
+                deterministic_probe=deterministic_probe,
+                traffic_class=traffic_class,
+                ignore_standard_quota=ignore_standard_quota,
+                routing_costs_by_account_id=routing_costs_by_account_id,
+                allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                usage_exhaustion_states=usage_exhaustion_states,
+                selection_seed=selection_seed,
+            )
+            # The tier held an account the full pool could serve, so this only
+            # misses when a pool-relative gate (opportunistic reserve) reads the
+            # narrower tier more strictly; the unnarrowed passes below decide then.
+            if tiered.account is not None:
+                return tiered
     if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
         budget_safe_states = [
             state
