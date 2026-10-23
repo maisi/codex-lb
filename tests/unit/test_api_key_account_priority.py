@@ -7,14 +7,20 @@ admission or hard eligibility filtering.
 
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from app.core.balancer import (
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
+    ROUTING_POLICY_BURN_FIRST,
     ROUTING_POLICY_PRESERVE,
     AccountState,
     select_account,
 )
 from app.db.models import AccountStatus
+from app.modules.proxy._load_balancer.sticky_selection import _select_account_preferring_budget_safe
 
 PRIORITY = {"first": 0, "second": 1}
 
@@ -108,3 +114,121 @@ def test_recovery_admission_still_outranks_priority():
         ),
     ]
     assert _pick(states) == "second"
+
+
+# ---------------------------------------------------------------------------
+# The proxy path: the budget-safe selector every fresh pick goes through.
+#
+# It runs burn-first and budget passes over pre-filtered subsets before
+# ``select_account`` sees the pool, so rank has to be settled ahead of them or a
+# lower-ranked burn_first / non-preserve account wins outright.
+# ---------------------------------------------------------------------------
+
+_PROXY_STRATEGIES = (
+    "capacity_weighted",
+    "usage_weighted",
+    "round_robin",
+    "relative_availability",
+    "fill_first",
+    "sequential_drain",
+)
+
+
+def _pick_proxy_path(states, priority=PRIORITY, *, routing_strategy="capacity_weighted", **kwargs):
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy=routing_strategy,
+        budget_threshold_pct=95.0,
+        account_priority=priority,
+        **kwargs,
+    )
+    assert result.account is not None
+    return result.account.account_id
+
+
+@pytest.mark.parametrize("routing_strategy", _PROXY_STRATEGIES)
+def test_proxy_path_lower_ranked_burn_first_does_not_jump_the_queue(routing_strategy):
+    states = [
+        AccountState("first", AccountStatus.ACTIVE, used_percent=10.0),
+        AccountState("second", AccountStatus.ACTIVE, used_percent=10.0, routing_policy=ROUTING_POLICY_BURN_FIRST),
+    ]
+    assert _pick_proxy_path(states, routing_strategy=routing_strategy) == "first"
+
+
+@pytest.mark.parametrize("routing_strategy", _PROXY_STRATEGIES)
+def test_proxy_path_top_ranked_preserve_still_serves(routing_strategy):
+    states = [
+        AccountState("first", AccountStatus.ACTIVE, used_percent=70.0, routing_policy=ROUTING_POLICY_PRESERVE),
+        AccountState("second", AccountStatus.ACTIVE, used_percent=5.0),
+    ]
+    assert _pick_proxy_path(states, routing_strategy=routing_strategy) == "first"
+
+
+def test_proxy_path_budget_threshold_moves_traffic_down_one_rank():
+    """Decision: crossing the budget threshold is the trigger to fail over."""
+    states = [
+        AccountState("first", AccountStatus.ACTIVE, used_percent=96.0),
+        AccountState("second", AccountStatus.ACTIVE, used_percent=10.0),
+    ]
+    assert _pick_proxy_path(states) == "second"
+
+
+def test_proxy_path_next_rank_takes_over_even_when_it_is_preserve():
+    """Rank outranks preserve on the way down too, not only at the top."""
+    states = [
+        AccountState("first", AccountStatus.ACTIVE, used_percent=96.0),
+        AccountState("second", AccountStatus.ACTIVE, used_percent=10.0, routing_policy=ROUTING_POLICY_PRESERVE),
+    ]
+    assert _pick_proxy_path(states) == "second"
+
+
+def test_proxy_path_rank_order_returns_once_every_rank_is_over_budget():
+    states = [
+        AccountState("first", AccountStatus.ACTIVE, used_percent=97.0),
+        AccountState("second", AccountStatus.ACTIVE, used_percent=96.0, routing_policy=ROUTING_POLICY_BURN_FIRST),
+    ]
+    assert _pick_proxy_path(states) == "first"
+
+
+def test_proxy_path_fails_over_when_top_rank_is_cooling_down():
+    states = [
+        AccountState("first", AccountStatus.ACTIVE, used_percent=1.0, cooldown_until=time.time() + 600),
+        AccountState("second", AccountStatus.ACTIVE, used_percent=50.0),
+    ]
+    assert _pick_proxy_path(states) == "second"
+
+
+def test_proxy_path_routing_policy_still_orders_within_a_tier():
+    """Unranked accounts share the last tier, where burn_first keeps its pull."""
+    states = [
+        AccountState("first", AccountStatus.PAUSED, used_percent=1.0),
+        AccountState("unlisted-normal", AccountStatus.ACTIVE, used_percent=1.0),
+        AccountState(
+            "unlisted-burn", AccountStatus.ACTIVE, used_percent=60.0, routing_policy=ROUTING_POLICY_BURN_FIRST
+        ),
+    ]
+    assert _pick_proxy_path(states) == "unlisted-burn"
+
+
+def test_proxy_path_recovery_admission_still_outranks_priority():
+    states = [
+        AccountState("first", AccountStatus.ACTIVE, used_percent=10.0, health_tier=HEALTH_TIER_HEALTHY),
+        AccountState(
+            "second",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=None,
+        ),
+    ]
+    assert _pick_proxy_path(states) == "second"
+
+
+def test_proxy_path_without_priority_burn_first_still_wins():
+    """Regression guard: unranked keys keep the burn-first preference."""
+    states = [
+        AccountState("first", AccountStatus.ACTIVE, used_percent=10.0),
+        AccountState("second", AccountStatus.ACTIVE, used_percent=10.0, routing_policy=ROUTING_POLICY_BURN_FIRST),
+    ]
+    assert _pick_proxy_path(states, priority=None) == "second"

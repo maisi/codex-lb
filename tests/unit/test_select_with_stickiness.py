@@ -1410,3 +1410,33 @@ async def test_existing_thread_owner_still_outranks_priority():
 
     assert selection.account is not None
     assert selection.account.account_id == "second"
+
+
+@pytest.mark.asyncio
+async def test_new_thread_follows_rank_over_a_lower_ranked_burn_first_account():
+    """Key order beats account-level burn_first for a fresh sticky pick."""
+    states = [_active("first", used_percent=10.0), _active("second", used_percent=10.0, routing_policy="burn_first")]
+
+    selection = await _invoke_with_seed_and_priority(
+        states,
+        seed_account_id=None,
+        account_priority={"first": 0, "second": 1},
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "first"
+
+
+@pytest.mark.asyncio
+async def test_new_thread_follows_rank_over_account_preserve():
+    """Key order beats account-level preserve for a fresh sticky pick."""
+    states = [_active("first", used_percent=60.0, routing_policy="preserve"), _active("second", used_percent=5.0)]
+
+    selection = await _invoke_with_seed_and_priority(
+        states,
+        seed_account_id=None,
+        account_priority={"first": 0, "second": 1},
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "first"
