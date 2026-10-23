@@ -21,6 +21,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config.settings import get_settings
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
+from app.db.backend_support import require_supported_database_backend
 from app.db.sqlite_utils import (
     IntegrityCheck,
     SqliteFileIdentity,
@@ -345,6 +346,7 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
 
 
 def _create_main_engine(url: str) -> AsyncEngine:
+    require_supported_database_backend(url, operation="Application startup")
     if not _is_sqlite_url(url):
         return _create_postgres_async_engine(
             url,
@@ -974,6 +976,7 @@ def init_background_db(url: str | None = None) -> None:
     """
     global _background_engine, _background_session_factory
     db_url = normalize_sqlite_url(url or _settings.database_url)
+    require_supported_database_backend(db_url, operation="Background database initialization")
 
     if _is_sqlite_url(db_url):
         is_sqlite_memory = _is_sqlite_memory_url(db_url)
@@ -1076,6 +1079,7 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 
 async def _init_db() -> None:
     database_url = normalize_sqlite_url(_settings.database_url)
+    require_supported_database_backend(database_url, operation="Application database initialization")
     _ensure_sqlite_dir(database_url)
     sqlite_path = sqlite_db_path_from_url(database_url)
     if sqlite_path is not None:
@@ -1238,6 +1242,7 @@ async def _init_db() -> None:
 async def init_db() -> None:
     """Initialize the database while fencing one process onto file SQLite."""
     database_url = normalize_sqlite_url(_settings.database_url)
+    require_supported_database_backend(database_url, operation="Application database initialization")
     _ensure_sqlite_dir(database_url)
     sqlite_path = sqlite_db_path_from_url(database_url)
     if sqlite_path is None:

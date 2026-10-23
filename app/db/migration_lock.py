@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 import time
 from contextlib import contextmanager
+from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Protocol, TypedDict, cast
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import Integer, create_engine, outparam, text
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import make_url
+from sqlalchemy.pool import NullPool
 
 from app.db.sqlite_utils import sqlite_db_path_from_url
 
@@ -19,6 +23,29 @@ SQLITE_MIGRATION_LOCK_SUFFIX = ".migrate-lock"
 _POLL_INTERVAL_SECONDS = 2.0
 _WAIT_LOG_INTERVAL_SECONDS = 10.0
 _TIMEOUT_SETTING_HINT = "database_migration_lock_timeout_seconds (CODEX_LB_DATABASE_MIGRATION_LOCK_TIMEOUT_SECONDS)"
+# DBMS_LOCK's numeric user-lock namespace is 0..1073741823. Keep one stable
+# application-wide key without ALLOCATE_UNIQUE, which commits implicitly.
+_ORACLE_MIGRATION_LOCK_ID = int.from_bytes(sha256(MIGRATION_LOCK_KEY.encode()).digest()[:4], "big") % (1 << 30)
+_ORACLE_REQUEST_LOCK = text(
+    "BEGIN :result := DBMS_LOCK.REQUEST(id => :lock_id, lockmode => DBMS_LOCK.X_MODE, "
+    "timeout => 0, release_on_commit => FALSE); END;"
+).bindparams(outparam("result", Integer()))
+_ORACLE_RELEASE_LOCK = text("BEGIN :result := DBMS_LOCK.RELEASE(id => :lock_id); END;").bindparams(
+    outparam("result", Integer())
+)
+
+
+class OracleMigrationLockError(RuntimeError):
+    """The required Oracle migration mutex could not be acquired or released."""
+
+
+class _OracleLockParameters(TypedDict):
+    result: int
+
+
+class _OracleLockResult(Protocol):
+    # SQLAlchemy installs this documented attribute dynamically for OUT binds.
+    out_parameters: _OracleLockParameters
 
 
 def sqlite_migration_lock_path(db_path: Path) -> Path:
@@ -98,6 +125,61 @@ def _postgresql_migration_lock(sync_database_url: str, *, timeout_seconds: float
 
 
 @contextmanager
+def _oracle_migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Iterator[None]:
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be finite and greater than 0")
+    # A dedicated physical session owns the advisory lock across every Alembic
+    # connection/transaction, including Oracle's implicit DDL commits. NullPool
+    # closes that session even if explicit RELEASE fails, instead of returning
+    # a still-locked session to a pool. Oracle releases its locks on session loss.
+    engine = create_engine(sync_database_url, future=True, poolclass=NullPool, hide_parameters=True)
+    try:
+        with engine.connect() as connection:
+
+            def _try_acquire() -> bool:
+                try:
+                    result = connection.execute(_ORACLE_REQUEST_LOCK, {"lock_id": _ORACLE_MIGRATION_LOCK_ID})
+                except sa_exc.DBAPIError as exc:
+                    message = str(exc.orig)
+                    if "ORA-01031" in message or ("PLS-00201" in message and "DBMS_LOCK" in message):
+                        raise OracleMigrationLockError(
+                            "Oracle migration locking requires EXECUTE on SYS.DBMS_LOCK. "
+                            "Ask the database administrator to grant access; unlocked migrations are not permitted."
+                        ) from None
+                    raise
+                code = cast(_OracleLockResult, result).out_parameters["result"]
+                if code == 0:
+                    return True
+                if code == 1:
+                    return False
+                raise OracleMigrationLockError(f"Oracle DBMS_LOCK.REQUEST failed with result code {code}")
+
+            _acquire_with_timeout(
+                _try_acquire,
+                timeout_seconds=timeout_seconds,
+                description="Oracle DBMS_LOCK migration lock",
+            )
+            body_failed = False
+            try:
+                yield
+            except BaseException:
+                body_failed = True
+                raise
+            finally:
+                try:
+                    result = connection.execute(_ORACLE_RELEASE_LOCK, {"lock_id": _ORACLE_MIGRATION_LOCK_ID})
+                    code = cast(_OracleLockResult, result).out_parameters["result"]
+                    if code != 0:
+                        raise OracleMigrationLockError(f"Oracle DBMS_LOCK.RELEASE failed with result code {code}")
+                except BaseException:
+                    if not body_failed:
+                        raise
+                    logger.error("Oracle migration lock release failed; closing its dedicated session")
+    finally:
+        engine.dispose()
+
+
+@contextmanager
 def _sqlite_migration_lock(db_path: Path, *, timeout_seconds: float) -> Iterator[None]:
     # Holding a BEGIN IMMEDIATE write transaction on a sentinel SQLite file is
     # the mutex: SQLite's RESERVED lock is exclusive across processes sharing
@@ -138,15 +220,19 @@ def _sqlite_migration_lock(db_path: Path, *, timeout_seconds: float) -> Iterator
 def migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Iterator[None]:
     """Cross-process mutex serializing schema upgrades/stamps for one database.
 
-    PostgreSQL: session-level advisory lock held on a dedicated connection.
+    PostgreSQL/Oracle: session-level advisory lock held on a dedicated connection.
     File-backed SQLite: exclusive write transaction on a sentinel SQLite file
     adjacent to the database. In-memory SQLite is a no-op (the database is
     process-private, there is no peer), as are dialects without a portable
     cross-process primitive.
     """
-    backend = make_url(sync_database_url).get_backend_name()
+    backend = make_url(sync_database_url).get_backend_name().lower()
     if backend == "postgresql":
         with _postgresql_migration_lock(sync_database_url, timeout_seconds=timeout_seconds):
+            yield
+        return
+    if backend == "oracle":
+        with _oracle_migration_lock(sync_database_url, timeout_seconds=timeout_seconds):
             yield
         return
     if backend == "sqlite":

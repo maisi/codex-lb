@@ -8,12 +8,12 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
-    DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
     LargeBinary,
+    Sequence,
     String,
     Text,
     UniqueConstraint,
@@ -27,6 +27,7 @@ from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
+from app.db.oracle_types import database_datetime, sha256_binary
 
 
 class Base(DeclarativeBase):
@@ -72,7 +73,7 @@ class FileAccountPin(Base):
 
     file_id: Mapped[str] = mapped_column(String, primary_key=True)
     account_id: Mapped[str] = mapped_column(String, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False)
 
     __table_args__ = (Index("ix_file_account_pins_expires_at", "expires_at"),)
 
@@ -110,8 +111,8 @@ class Account(Base):
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     id_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
-    last_refresh: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    last_refresh: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
     status: Mapped[AccountStatus] = mapped_column(
         SqlEnum(
@@ -143,7 +144,7 @@ class Account(Base):
     # (re-import/reauth) that supersedes the deletion. Non-NULL rows are
     # hidden from account listings and are already unroutable (the fast path
     # also sets status=DEACTIVATED).
-    delete_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    delete_requested_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
     # Frozen at the first delete request (repeat requests do not escalate):
     # True selects the history-deleting variant in the background worker.
     delete_history_requested: Mapped[bool] = mapped_column(
@@ -178,9 +179,11 @@ class Account(Base):
 class UsageHistory(Base):
     __tablename__ = "usage_history"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("usage_history_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     window: Mapped[str | None] = mapped_column(String, nullable=True)
     used_percent: Mapped[float] = mapped_column(Float, nullable=False)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -244,7 +247,7 @@ class AccountUsageRollupState(Base):
     __tablename__ = "account_usage_rollup_state"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
-    folded_through: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    folded_through: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
     # Hour-aligned watermark for the time-axis rollups below. Kept as a
     # SEPARATE column (not shared with `folded_through`) so the hourly
     # backfill never resets or rewrites the lifetime rollups, which cannot
@@ -253,7 +256,7 @@ class AccountUsageRollupState(Base):
     # `requested_at < hourly_folded_through` are fully folded, newer rows
     # are the live tail.
     hourly_folded_through: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         nullable=False,
         server_default=text("'1970-01-01 00:00:00'"),
     )
@@ -262,7 +265,7 @@ class AccountUsageRollupState(Base):
     # row lock) so the satellite added later backfills from epoch without
     # rewinding — and without being gated on — the other time-axis rollups.
     conversation_folded_through: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         nullable=False,
         server_default=text("'1970-01-01 00:00:00'"),
     )
@@ -274,13 +277,13 @@ class AccountUsageRollupState(Base):
     # Only NEW code writes NULL, after refolding [marker, watermark) from
     # raw — so NULL always means "no legacy-suspect range outstanding".
     upgrade_repair_from: Mapped[datetime | None] = mapped_column(
-        DateTime,
+        database_datetime(),
         nullable=True,
         server_default=text("'1970-01-01 00:00:00'"),
     )
 
     reports_folded_through: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         nullable=False,
         server_default=text("'1970-01-01 00:00:00'"),
     )
@@ -301,7 +304,7 @@ class RequestReportHourlyRollup(Base):
     model: Mapped[str] = mapped_column(String, primary_key=True)
     useragent_group: Mapped[str] = mapped_column(String, primary_key=True)
     conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    first_requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    first_requested_at: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
     request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     error_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     cancelled_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
@@ -459,7 +462,9 @@ class RequestConversationHourlyRollup(Base):
 class AdditionalUsageHistory(Base):
     __tablename__ = "additional_usage_history"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("additional_usage_history_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     quota_key: Mapped[str] = mapped_column(String, nullable=False)
     limit_name: Mapped[str] = mapped_column(String, nullable=False)
@@ -468,7 +473,7 @@ class AdditionalUsageHistory(Base):
     used_percent: Mapped[float] = mapped_column(Float, nullable=False)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
 
 class RequestLog(Base):
@@ -483,7 +488,9 @@ class RequestLog(Base):
     sticky_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     sticky_key_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("request_logs_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
     account_id: Mapped[str | None] = mapped_column(
         String,
         ForeignKey("accounts.id", ondelete="SET NULL"),
@@ -505,8 +512,8 @@ class RequestLog(Base):
         nullable=False,
     )
     connection_request_kind: Mapped[str | None] = mapped_column(String, nullable=True)
-    requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
     plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -574,9 +581,9 @@ class ProxyEndpoint(Base):
     username: Mapped[str | None] = mapped_column(String, nullable=True)
     password_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -595,9 +602,9 @@ class ProxyPool(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -627,7 +634,7 @@ class ProxyPoolMember(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     weight: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
     pool: Mapped[ProxyPool] = relationship("ProxyPool", back_populates="members")
     endpoint: Mapped[ProxyEndpoint] = relationship("ProxyEndpoint", back_populates="pool_memberships")
@@ -645,9 +652,9 @@ class AccountProxyBinding(Base):
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     pool_id: Mapped[str] = mapped_column(String, ForeignKey("proxy_pools.id", ondelete="RESTRICT"), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -662,20 +669,22 @@ class AccountProxyBinding(Base):
 class AccountLimitWarmup(Base):
     __tablename__ = "account_limit_warmups"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("account_limit_warmups_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     window: Mapped[str] = mapped_column(String, nullable=False)
     reset_at: Mapped[int] = mapped_column(Integer, nullable=False)
     transition_key: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
-    attempted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempted_at: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -711,8 +720,12 @@ class AuditLog(Base):
         Index("idx_audit_logs_target", "target_type", "target_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("audit_logs_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
+    timestamp: Mapped[datetime] = mapped_column(
+        database_datetime(timezone=True), default=func.now(), nullable=False, index=True
+    )
     action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     actor_ip: Mapped[str | None] = mapped_column(String(50), nullable=True)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -731,8 +744,8 @@ class SchedulerLeader(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     leader_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    acquired_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False, index=True)
 
 
 class ResetCreditRedeemRequest(Base):
@@ -753,7 +766,7 @@ class ResetCreditRedeemRequest(Base):
     )
     redeem_request_id: Mapped[str] = mapped_column(String, primary_key=True)
     credit_id: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False, index=True)
 
 
 class ResetCreditRedeemClaim(Base):
@@ -773,7 +786,7 @@ class ResetCreditRedeemClaim(Base):
         primary_key=True,
     )
     holder_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False)
 
 
 class OAuthFlowState(Base):
@@ -801,9 +814,9 @@ class OAuthFlowState(Base):
     device_auth_id: Mapped[str | None] = mapped_column(String, nullable=True)
     user_code: Mapped[str | None] = mapped_column(String, nullable=True)
     interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
 
 
 class OAuthDeviceFlowSlot(Base):
@@ -826,7 +839,7 @@ class OAuthDeviceFlowSlot(Base):
     slot_key: Mapped[str] = mapped_column(String, primary_key=True)
     flow_id: Mapped[str] = mapped_column(String, nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False)
 
 
 class StickySession(Base):
@@ -846,9 +859,9 @@ class StickySession(Base):
         nullable=False,
     )
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -860,7 +873,7 @@ class StickySession(Base):
     # binaries can let a process-session restart ignore the ambiguous raw row
     # without erasing its explicit-turn-state ownership. Stale-hard cleanup
     # may later promote the scoped marker to a timestamped global tombstone.
-    continuity_abandoned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    continuity_abandoned_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True, default=None)
     continuity_abandonment_scope: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
 
 
@@ -869,12 +882,12 @@ class CapabilityLineageMarker(Base):
 
     marker_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        database_datetime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
     last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        database_datetime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -970,16 +983,16 @@ class DashboardUser(Base):
     session_generation: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     is_break_glass: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     created_by_user_id: Mapped[str | None] = mapped_column(
         String,
         ForeignKey("dashboard_users.id", ondelete="SET NULL"),
         nullable=True,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+        database_datetime(), server_default=func.now(), onupdate=func.now(), nullable=False
     )
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
 
     role: Mapped["DashboardRoleRecord"] = relationship("DashboardRoleRecord")
     identities: Mapped[list["DashboardIdentity"]] = relationship(
@@ -1021,8 +1034,8 @@ class DashboardIdentity(Base):
     #: never equal one and an identity provider reconciling its own resources
     #: would otherwise match nothing it created.
     user_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
     user: Mapped["DashboardUser"] = relationship("DashboardUser", back_populates="identities")
 
@@ -1059,10 +1072,10 @@ class DashboardUserInvite(Base):
         unique=True,
         nullable=False,
     )
-    token_hash: Mapped[bytes] = mapped_column(LargeBinary, unique=True, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    token_hash: Mapped[bytes] = mapped_column(sha256_binary(), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
     created_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
     sso_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     username_locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
@@ -1071,7 +1084,9 @@ class DashboardUserInvite(Base):
     expected_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
     expected_provider_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     expected_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        database_datetime(timezone=True), server_default=func.now(), nullable=False
+    )
 
     user: Mapped["DashboardUser"] = relationship("DashboardUser")
 
@@ -1120,10 +1135,12 @@ class DashboardAuthProvider(Base):
         ForeignKey("dashboard_users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    test_login_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    test_login_verified_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        database_datetime(timezone=True), server_default=func.now(), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        database_datetime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 
@@ -1167,8 +1184,8 @@ class DashboardOidcLoginFlow(Base):
     #: while the callback is exchanging its code would be handed the proof that
     #: the previous issuer worked.
     config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False)
 
 
 class DashboardScimToken(Base):
@@ -1191,7 +1208,9 @@ class DashboardScimToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     token_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
     provider_key: Mapped[str] = mapped_column(String(128), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        database_datetime(timezone=True), server_default=func.now(), nullable=False
+    )
     #: A snapshot link, cleared rather than cascaded: revoking a token is an
     #: act of its own and must not be a side effect of deleting its issuer.
     created_by_user_id: Mapped[str | None] = mapped_column(
@@ -1199,8 +1218,8 @@ class DashboardScimToken(Base):
         ForeignKey("dashboard_users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
+    rotated_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
 
 
 class DashboardRoleMappingClaim(str, Enum):
@@ -1242,9 +1261,11 @@ class DashboardRoleMapping(Base):
         nullable=False,
     )
     priority: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        database_datetime(timezone=True), server_default=func.now(), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        database_datetime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 
@@ -1272,9 +1293,9 @@ class DashboardRoleRecord(Base):
         nullable=True,
     )
     permissions_version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+        database_datetime(), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
     grants: Mapped[list["DashboardRoleGrant"]] = relationship(
@@ -1668,9 +1689,9 @@ class DashboardSettings(Base):
         server_default=text("1"),
         nullable=False,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -1692,9 +1713,9 @@ class ModelContextWindowOverride(Base):
 
     slug: Mapped[str] = mapped_column(String, primary_key=True)
     context_window: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -1717,15 +1738,15 @@ class RuntimeSentinel(Base):
 
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(String(128), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
 
 
 class ApiFirewallAllowlist(Base):
     __tablename__ = "api_firewall_allowlist"
 
     ip_address: Mapped[str] = mapped_column(String, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
 
 class ApiKey(Base):
@@ -1791,7 +1812,7 @@ class ApiKey(Base):
         server_default=false(),
         nullable=False,
     )
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # Ownership (per-user accounts). NULL owner = shared/service key. Populated
     # once principals carry a user id; declared here so the schema lands once.
@@ -1808,8 +1829,8 @@ class ApiKey(Base):
     # Why an inactive key is inactive, so re-enabling a user restores only the
     # keys that were disabled because of that user (never manual blocks).
     deactivated_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
 
     limits: Mapped[list["ApiKeyLimit"]] = relationship(
         "ApiKeyLimit",
@@ -1853,7 +1874,7 @@ class ApiKeyAccountAssignment(Base):
     # Selection rank within this key's pool; lower wins. Ties fall back to the
     # balancer's usual usage-based ordering.
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
     api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="account_assignments")
     account: Mapped["Account"] = relationship("Account", back_populates="api_key_assignments")
@@ -1905,9 +1926,9 @@ class ModelSource(Base):
     )
     timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -1936,7 +1957,9 @@ class ModelSourceModel(Base):
     __tablename__ = "model_source_models"
     __table_args__ = (UniqueConstraint("source_id", "model", name="uq_model_source_models_source_model"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("model_source_models_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
     source_id: Mapped[str] = mapped_column(String, ForeignKey("model_sources.id", ondelete="CASCADE"), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -1951,9 +1974,9 @@ class ModelSourceModel(Base):
     audio_per_minute: Mapped[float | None] = mapped_column(Float, nullable=True)
     raw_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -1975,7 +1998,7 @@ class ApiKeyModelSourceAssignment(Base):
         ForeignKey("model_sources.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
     api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="source_assignments")
     source: Mapped["ModelSource"] = relationship("ModelSource", back_populates="api_key_assignments")
@@ -2000,7 +2023,9 @@ class LimitWindow(str, Enum):
 class ApiKeyLimit(Base):
     __tablename__ = "api_key_limits"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("api_key_limits_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
     api_key_id: Mapped[str] = mapped_column(
         String,
         ForeignKey("api_keys.id", ondelete="CASCADE"),
@@ -2027,7 +2052,7 @@ class ApiKeyLimit(Base):
     max_value: Mapped[int] = mapped_column(BigInteger, nullable=False)
     current_value: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     model_filter: Mapped[str | None] = mapped_column(String, nullable=True)
-    reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    reset_at: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
 
     api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="limits")
 
@@ -2047,9 +2072,9 @@ class ApiKeyUsageReservation(Base):
     output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     cached_input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     cost_microdollars: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -2067,7 +2092,9 @@ class ApiKeyUsageReservationItem(Base):
     __tablename__ = "api_key_usage_reservation_items"
     __table_args__ = (UniqueConstraint("reservation_id", "limit_id", name="uq_reservation_limit"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("api_key_usage_reservation_items_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
     reservation_id: Mapped[str] = mapped_column(
         String,
         ForeignKey("api_key_usage_reservations.id", ondelete="CASCADE"),
@@ -2081,10 +2108,10 @@ class ApiKeyUsageReservationItem(Base):
     limit_type: Mapped[str] = mapped_column(String, nullable=False)
     reserved_delta: Mapped[int] = mapped_column(BigInteger, nullable=False)
     actual_delta: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    expected_reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    expected_reset_at: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -2133,9 +2160,9 @@ class AutomationJob(Base):
     model: Mapped[str] = mapped_column(String, nullable=False)
     reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
     prompt: Mapped[str] = mapped_column(Text, nullable=False, default="ping", server_default=text("'ping'"))
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -2173,7 +2200,7 @@ class AutomationJobAccount(Base):
         primary_key=True,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
     job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="account_links")
     account: Mapped[Account] = relationship("Account")
@@ -2192,13 +2219,13 @@ class AutomationRun(Base):
     slot_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     cycle_key: Mapped[str] = mapped_column(String(160), nullable=False)
     cycle_expected_accounts: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    cycle_window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cycle_window_end: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    scheduled_for: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="running", server_default=text("'running'"))
     account_id: Mapped[str | None] = mapped_column(
         String,
@@ -2214,7 +2241,7 @@ class AutomationRun(Base):
     # in-flight run early. NULL on rows claimed before the column existed
     # (they use the current budget).
     claim_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
     job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="runs")
     account: Mapped[Account | None] = relationship("Account")
@@ -2231,14 +2258,14 @@ class AutomationRunCycle(Base):
     )
     trigger: Mapped[str] = mapped_column(String(16), nullable=False)
     cycle_expected_accounts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
-    cycle_window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cycle_window_end: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
     include_paused_accounts: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=False,
         server_default=false(),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
     job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="run_cycles")
     cycle_accounts: Mapped[list["AutomationRunCycleAccount"]] = relationship(
@@ -2260,8 +2287,8 @@ class AutomationRunCycleAccount(Base):
     account_id: Mapped[str] = mapped_column(String, primary_key=True)
     slot_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
-    scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
 
     cycle: Mapped[AutomationRunCycle] = relationship("AutomationRunCycle", back_populates="cycle_accounts")
 
@@ -2269,9 +2296,11 @@ class AutomationRunCycleAccount(Base):
 class RateLimitAttempt(Base):
     __tablename__ = "rate_limit_attempts"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("rate_limit_attempts_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
     key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False)
+    attempted_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), default=func.now(), nullable=False)
     type: Mapped[str] = mapped_column(String(50), nullable=False)
 
 
@@ -2318,9 +2347,9 @@ class QuotaPlannerSettings(Base):
     )
     warmup_model_preference: Mapped[str | None] = mapped_column(String, nullable=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        database_datetime(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
@@ -2331,7 +2360,7 @@ class QuotaPlannerDecision(Base):
     __tablename__ = "quota_planner_decisions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     mode: Mapped[str] = mapped_column(String, nullable=False)
     account_id: Mapped[str | None] = mapped_column(
         String,
@@ -2339,9 +2368,9 @@ class QuotaPlannerDecision(Base):
         nullable=True,
     )
     action: Mapped[str] = mapped_column(String, nullable=False)
-    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(database_datetime(), nullable=True)
     score: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0.0"), nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     forecast_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -2354,9 +2383,11 @@ class QuotaPlannerDecision(Base):
 class QuotaWindowObservation(Base):
     __tablename__ = "quota_window_observations"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, Sequence("quota_window_observations_id_seq", optional=True), primary_key=True, autoincrement=True
+    )
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
-    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(database_datetime(), server_default=func.now(), nullable=False)
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     primary_remaining_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     primary_reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -2386,7 +2417,7 @@ class ModelRegistrySnapshotRecord(Base):
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[str] = mapped_column(Text, nullable=False)
-    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    refreshed_at: Mapped[datetime] = mapped_column(database_datetime(timezone=True), nullable=False)
     leader_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
@@ -2410,8 +2441,8 @@ class AccountRefreshClaim(Base):
         primary_key=True,
     )
     claimed_by: Mapped[str] = mapped_column(String(128), nullable=False)
-    claimed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    claim_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
+    claim_expires_at: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
 
 
 class AccountPlanDowngradeObservation(Base):
@@ -2452,8 +2483,8 @@ class AccountPlanDowngradeObservation(Base):
     observations: Mapped[int] = mapped_column(Integer, nullable=False)
     credential_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     observed_plan_type: Mapped[str] = mapped_column(String, nullable=False)
-    first_observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    last_observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    first_observed_at: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(database_datetime(), nullable=False)
 
 
 class BridgeRingMember(Base):
@@ -2461,8 +2492,12 @@ class BridgeRingMember(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     instance_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
-    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
-    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    registered_at: Mapped[datetime] = mapped_column(
+        database_datetime(timezone=True), nullable=False, default=func.now()
+    )
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        database_datetime(timezone=True), nullable=False, default=func.now()
+    )
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -2518,7 +2553,7 @@ class HttpBridgeSessionRecord(Base):
     owner_instance_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     owner_process_epoch: Mapped[str | None] = mapped_column(String(64), nullable=True)
     owner_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
     state: Mapped[HttpBridgeSessionState] = mapped_column(
         SqlEnum(
             HttpBridgeSessionState,
@@ -2546,28 +2581,28 @@ class HttpBridgeSessionRecord(Base):
     # instead would be indistinguishable from "never seen" and would leave the
     # lookup failing closed forever; a marker says the owner was deliberately
     # abandoned, so picking a fresh one is authorized.
-    continuity_abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    continuity_abandoned_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
     continuity_abandonment_scope: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        database_datetime(timezone=True),
         nullable=False,
         default=func.now(),
         server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        database_datetime(timezone=True),
         nullable=False,
         default=func.now(),
         server_default=func.now(),
         onupdate=func.now(),
     )
     last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        database_datetime(timezone=True),
         nullable=False,
         default=func.now(),
         server_default=func.now(),
     )
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(database_datetime(timezone=True), nullable=True)
 
     aliases: Mapped[list["HttpBridgeSessionAlias"]] = relationship(
         "HttpBridgeSessionAlias",
@@ -2612,10 +2647,14 @@ class HttpBridgeRecoveryAttemptRecord(Base):
     )
     response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+        database_datetime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now(), onupdate=func.now()
+        database_datetime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
@@ -2662,10 +2701,14 @@ class HttpBridgeOperationRecord(Base):
         server_default=text("'rows_v1'"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+        database_datetime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now(), onupdate=func.now()
+        database_datetime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
@@ -2700,7 +2743,7 @@ class HttpBridgeOperationEvent(Base):
     event_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     event_text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+        database_datetime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
 
     __table_args__ = (
@@ -2730,7 +2773,7 @@ class HttpBridgeOperationEventChunk(Base):
     payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+        database_datetime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
 
     __table_args__ = (
@@ -2754,13 +2797,13 @@ class HttpBridgeSessionAlias(Base):
     alias_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        database_datetime(timezone=True),
         nullable=False,
         default=func.now(),
         server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        database_datetime(timezone=True),
         nullable=False,
         default=func.now(),
         server_default=func.now(),

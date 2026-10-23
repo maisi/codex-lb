@@ -2,6 +2,23 @@
 
 SQLite is the default database backend and needs no configuration. PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb`).
 
+## Oracle Autonomous Database preparation
+
+Oracle application startup and schema migrations are not supported yet. Experimental preparation tools can check a future Oracle connection and inventory the remaining schema work. They do not enable an Oracle deployment.
+
+Install the optional driver with `uv sync --frozen --extra oracle`. After supplying an `oracle+oracledb://` URL through a protected `CODEX_LB_DATABASE_URL` environment variable, check both Thin connection modes with:
+
+```sh
+uv run --extra oracle codex-lb-db oracle-check \
+  --pool-size 4 --max-overflow 0 --replicas 2 --extra-replicas 1
+```
+
+The check is read-only. Add `--budget-only` to skip connecting: the example budgets 16 application sessions normally and 24 while an extra replica overlaps an update, leaving six under Always Free's 30-session limit. The calculation does not measure throughput or establish HA readiness. Pool arguments affect this check only.
+
+`uv run codex-lb-db oracle-schema --json` produces a complete offline inventory of unresolved schema representations and exits unsuccessfully while blockers remain; it needs neither the Oracle driver nor a database connection.
+
+For TLS/wallet setup, the planned two-instance topology, recovery limits and current support boundaries, see the owning [Oracle preparation capability](https://github.com/maisi/codex-lb/tree/main/openspec/specs/oracle-database).
+
 ## Data paths
 
 | Environment | Path |

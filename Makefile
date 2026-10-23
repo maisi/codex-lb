@@ -123,8 +123,8 @@ architecture-check:
 	uv run python scripts/check_migration_topology.py
 
 typecheck:
-	uv sync --dev --frozen
-	uv run ty check
+	uv sync --dev --frozen --extra oracle
+	uv run --extra oracle ty check
 
 rust-fmt:
 	cargo fmt --all -- --check
@@ -191,6 +191,13 @@ test-postgres:
 	  uv run pytest $(PYTEST_ARGS) $(POSTGRES_PYTEST_TARGETS)
 
 .PHONY: migration-check migration-check-postgres
+
+.PHONY: test-oracle
+test-oracle:
+	@test -n "$$CODEX_LB_TEST_ORACLE_URL" || (echo "Set CODEX_LB_TEST_ORACLE_URL to an owned Oracle test schema." >&2; exit 1)
+	uv sync --dev --frozen --extra oracle
+	PYTHONFAULTHANDLER=1 uv run --extra oracle pytest $(PYTEST_ARGS) tests/integration/test_oracle*.py
+
 migration-check:
 	uv sync --dev --frozen
 	TMP_DB="$$(mktemp -u /tmp/codex-lb-ci-migrate-XXXXXX.db)"; \

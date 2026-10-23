@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import time
 import warnings
+from collections import Counter
 from collections.abc import Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator, cast
 
@@ -25,9 +27,12 @@ from sqlalchemy.engine import Connection
 
 from app.core.config.settings import get_settings
 from app.db.alembic.revision_ids import LEGACY_MIGRATION_TO_NEW_REVISION, OLD_TO_NEW_REVISION_MAP, REVISION_ID_PATTERN
+from app.db.backend_support import UnsupportedDatabaseBackendError, require_supported_database_backend
 from app.db.migration_lock import migration_lock
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
+from app.db.oracle_preflight import OraclePreflightError, OracleSessionBudget, run_oracle_preflight
+from app.db.oracle_schema import OracleSchemaBlockerKind, inspect_oracle_schema
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +172,7 @@ def _script_location() -> str:
 
 
 def _build_alembic_config(database_url: str) -> Config:
+    require_supported_database_backend(database_url, operation="schema migration")
     config = Config()
     config.set_main_option("script_location", _script_location())
     sync_database_url = to_sync_database_url(database_url)
@@ -192,6 +198,7 @@ def _required_sqlalchemy_url(config: Config) -> str:
 
 @contextmanager
 def _sync_connection(sync_database_url: str) -> Iterator[Connection]:
+    require_supported_database_backend(sync_database_url, operation="database inspection")
     engine = create_engine(sync_database_url, future=True)
     try:
         with engine.connect() as connection:
@@ -202,6 +209,7 @@ def _sync_connection(sync_database_url: str) -> Iterator[Connection]:
 
 @contextmanager
 def _sync_transaction(sync_database_url: str) -> Iterator[Connection]:
+    require_supported_database_backend(sync_database_url, operation="database transaction")
     engine = create_engine(sync_database_url, future=True)
     try:
         with engine.begin() as connection:
@@ -1047,6 +1055,7 @@ def wait_for_connection(
     timeout_seconds: float,
     interval_seconds: float = 2.0,
 ) -> None:
+    require_supported_database_backend(database_url, operation="database connection wait")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than 0")
     if interval_seconds <= 0:
@@ -1078,6 +1087,7 @@ def wait_for_head(
     timeout_seconds: float,
     interval_seconds: float = 2.0,
 ) -> MigrationState:
+    require_supported_database_backend(database_url, operation="schema readiness wait")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than 0")
     if interval_seconds <= 0:
@@ -1112,6 +1122,38 @@ def _non_empty_database_url(value: str) -> str:
     return value
 
 
+def _print_oracle_schema_inventory(*, as_json: bool) -> bool:
+    report = inspect_oracle_schema()
+    counts = Counter(blocker.kind for blocker in report.blockers)
+    blocker_counts = {kind.value: counts[kind] for kind in OracleSchemaBlockerKind}
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "report_version": 1,
+                    "table_count": report.table_count,
+                    "blocker_counts": blocker_counts,
+                    "blockers": [asdict(blocker) for blocker in report.blockers],
+                    "database_connection": "not_attempted",
+                    "schema_mutation": "none",
+                    "oracle_runtime_support": "unsupported",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print("database_connection=not_attempted schema_mutation=none (offline metadata inventory)")
+        print("oracle_runtime_support=unsupported; this report does not verify application compatibility")
+        print(f"table_count={report.table_count}")
+        for kind, count in blocker_counts.items():
+            print(f"{kind}={count}")
+        print(f"oracle_schema={'blocked' if report.blockers else 'no_blockers_detected'}")
+        if report.blockers:
+            print("Use oracle-schema --json for the full blocker inventory.")
+    return bool(report.blockers)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Database migration utility for codex-lb.")
     parser.add_argument(
@@ -1122,6 +1164,36 @@ def _parse_args() -> argparse.Namespace:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    oracle_schema_parser = subparsers.add_parser(
+        "oracle-schema", help="Inspect Oracle schema blockers offline; no driver, database URL or connection required."
+    )
+    oracle_schema_parser.add_argument(
+        "--json", action="store_true", help="Emit the complete structured blocker inventory."
+    )
+
+    oracle_parser = subparsers.add_parser(
+        "oracle-check",
+        help="Read-only Oracle Thin connectivity check and two-pool session budget; runtime support is incomplete.",
+    )
+    oracle_parser.add_argument("--budget-only", action="store_true", help="Calculate sessions without connecting.")
+    oracle_parser.add_argument(
+        "--pool-size", type=int, default=None, help="Defaults to the configured database pool size."
+    )
+    oracle_parser.add_argument(
+        "--max-overflow", type=int, default=None, help="Defaults to the configured database maximum overflow."
+    )
+    oracle_parser.add_argument("--replicas", type=int, default=1, help="Intended application replicas (default: 1).")
+    oracle_parser.add_argument(
+        "--extra-replicas", type=int, default=0, help="Additional replicas during rolling updates (default: 0)."
+    )
+    oracle_parser.add_argument("--session-limit", type=int, default=30, help="Database session limit (default: 30).")
+    oracle_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=10.0,
+        help="Overall sync/async connectivity deadline, at most 300 seconds (default: 10).",
+    )
 
     upgrade_parser = subparsers.add_parser("upgrade", help="Upgrade schema to a target revision.")
     upgrade_parser.add_argument("revision", nargs="?", default="head")
@@ -1182,7 +1254,35 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    if args.command == "oracle-schema":
+        if _print_oracle_schema_inventory(as_json=args.json):
+            raise SystemExit(1)
+        return
+
     database_url = get_settings().database_url if args.db_url is None else args.db_url
+
+    if args.command == "oracle-check":
+        settings = get_settings()
+        try:
+            budget = OracleSessionBudget(
+                pool_size=settings.database_pool_size if args.pool_size is None else args.pool_size,
+                max_overflow=settings.database_max_overflow if args.max_overflow is None else args.max_overflow,
+                replicas=args.replicas,
+                extra_replicas=args.extra_replicas,
+                session_limit=args.session_limit,
+            )
+            run_oracle_preflight(
+                database_url, budget, budget_only=args.budget_only, timeout_seconds=args.timeout_seconds
+            )
+        except OraclePreflightError as exc:
+            print(f"oracle_preparation=failed: {exc}")
+            raise SystemExit(1) from None
+        return
+
+    try:
+        require_supported_database_backend(database_url, operation=f"database command {args.command}")
+    except UnsupportedDatabaseBackendError as exc:
+        raise SystemExit(str(exc)) from None
 
     if args.command == "upgrade":
         result = run_upgrade(
