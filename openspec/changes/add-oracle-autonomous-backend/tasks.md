@@ -4,6 +4,7 @@
 - [x] 1.2 Add the read-only Oracle database CLI check and verify successful, failed, redacted-error and cleanup paths through the CLI.
 - [x] 1.3 Add steady-state/update-overlap session budgeting and verify the two-instance 16/24-session example and rejected invalid budgets.
 - [x] 1.4 Reject unsupported Oracle application startup and schema mutation before connection; verify CLI and startup regression coverage.
+- [x] 1.5 Verify the supplied live OCI wallet with native synchronous/asynchronous Thin connections over the operator-selected TP service; inspect service limits, session timezone and package grants read-only without creating application schema.
 
 ## 2. Schema groundwork
 
@@ -23,6 +24,7 @@
 - [x] 3.2.5 Prepare Oracle shared cache invalidation; verify concurrent first insertion, exact version increments, transaction rollback and peer callback delivery on real Oracle.
 - [x] 3.2.6 Prepare Oracle encryption-key fingerprint stamping; verify concurrent same/different-key first boots, immutable stored ownership and existing mismatch modes on real Oracle.
 - [ ] 3.3 Port timestamp/report functions, schema discovery, retention and empty-string storage; verify product API contracts against SQLite/PostgreSQL equivalents.
+- [ ] 3.3.1 Initialize every Oracle request/background pool session in UTC and verify naive-UTC defaults and comparisons under a non-UTC client environment; the live OCI probe inherited +02:00 despite a +00:00 database timezone.
 - [ ] 3.4 Run real Oracle single-instance API smoke and two-instance failover tests; verify host loss, lease expiry, duplicate-refresh prevention and connection-budget peaks.
 
 ## 4. Reviewable delivery

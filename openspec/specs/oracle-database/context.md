@@ -34,17 +34,21 @@ The inventory exits unsuccessfully while blockers remain. It reports unbounded s
 
 One-way TLS can connect without a wallet when enabled on the Autonomous instance and the client is allowed by its network access rules. For mutual TLS, mount the downloaded Thin wallet material (`tnsnames.ora`, `ewallet.pem`) at a protected path and provide `config_dir`, `wallet_location` and `wallet_password` URL options as required. Certificate identity verification stays enabled. The preflight accepts the native driver URL with either a host/service name or a TNS alias; it rejects unknown/repeated options and privileged/password-change options.
 
+The operator selected the TP service. Oracle recommends TP or LOW for short OLTP transactions; see [database service names](https://docs.oracle.com/en/cloud/paas/autonomous-database/serverless/adbsb/predefined-database-services-names.html). A read-only probe of the supplied target reported TP concurrency 30 and HIGH concurrency 3 through `CS_RESOURCE_MANAGER.LIST_CURRENT_RULES()`. These instance-specific active-statement limits are separate from the total session cap and are not a throughput benchmark.
+
+On 2026-10-24 (Europe/Vienna), native synchronous and asynchronous Thin checks succeeded against the supplied Autonomous **23.26.4.1.0** endpoint using an encrypted PEM wallet, the TP service and certificate identity verification. The checks did not install application schema or verify runtime/failover. Wallet contents, credentials and customer-specific connection identifiers remain private.
+
 See the official [python-oracledb connection guide](https://python-oracledb.readthedocs.io/en/stable/user_guide/connection_handling.html) for the current OCI TLS and mTLS prerequisites. Local Oracle Free tests exercise SQL/driver behavior and do not replace OCI certificate, wallet or network validation.
 
 ## Storage and migration decisions
 
-Generic Oracle DATE loses fractional seconds. Oracle-specific timestamp representations therefore preserve microseconds, normalize aware instants to UTC and cover SELECT as well as DML RETURNING under non-UTC sessions. Fixed invitation hashes use RAW(32), and generated integer IDs have named Oracle sequences. SQLite/PostgreSQL schema output remains unchanged.
+Generic Oracle DATE loses fractional seconds. Oracle-specific timestamp representations therefore preserve microseconds, normalize aware instants to UTC and cover SELECT as well as DML RETURNING under non-UTC sessions. Fixed invitation hashes use RAW(32), and generated integer IDs have named Oracle sequences. SQLite/PostgreSQL schema output remains unchanged. The live OCI session inherited +02:00 even though DBTIMEZONE was +00:00. Future Oracle pool initialization still needs to enforce UTC for every physical request/background connection and verify naive-UTC defaults and comparisons under a non-UTC client environment.
 
 Prepared cache invalidation increments namespace versions atomically, including simultaneous first writes. A rolled-back transaction leaves no partial increment; an uncertain commit may cause a redundant bump on retry. Versions indicate cache change, not exactly-once event delivery. Prepared key fingerprint stamping preserves the first committed key and detects concurrent divergent first boots through the existing enforce/warn/off verifier. These are component checks, not a complete two-instance deployment.
 
 An Oracle Alembic baseline must explicitly create those sequences and preserve historical migration governance. Creating current ORM metadata and stamping it as head is not a supported installation strategy. Bounded string storage, empty strings versus NULL, partial uniqueness, retry behavior after implicit DDL commits, and model/schema drift remain installation blockers.
 
-The prepared migration mutex uses a dedicated Oracle session and `SYS.DBMS_LOCK`; it must survive commits on other connections. The database user needs EXECUTE on that package. No unlocked fallback is allowed. Local test permissions do not establish that an OCI tenant grants the same package access; verify this on the target database before installation is enabled.
+The prepared migration mutex uses a dedicated Oracle session and `SYS.DBMS_LOCK`; it must survive commits on other connections. The database user needs EXECUTE on that package. No unlocked fallback is allowed. The live OCI catalog showed the supplied administrator had a direct EXECUTE privilege with grant option, and REQUEST/RELEASE were visible. This is catalog evidence only: package execution, the eventual app-user grant and mutex behavior on OCI remain unverified. The local SYSDBA grant step is test-container setup, not an OCI installation procedure.
 
 ## Two-instance topology and failure modes
 

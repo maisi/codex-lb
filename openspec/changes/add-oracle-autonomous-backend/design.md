@@ -1,6 +1,6 @@
 ## Context
 
-The application uses SQLAlchemy 2.0.52, async request/background engines, and synchronous Alembic migrations. Oracle's native asynchronous driver is available, but runtime SQL and the 289-revision migration history assume SQLite/PostgreSQL. Always Free allows 30 database sessions and 20 GB of storage. No OCI test database has been supplied; an owned local Oracle Free container verifies driver and SQL semantics during the spike.
+The application uses SQLAlchemy 2.0.52, async request/background engines, and synchronous Alembic migrations. Oracle's native asynchronous driver is available, but runtime SQL and the 289-revision migration history assume SQLite/PostgreSQL. Always Free allows 30 database sessions and 20 GB of storage. The initial spike verified driver and SQL semantics in an owned local Oracle Free container. A subsequent read-only follow-up verified native sync/async TCPS wallet connections to the supplied OCI target over the operator-selected TP service; schema installation and full application checks remain pending.
 
 ## Goals / Non-Goals
 
@@ -30,7 +30,8 @@ Future Oracle runtime support must implement conditional lease ownership, databa
 
 ## Risks / Trade-offs
 
-- Local Oracle Free verifies transactions and prepared coordination but cannot demonstrate OCI TLS/network permissions or full application failover: keep the PR draft and retain those verification tasks.
+- Local Oracle Free verifies transactions and prepared coordination. Live OCI TCPS/wallet connectivity is now verified for the supplied administrator, while app-user package execution, installation and full application failover remain unverified: keep the PR draft.
+- The live OCI session inherited +02:00 despite DBTIMEZONE +00:00. Both future Oracle pools need explicit per-connection UTC initialization and naive timestamp/default regression coverage.
 - Native cancellation while waiting for a row lock exceeds the observed five-second bound on both frozen SQLAlchemy 2.0.52 and isolated 2.0.55. Keep a strict expected-failure regression and block runtime until cancellation/connection reclamation is bounded.
 - Oracle treats empty strings as NULL: design reversible storage encoding before enabling affected request/report paths.
 - Oracle DDL commits implicitly: use an Alembic-owned Oracle baseline and test interrupted migrations before supporting installation.
