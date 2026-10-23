@@ -162,11 +162,22 @@ const OauthStartPayloadSchema = z.looseObject({
   forceMethod: z.string().optional(),
 });
 
+// Mirrors the backend: tiers win, and a flat list gives every account its own rank.
+function requestedAccountTiers(
+  payload: { assignedAccountIds?: string[]; assignedAccountTiers?: string[][] } | null | undefined,
+): string[][] | undefined {
+  if (payload?.assignedAccountTiers !== undefined) {
+    return payload.assignedAccountTiers;
+  }
+  return payload?.assignedAccountIds?.map((accountId) => [accountId]);
+}
+
 const ApiKeyCreatePayloadSchema = z.looseObject({
   name: z.string().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  assignedAccountTiers: z.array(z.array(z.string())).optional(),
   assignedSourceIds: z.array(z.string()).optional(),
 });
 
@@ -181,6 +192,7 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  assignedAccountTiers: z.array(z.array(z.string())).optional(),
   assignedSourceIds: z.array(z.string()).optional(),
   resetUsage: z.boolean().optional(),
   limits: z
@@ -2881,15 +2893,16 @@ export const handlers = [
   http.post("/api/api-keys/", async ({ request }) => {
     const payload = await parseJsonBody(request, ApiKeyCreatePayloadSchema);
     const sequence = state.apiKeys.length + 1;
+    const accountTiers = requestedAccountTiers(payload) ?? [];
     const created = createApiKeyCreateResponse({
       ...createApiKey({
         id: `key_${sequence}`,
         name: payload?.name ?? `API Key ${sequence}`,
-        accountAssignmentScopeEnabled:
-          (payload?.assignedAccountIds?.length ?? 0) > 0,
+        accountAssignmentScopeEnabled: accountTiers.length > 0,
         sourceAssignmentScopeEnabled:
           (payload?.assignedSourceIds?.length ?? 0) > 0,
-        assignedAccountIds: payload?.assignedAccountIds ?? [],
+        assignedAccountIds: accountTiers.flat(),
+        assignedAccountTiers: accountTiers,
         assignedSourceIds: payload?.assignedSourceIds ?? [],
         trafficClass: payload?.trafficClass ?? "foreground",
       }),
@@ -2913,6 +2926,7 @@ export const handlers = [
       return HttpResponse.json(existing);
     }
 
+    const accountTiers = requestedAccountTiers(payload);
     // Build override with converted limits (create format → response format)
     const overrides: Partial<ApiKey> = {
       ...(payload.name !== undefined ? { name: payload.name } : {}),
@@ -2923,14 +2937,12 @@ export const handlers = [
       ...(payload.trafficClass !== undefined
         ? { trafficClass: payload.trafficClass }
         : {}),
-      ...(payload.assignedAccountIds !== undefined
+      ...(accountTiers !== undefined
         ? {
-            accountAssignmentScopeEnabled:
-              payload.assignedAccountIds.length > 0,
+            accountAssignmentScopeEnabled: accountTiers.length > 0,
+            assignedAccountIds: accountTiers.flat(),
+            assignedAccountTiers: accountTiers,
           }
-        : {}),
-      ...(payload.assignedAccountIds !== undefined
-        ? { assignedAccountIds: payload.assignedAccountIds }
         : {}),
       ...(payload.assignedSourceIds !== undefined
         ? {

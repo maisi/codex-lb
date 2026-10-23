@@ -232,3 +232,14 @@ def test_proxy_path_without_priority_burn_first_still_wins():
         AccountState("second", AccountStatus.ACTIVE, used_percent=10.0, routing_policy=ROUTING_POLICY_BURN_FIRST),
     ]
     assert _pick_proxy_path(states, priority=None) == "second"
+
+
+def test_proxy_path_strategy_balances_inside_a_shared_rank():
+    """Accounts sharing a rank compete on usage; the next rank still waits."""
+    tiers = {"first": 0, "second": 0, "third": 1}
+    states = [
+        AccountState("first", AccountStatus.ACTIVE, used_percent=80.0),
+        AccountState("second", AccountStatus.ACTIVE, used_percent=5.0),
+        AccountState("third", AccountStatus.ACTIVE, used_percent=0.0),
+    ]
+    assert _pick_proxy_path(states, tiers, routing_strategy="usage_weighted") == "second"

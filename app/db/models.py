@@ -1823,8 +1823,11 @@ class ApiKey(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
         # Most-preferred first, so readers can treat the list as the key's
-        # selection order without re-sorting.
-        order_by="(ApiKeyAccountAssignment.priority, ApiKeyAccountAssignment.created_at)",
+        # selection order without re-sorting. Accounts sharing a priority form
+        # one tier; the account id only keeps their listing order stable.
+        order_by=(
+            "(ApiKeyAccountAssignment.priority, ApiKeyAccountAssignment.created_at, ApiKeyAccountAssignment.account_id)"
+        ),
     )
     source_assignments: Mapped[list["ApiKeyModelSourceAssignment"]] = relationship(
         "ApiKeyModelSourceAssignment",

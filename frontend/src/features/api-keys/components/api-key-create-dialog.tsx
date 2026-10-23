@@ -23,6 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import type { AccountTiers } from "@/features/api-keys/account-tiers";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
@@ -65,7 +66,7 @@ type ApiKeyCreateFormProps = {
 
 type ApiKeyCreateDraft = {
   selectedModels: string[];
-  selectedAccountIds: string[];
+  selectedAccountTiers: AccountTiers;
   restrictToAssignedAccounts: boolean;
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
@@ -84,7 +85,7 @@ type ApiKeyCreateDraft = {
 
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   selectedModels: [],
-  selectedAccountIds: [],
+  selectedAccountTiers: [],
   restrictToAssignedAccounts: true,
   selectedSourceIds: [],
   selectedReasoningEfforts: [],
@@ -128,9 +129,9 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       applyToCodexModel: draft.applyToCodexModel,
       forceIncludeUsage: draft.forceIncludeUsage,
       promptCacheAffinityContinuation: draft.promptCacheAffinityContinuation,
-      ...(draft.selectedAccountIds.length > 0
+      ...(draft.selectedAccountTiers.length > 0
         ? {
-            assignedAccountIds: draft.selectedAccountIds,
+            assignedAccountTiers: draft.selectedAccountTiers,
             accountAssignmentScopeEnabled: draft.restrictToAssignedAccounts,
           }
         : {}),
@@ -231,11 +232,10 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             <div className="space-y-1">
               <p className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</p>
               <AccountMultiSelect
-                value={draft.selectedAccountIds}
-                onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })}
-                showPriorityOrder
+                priorityTiers={draft.selectedAccountTiers}
+                onPriorityTiersChange={(selectedAccountTiers) => updateDraft({ selectedAccountTiers })}
               />
-              {draft.selectedAccountIds.length > 0 ? (
+              {draft.selectedAccountTiers.length > 0 ? (
                 <div className="space-y-1 rounded-md border p-2 text-sm">
                   <div className="flex items-center gap-2">
                     <Checkbox

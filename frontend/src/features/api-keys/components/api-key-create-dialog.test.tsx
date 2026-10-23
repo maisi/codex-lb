@@ -212,7 +212,7 @@ describe("ApiKeyCreateDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Scoped create");
-    expect("assignedAccountIds" in payload).toBe(false);
+    expect("assignedAccountTiers" in payload).toBe(false);
   });
 
   it("submits selected assigned accounts on create", async () => {
@@ -254,7 +254,7 @@ describe("ApiKeyCreateDialog", () => {
     });
 
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+    expect(payload.assignedAccountTiers).toEqual([["acc_primary"], ["acc_secondary"]]);
   });
 
   it("clears selected assigned accounts when the dialog is dismissed", async () => {

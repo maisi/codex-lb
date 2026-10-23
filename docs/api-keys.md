@@ -27,6 +27,19 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 ![API keys with assigned accounts](screenshots/apis-assigned-accounts.jpg)
 
+### Account priority
+
+The order of a key's assigned accounts is its selection priority. The proxy uses the top-ranked account while it can
+serve and moves down one rank once it cannot: rate-limited, out of quota, paused, or above the sticky primary
+threshold. A key's order outranks each account's routing policy (`burn_first`, `preserve`).
+
+To let several accounts carry a key together, link an account to the one above it (the link button next to it in the
+priority list). Linked accounts share a rank: the routing strategy balances between them, and their routing policy
+decides which goes first. Through the API, send `assignedAccountTiers` (for example `[["acc-a", "acc-b"], ["acc-c"]]`)
+instead of `assignedAccountIds`; a flat `assignedAccountIds` list still gives every account its own rank.
+
+![API key priority list with two accounts sharing rank 1](screenshots/api-key-priority-tiers-after.png)
+
 ## Reasoning effort policies
 
 A key can either enforce one reasoning effort or allow a selected non-empty set of client-requested efforts.
@@ -44,4 +57,5 @@ For wiring keys into each client, see [Client Setup](client-setup.md).
 
 ---
 
-*Spec: [api-keys](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-keys)*
+*Spec: [api-keys](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-keys),
+[account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing)*
