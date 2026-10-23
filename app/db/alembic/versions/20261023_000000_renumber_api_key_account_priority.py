@@ -7,9 +7,9 @@ Create Date: 2026-10-23
 Assignments that existed before ``priority`` was added all defaulted to 0. The
 proxy used to rank by list position, so those keys were a strict waterfall in
 ``(priority, created_at)`` order. Ranks are now read from ``priority`` itself,
-where equal values mean "same tier", so give every key's assignments distinct
-ranks in their current order first. Keys that already have distinct ranks keep
-the same order.
+where equal values mean "same tier", so give the assignments of every key that
+shares a value distinct ranks in their current order first. Keys whose ranks are
+already distinct are left untouched.
 """
 
 from __future__ import annotations
@@ -43,13 +43,15 @@ def upgrade() -> None:
             "ORDER BY api_key_id, priority, created_at, account_id"
         )
     ).all()
-    updates: list[dict[str, object]] = []
-    rank = 0
-    previous_key: str | None = None
+    assignments_by_key: dict[str, list[tuple[str, int]]] = {}
     for api_key_id, account_id, priority in rows:
-        rank = 0 if api_key_id != previous_key else rank + 1
-        previous_key = api_key_id
-        if priority != rank:
+        assignments_by_key.setdefault(api_key_id, []).append((account_id, priority))
+    updates: list[dict[str, object]] = []
+    for api_key_id, assignments in assignments_by_key.items():
+        # Only shared values predate ranking; distinct ranks are left exactly as stored.
+        if len({priority for _, priority in assignments}) == len(assignments):
+            continue
+        for rank, (account_id, _) in enumerate(assignments):
             updates.append({"api_key_id": api_key_id, "account_id": account_id, "priority": rank})
     if updates:
         bind.execute(

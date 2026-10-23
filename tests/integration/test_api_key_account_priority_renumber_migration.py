@@ -35,7 +35,9 @@ async def test_renumbers_legacy_zero_priorities_in_assignment_age_order(tmp_path
                     "('legacy', 'acc-oldest', 0, '2026-08-01 00:00:00'), "
                     "('legacy', 'acc-middle', 0, '2026-08-02 00:00:00'), "
                     "('ranked', 'acc-second', 1, '2026-09-01 00:00:00'), "
-                    "('ranked', 'acc-first', 0, '2026-09-02 00:00:00')"
+                    "('ranked', 'acc-first', 0, '2026-09-02 00:00:00'), "
+                    "('gapped', 'acc-low', 7, '2026-09-01 00:00:00'), "
+                    "('gapped', 'acc-high', 3, '2026-09-02 00:00:00')"
                 )
             )
 
@@ -50,6 +52,9 @@ async def test_renumbers_legacy_zero_priorities_in_assignment_age_order(tmp_path
             ("legacy", "acc-newest"): 2,
             ("ranked", "acc-first"): 0,
             ("ranked", "acc-second"): 1,
+            # Distinct ranks are kept as stored, gaps included.
+            ("gapped", "acc-high"): 3,
+            ("gapped", "acc-low"): 7,
         }
     finally:
         await engine.dispose()
