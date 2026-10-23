@@ -20,6 +20,8 @@
 - [x] 3.2.2 Prepare Oracle scheduler leader acquisition and renewal; verify concurrent first owners, expiry takeover, non-owner demotion, lock-wait TTL and no expired-lease resurrection on real Oracle.
 - [x] 3.2.3 Prepare Oracle token-refresh claims; verify concurrent owners, same-pair re-entry, distinct-token exclusion, exact-owner release, expiry takeover and post-lock database-clock TTL on real Oracle.
 - [ ] 3.2.4 Bound Oracle query cancellation and connection reclamation under row-lock waits and network loss; resolve the strict expected-failure regression before enabling runtime.
+- [x] 3.2.5 Prepare Oracle shared cache invalidation; verify concurrent first insertion, exact version increments, transaction rollback and peer callback delivery on real Oracle.
+- [x] 3.2.6 Prepare Oracle encryption-key fingerprint stamping; verify concurrent same/different-key first boots, immutable stored ownership and existing mismatch modes on real Oracle.
 - [ ] 3.3 Port timestamp/report functions, schema discovery, retention and empty-string storage; verify product API contracts against SQLite/PostgreSQL equivalents.
 - [ ] 3.4 Run real Oracle single-instance API smoke and two-instance failover tests; verify host loss, lease expiry, duplicate-refresh prevention and connection-budget peaks.
 

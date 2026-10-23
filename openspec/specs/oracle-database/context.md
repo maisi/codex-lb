@@ -2,7 +2,7 @@
 
 ## Scope
 
-Oracle Autonomous Transaction Processing Always Free is the intended target: one application instance initially, then two sharing the database. The current draft provides connection validation, an offline schema inventory, Oracle timestamp/hash/sequence representations, a migration mutex, file ownership, scheduler leader coordination and token-refresh ownership. Application startup and schema mutation remain disabled for Oracle until installation, runtime queries and accounting have been ported and verified. The supported production backends remain SQLite and PostgreSQL.
+Oracle Autonomous Transaction Processing Always Free is the intended target: one application instance initially, then two sharing the database. The current draft provides connection validation, an offline schema inventory, Oracle timestamp/hash/sequence representations, a migration mutex, file ownership, scheduler leader coordination, token-refresh ownership, shared cache invalidation and encryption-key fingerprint agreement. Application startup and schema mutation remain disabled for Oracle until installation, runtime queries and accounting have been ported and verified. The supported production backends remain SQLite and PostgreSQL.
 
 The preparation requirements are defined in [the specification](spec.md). The full-port work remains tracked in [the active change](../../changes/add-oracle-autonomous-backend/tasks.md). A successful connection check is not evidence that codex-lb can run on Oracle.
 
@@ -40,6 +40,8 @@ See the official [python-oracledb connection guide](https://python-oracledb.read
 
 Generic Oracle DATE loses fractional seconds. Oracle-specific timestamp representations therefore preserve microseconds, normalize aware instants to UTC and cover SELECT as well as DML RETURNING under non-UTC sessions. Fixed invitation hashes use RAW(32), and generated integer IDs have named Oracle sequences. SQLite/PostgreSQL schema output remains unchanged.
 
+Prepared cache invalidation increments namespace versions atomically, including simultaneous first writes. A rolled-back transaction leaves no partial increment; an uncertain commit may cause a redundant bump on retry. Versions indicate cache change, not exactly-once event delivery. Prepared key fingerprint stamping preserves the first committed key and detects concurrent divergent first boots through the existing enforce/warn/off verifier. These are component checks, not a complete two-instance deployment.
+
 An Oracle Alembic baseline must explicitly create those sequences and preserve historical migration governance. Creating current ORM metadata and stamping it as head is not a supported installation strategy. Bounded string storage, empty strings versus NULL, partial uniqueness, retry behavior after implicit DDL commits, and model/schema drift remain installation blockers.
 
 The prepared migration mutex uses a dedicated Oracle session and `SYS.DBMS_LOCK`; it must survive commits on other connections. The database user needs EXECUTE on that package. No unlocked fallback is allowed. Local test permissions do not establish that an OCI tenant grants the same package access; verify this on the target database before installation is enabled.
@@ -54,7 +56,7 @@ Official limits: [Oracle Always Free Autonomous Database](https://docs.oracle.co
 
 ## Developer verification
 
-`make test-oracle` requires `CODEX_LB_TEST_ORACLE_URL` pointing to an owned, disposable Oracle test schema. The test suite creates and removes its own probe objects and requires no pre-existing `file_account_pins`, `scheduler_leader` or `account_refresh_claims` table. Do not supply production credentials. Migration-lock tests additionally require EXECUTE on SYS.DBMS_LOCK. The pinned Oracle Free CI container receives that permission only for its disposable test user.
+`make test-oracle` requires `CODEX_LB_TEST_ORACLE_URL` pointing to an owned, disposable Oracle test schema. The test suite creates and removes its own probe objects and requires no pre-existing `file_account_pins`, `scheduler_leader`, `account_refresh_claims`, `cache_invalidation` or `runtime_sentinels` table. Do not supply production credentials. Migration-lock tests additionally require EXECUTE on SYS.DBMS_LOCK. The pinned Oracle Free CI container receives that permission only for its disposable test user.
 
 A canceled row-lock wait currently exceeds the five-second test deadline with the frozen SQLAlchemy 2.0.52 and python-oracledb 26.0.1 stack. An isolated SQLAlchemy 2.0.55 check also exceeded that deadline. The test releases its competing transaction before joining cleanup, so the known failure cannot deadlock its own teardown. It is retained as a strict expected failure: an unexpected success fails CI until the limitation is reviewed and the marker removed. All other refresh ownership tests must pass. This is an unresolved runtime blocker, including for scheduler/file row-lock paths; a successful coordination test does not establish bounded connection reclamation.
 

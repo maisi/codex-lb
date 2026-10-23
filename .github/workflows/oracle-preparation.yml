@@ -7,6 +7,8 @@ on:
       - .github/workflows/oracle-preparation.yml
       - app/db/**
       - app/core/scheduling/**
+      - app/core/cache/**
+      - app/core/config/key_fingerprint.py
       - app/modules/accounts/refresh_claims.py
       - app/modules/accounts/oracle_refresh_claims.py
       - app/modules/proxy/file_pin_repository.py

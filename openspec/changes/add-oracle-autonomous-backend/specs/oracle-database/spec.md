@@ -115,3 +115,46 @@ Oracle refresh claims against a prepared test schema MUST allow at most one dist
 - **GIVEN** an unexpired account claim belongs to one refresh-owner pair
 - **WHEN** another pair releases the account claim
 - **THEN** the original claim remains intact
+
+### Requirement: Prepared Oracle cache invalidation increments shared versions atomically
+
+Each committed Oracle cache invalidation transaction against a prepared test schema MUST atomically increment its namespace version by one, including concurrent first insertion. Rolled-back transactions MUST NOT leave partial increments. Retrying an uncertain commit MAY produce a redundant bump and MUST preserve peer invalidation delivery. Existing peer pollers MUST observe committed version changes through their normal callback path, and local acknowledgement MUST preserve peer delivery. Prepared invalidation MUST NOT enable unsupported Oracle application startup.
+
+#### Scenario: Concurrent first namespace changes
+- **WHEN** independent Oracle sessions successfully bump one previously absent namespace
+- **THEN** the committed version includes every successful bump
+- **AND** a duplicate-key insertion race does not discard a bump
+
+#### Scenario: A cache bump transaction fails
+- **WHEN** a bump fails before commit
+- **THEN** it leaves no partial version change
+- **AND** a later successful bump remains possible
+
+#### Scenario: A committed bump acknowledgement is lost
+- **WHEN** a bump commits but its caller receives a retryable commit error
+- **THEN** retry may increment the version again
+- **AND** peers still reconcile the committed change without treating version numbers as event counts
+
+#### Scenario: A peer observes a committed change
+- **GIVEN** a peer poller has recorded its current version baseline
+- **WHEN** another poller successfully bumps a namespace
+- **THEN** the peer invokes its registered invalidation callback on observing the new version
+
+### Requirement: Prepared Oracle startup fingerprint stamping preserves the first key
+
+Oracle encryption-key fingerprint verification against a prepared test schema MUST atomically preserve the first committed fingerprint. Concurrent replicas using the same key MUST both verify successfully. Concurrent replicas using different keys MUST establish one stored fingerprint and reject the nonmatching replica in enforce mode. Existing warn and off mode semantics MUST remain unchanged. Prepared verification MUST NOT enable unsupported Oracle application startup.
+
+#### Scenario: Concurrent replicas agree on the encryption key
+- **WHEN** independent Oracle sessions verify the same key against an empty sentinel table
+- **THEN** both verifications succeed and one matching sentinel exists
+
+#### Scenario: Concurrent replicas disagree on the encryption key
+- **WHEN** independent Oracle sessions verify different keys against an empty sentinel table in enforce mode
+- **THEN** one verification succeeds and the other reports an encryption-key mismatch
+- **AND** the mismatching replica does not overwrite the stored fingerprint
+
+#### Scenario: Existing fingerprint mismatch modes are selected
+- **GIVEN** an Oracle sentinel belongs to another encryption key
+- **WHEN** verification uses warn mode
+- **THEN** it logs the mismatch and preserves the sentinel
+- **AND** off mode skips database verification
