@@ -138,9 +138,10 @@ async def test_oracle_file_pin_ttl_starts_after_row_lock_wait(oracle_pins: Async
             await asyncio.wait_for(waiter, timeout=10)
         finally:
             event.remove(oracle_pins.sync_engine, "before_cursor_execute", before_cursor_execute)
+            await blocker.rollback()
             if not waiter.done():
                 waiter.cancel()
-                await asyncio.gather(waiter, return_exceptions=True)
+            await asyncio.wait_for(asyncio.gather(waiter, return_exceptions=True), timeout=10)
     async with factory() as session:
         remaining = await session.scalar(
             text(

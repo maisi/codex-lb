@@ -27,4 +27,4 @@
 
 - [x] 4.1 Document preparation commands, support boundaries, Free-tier limits and HA topology in OpenSpec context and linked published docs; verify examples and documentation links.
 - [x] 4.2 Run relevant regression tests, lint/type checks and strict OpenSpec validation; record exact results and remaining live verification in the change context.
-- [ ] 4.3 Open a draft PR with implemented scope, deferred tasks, validation evidence and a two-hour status report; verify its GitHub URL and head state.
+- [x] 4.3 Open a draft PR with implemented scope, deferred tasks, validation evidence and a two-hour status report; verify its GitHub URL and head state.

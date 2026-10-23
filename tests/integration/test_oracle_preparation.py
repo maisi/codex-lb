@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -176,6 +179,63 @@ def test_oracle_upgrade_cli_refuses_incomplete_backend(oracle_probe: tuple[Engin
     assert "oracle-check" in result.stderr
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(table)) == 0
+
+
+def test_oracle_check_cli_deadline_closes_a_stalled_native_connection() -> None:
+    pytest.importorskip("oracledb")
+
+    with socket.socket() as listener, ThreadPoolExecutor(max_workers=1) as executor:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(8)
+        port = listener.getsockname()[1]
+
+        def receive_without_reply() -> bool:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(8)
+                received = False
+                try:
+                    while connection.recv(65536):
+                        received = True
+                except ConnectionResetError:
+                    pass
+                return received
+
+        closed = executor.submit(receive_without_reply)
+        password = "probe-timeout-password"
+        environment = {
+            **os.environ,
+            "CODEX_LB_DATABASE_URL": (f"oracle+oracledb://probe:{password}@127.0.0.1:{port}/?service_name=unused"),
+        }
+        started = time.monotonic()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "app.db.migrate",
+                "oracle-check",
+                "--timeout-seconds",
+                "1.5",
+                "--pool-size",
+                "4",
+                "--max-overflow",
+                "0",
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert time.monotonic() - started < 8
+        if password in result.stdout or password in result.stderr:
+            pytest.fail("Timeout diagnostics exposed a credential; captured output has been withheld.")
+        assert result.returncode != 0
+        assert "timed out" in (result.stdout + result.stderr).lower()
+        # The child really reached the silent endpoint, then its socket closed
+        # without the endpoint ever unblocking the native driver's operation.
+        assert closed.result(timeout=8)
 
 
 def test_oracle_schema_inventory_covers_empty_text_binds(oracle_probe: tuple[Engine, Table]) -> None:

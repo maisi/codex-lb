@@ -175,9 +175,10 @@ async def test_oracle_refresh_ttl_is_fresh_after_lock_wait(oracle_claims: AsyncE
             assert await asyncio.wait_for(waiter, timeout=10)
         finally:
             event.remove(oracle_claims.sync_engine, "before_cursor_execute", before_cursor_execute)
+            await blocker.rollback()
             if not waiter.done():
                 waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
+            await asyncio.wait_for(asyncio.gather(waiter, return_exceptions=True), timeout=10)
     claim = await coordinator.current_claim("account")
     assert claim is not None
     async with oracle_claims.connect() as connection:
@@ -191,6 +192,46 @@ async def test_oracle_refresh_non_unique_integrity_failure_cleans_session(oracle
         await coordinator.try_acquire("", ttl_seconds=30, owner=_OWNER_A)
     async with oracle_claims.connect() as connection:
         assert await connection.scalar(text("SELECT COUNT(*) FROM account_refresh_claims")) == 0
+
+
+async def test_oracle_refresh_first_insert_wait_gets_full_ttl_after_contender_rollback(
+    oracle_claims: AsyncEngine,
+) -> None:
+    coordinator = RefreshClaimCoordinator(claimant_id="winner")
+    attempted = asyncio.Event()
+
+    def before_cursor_execute(connection, cursor, statement, parameters, context, executemany) -> None:
+        if statement.upper().startswith("INSERT INTO ACCOUNT_REFRESH_CLAIMS"):
+            attempted.set()
+
+    async with oracle_claims.begin() as blocker:
+        await blocker.execute(
+            text(
+                "INSERT INTO account_refresh_claims (account_id, claimed_by, claimed_at, claim_expires_at) "
+                "VALUES ('account', 'rolling-back', SYS_EXTRACT_UTC(SYSTIMESTAMP), "
+                "SYS_EXTRACT_UTC(SYSTIMESTAMP) + INTERVAL '30' SECOND)"
+            )
+        )
+        event.listen(oracle_claims.sync_engine, "before_cursor_execute", before_cursor_execute)
+        waiter = asyncio.create_task(coordinator.try_acquire("account", ttl_seconds=2, owner=_OWNER_A))
+        try:
+            await asyncio.wait_for(attempted.wait(), timeout=5)
+            await asyncio.sleep(2.1)
+            assert not waiter.done()
+            await blocker.rollback()
+            assert await asyncio.wait_for(waiter, timeout=10)
+        finally:
+            event.remove(oracle_claims.sync_engine, "before_cursor_execute", before_cursor_execute)
+            await blocker.rollback()
+            if not waiter.done():
+                waiter.cancel()
+            await asyncio.wait_for(asyncio.gather(waiter, return_exceptions=True), timeout=10)
+
+    claim = await coordinator.current_claim("account")
+    assert claim is not None and claim.claimed_by == "winner#" + _OWNER_A[:16]
+    async with oracle_claims.connect() as connection:
+        now = await connection.scalar(text("SELECT SYS_EXTRACT_UTC(SYSTIMESTAMP) FROM DUAL"))
+    assert 1 < (claim.claim_expires_at - now).total_seconds() <= 2
 
 
 @pytest.mark.xfail(

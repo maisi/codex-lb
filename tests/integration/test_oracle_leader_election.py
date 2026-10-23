@@ -144,9 +144,10 @@ async def test_oracle_renew_waiting_on_row_cannot_resurrect_expired_lease(oracle
             assert leader._lease_deadline is None
         finally:
             event.remove(oracle_leaders.sync_engine, "before_cursor_execute", before_cursor_execute)
+            await blocker.rollback()
             if not waiter.done():
                 waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
+            await asyncio.wait_for(asyncio.gather(waiter, return_exceptions=True), timeout=10)
 
 
 async def test_oracle_same_leader_acquire_grants_full_ttl_after_lock_wait(oracle_leaders: AsyncEngine) -> None:
@@ -171,6 +172,7 @@ async def test_oracle_same_leader_acquire_grants_full_ttl_after_lock_wait(oracle
             assert 3 < leader._lease_deadline - asyncio.get_running_loop().time() <= 5
         finally:
             event.remove(oracle_leaders.sync_engine, "before_cursor_execute", before_cursor_execute)
+            await blocker.rollback()
             if not waiter.done():
                 waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
+            await asyncio.wait_for(asyncio.gather(waiter, return_exceptions=True), timeout=10)
