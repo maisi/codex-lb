@@ -22,11 +22,12 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.db.models import ResetCreditRedeemClaim, ResetCreditRedeemRequest
+from app.db.oracle_dml import oracle_insert_if_absent, oracle_upsert
 from app.db.session import SessionLocal, close_session
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,21 @@ async def try_acquire_redeem_claim(
     now = datetime.now(UTC)
     session = SessionLocal()
     try:
+        if session.get_bind().dialect.name == "oracle":
+            acquired = await oracle_upsert(
+                session,
+                ResetCreditRedeemClaim,
+                keys=["account_id"],
+                values={
+                    "account_id": account_id,
+                    "holder_id": holder_id,
+                    "expires_at": now + timedelta(seconds=lease_seconds),
+                },
+                update_values={"holder_id": holder_id, "expires_at": now + timedelta(seconds=lease_seconds)},
+                where=ResetCreditRedeemClaim.expires_at < func.sys_extract_utc(func.current_timestamp()),
+            )
+            await session.commit()
+            return acquired
         insert_stmt = sqlite_insert(ResetCreditRedeemClaim).values(
             account_id=account_id,
             holder_id=holder_id,
@@ -240,7 +256,9 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
             )
         )
         dialect = session.get_bind().dialect.name
-        if dialect == "postgresql":
+        if dialect == "oracle":
+            await oracle_insert_if_absent(session, ResetCreditRedeemRequest, values)
+        elif dialect == "postgresql":
             await session.execute(
                 pg_insert(ResetCreditRedeemRequest)
                 .values(**values)

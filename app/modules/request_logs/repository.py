@@ -7,7 +7,7 @@ from typing import Any
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, case, cast, func, insert, or_, select
+from sqlalchemy import String, and_, case, cast, func, insert, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,7 @@ from app.core.usage.types import (
     UsageSummaryLogsAggregate,
 )
 from app.core.utils.request_id import ensure_request_id
+from app.core.utils.sql import bucket_epoch_expr
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -237,8 +238,8 @@ class RequestLogsRepository:
 
     def _conversation_cached_expr(self) -> ColumnElement:
         dialect = self._session.get_bind().dialect.name
-        least = func.least if dialect == "postgresql" else func.min
-        greatest = func.greatest if dialect == "postgresql" else func.max
+        least = func.min if dialect == "sqlite" else func.least
+        greatest = func.max if dialect == "sqlite" else func.greatest
         return case(
             (RequestLog.cached_input_tokens.is_(None), None),
             (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
@@ -501,11 +502,7 @@ class RequestLogsRepository:
     def _bucket_epoch_expr(self, bucket_seconds: int) -> ColumnElement:
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
-        if dialect == "postgresql":
-            return func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
-        # Use explicit integer division for SQLite: CAST(epoch / N AS INTEGER) * N
-        epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
-        return cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+        return bucket_epoch_expr(RequestLog.requested_at, dialect=dialect, bucket_seconds=bucket_seconds)
 
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(
@@ -635,8 +632,8 @@ class RequestLogsRepository:
                     RequestLog.model,
                     RequestLog.service_tier,
                     func.count().label("request_count"),
-                    func.sum(cast(RequestLog.status.not_in(NON_ERROR_STATUSES), Integer)).label("error_count"),
-                    func.sum(cast(RequestLog.status == CANCELLED_STATUS, Integer)).label("cancelled_count"),
+                    func.sum(case((RequestLog.status.not_in(NON_ERROR_STATUSES), 1), else_=0)).label("error_count"),
+                    func.sum(case((RequestLog.status == CANCELLED_STATUS, 1), else_=0)).label("cancelled_count"),
                     func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
                     func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
                     func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
@@ -752,7 +749,7 @@ class RequestLogsRepository:
             totals_stmt = select(
                 func.count().label("request_count"),
                 func.coalesce(
-                    func.sum(cast(RequestLog.status.not_in(NON_ERROR_STATUSES), Integer)),
+                    func.sum(case((RequestLog.status.not_in(NON_ERROR_STATUSES), 1), else_=0)),
                     0,
                 ).label("error_count"),
                 func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
@@ -842,8 +839,8 @@ class RequestLogsRepository:
         dialect = self._session.get_bind().dialect.name
         # SQLite's two-argument min()/max() scalar functions are its
         # least()/greatest().
-        least = func.least if dialect == "postgresql" else func.min
-        greatest = func.greatest if dialect == "postgresql" else func.max
+        least = func.min if dialect == "sqlite" else func.least
+        greatest = func.max if dialect == "sqlite" else func.greatest
 
         window = [RequestLog.requested_at >= since, self._exclude_warmup_clause()]
         output_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
@@ -1580,7 +1577,13 @@ class RequestLogsRepository:
         previous, one btree probe per distinct value. NULLs never seed or
         chain (min() skips them); empty strings are preserved — the legacy
         DISTINCT path only drops falsy values per facet, in the callers."""
-        sqlite = self._session.get_bind().dialect.name == "sqlite"
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "oracle":
+            result = await self._session.execute(
+                select(column).where(*conditions, column.is_not(None)).distinct().order_by(column.asc())
+            )
+            return [value for value in result.scalars().all() if value is not None]
+        sqlite = dialect == "sqlite"
         # SQLite can choose the deleted_at index for MIN(facet), rescanning
         # every live row per successor. Traverse the facet index first, then
         # check visibility with an equality probe for each candidate value.

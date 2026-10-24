@@ -4,8 +4,10 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 
 from app.core.config.settings import get_settings
+from app.db.backend_support import UnsupportedDatabaseBackendError, require_supported_database_backend
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
 
@@ -19,9 +21,14 @@ target_metadata = Base.metadata
 
 def _sync_database_url() -> str:
     configured = config.get_main_option("sqlalchemy.url")
-    if configured:
-        return configured
-    return to_sync_database_url(get_settings().database_url)
+    database_url = configured if configured else get_settings().database_url
+    require_supported_database_backend(database_url, operation="Alembic schema migration")
+    if make_url(database_url).get_backend_name() == "oracle":
+        raise UnsupportedDatabaseBackendError(
+            "Oracle uses a dedicated Alembic baseline; use codex-lb-db upgrade head. "
+            "The SQLite/PostgreSQL migration history cannot run on Oracle."
+        )
+    return database_url if configured else to_sync_database_url(database_url)
 
 
 def run_migrations_offline() -> None:

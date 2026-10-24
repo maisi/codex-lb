@@ -1,0 +1,80 @@
+name: Oracle single-instance validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/oracle-preparation.yml
+      - app/db/**
+      - app/core/scheduling/**
+      - app/core/cache/**
+      - app/core/config/key_fingerprint.py
+      - app/modules/accounts/refresh_claims.py
+      - app/modules/accounts/oracle_refresh_claims.py
+      - app/modules/**
+      - app/core/utils/sql.py
+      - app/core/rate_limiter/**
+      - tests/integration/test_oracle*.py
+      - tests/unit/test_oracle*.py
+      - pyproject.toml
+      - uv.lock
+      - Makefile
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oracle-preparation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle-preparation:
+    name: Oracle Free runtime smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart@sha256:f5ff19033860d662c821cb04eb10483fa94f14f78eae252d054291ea07028093
+        env:
+          ORACLE_RANDOM_PASSWORD: "true"
+          APP_USER: codex_test
+          APP_USER_PASSWORD: codex_test
+        ports:
+          - 1521/tcp
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 18
+          --health-start-period 60s
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          prune-cache: true
+      - name: Grant the test schema access to the migration lock package
+        run: |
+          docker exec -i "${{ job.services.oracle.id }}" sqlplus -s / as sysdba <<'SQL'
+          WHENEVER SQLERROR EXIT SQL.SQLCODE
+          ALTER SESSION SET CONTAINER = FREEPDB1;
+          GRANT EXECUTE ON SYS.DBMS_LOCK TO codex_test;
+          CREATE USER codex_baseline IDENTIFIED BY codex_baseline_test_only QUOTA UNLIMITED ON USERS;
+          GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE TO codex_baseline;
+          GRANT EXECUTE ON SYS.DBMS_LOCK TO codex_baseline;
+          CREATE USER codex_runtime IDENTIFIED BY codex_runtime_test_only QUOTA UNLIMITED ON USERS;
+          GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE TO codex_runtime;
+          GRANT EXECUTE ON SYS.DBMS_LOCK TO codex_runtime;
+          EXIT;
+          SQL
+      - name: Test Oracle installation and runtime on isolated schemas
+        env:
+          CODEX_LB_TEST_ORACLE_URL: oracle+oracledb://codex_test:codex_test@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
+          CODEX_LB_TEST_ORACLE_BASELINE_URL: oracle+oracledb://codex_baseline:codex_baseline_test_only@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
+          CODEX_LB_TEST_ORACLE_RUNTIME_URL: oracle+oracledb://codex_runtime:codex_runtime_test_only@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
+        run: make test-oracle

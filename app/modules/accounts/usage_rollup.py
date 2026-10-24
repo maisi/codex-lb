@@ -4,14 +4,16 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import cast
 
-from sqlalchemy import Select, func, select, true, update
+from sqlalchemy import Select, Table, func, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountUsageRollup, AccountUsageRollupState, ApiKey, ApiKeyUsageRollup, RequestLog
+from app.db.oracle_merge import merge_values
 from app.db.session import get_background_session, sqlite_writer_section
 
 logger = logging.getLogger(__name__)
@@ -152,6 +154,13 @@ _SUM_COLUMNS = ("request_count", "input_tokens", "output_tokens", "cached_input_
 
 
 def _add_rollup_sums_stmt(session: AsyncSession, model, key_field: str, key_value: str, sums: UsageRollupSums):
+    if session.get_bind().dialect.name == "oracle":
+        return merge_values(
+            model.__table__,
+            [{key_field: key_value, **{column: getattr(sums, column) for column in _SUM_COLUMNS}}],
+            [key_field],
+            add=_SUM_COLUMNS,
+        )
     stmt = _insert_fn(session)(model).values(
         **{key_field: key_value},
         request_count=sums.request_count,
@@ -319,6 +328,12 @@ def _insert_fn(session: AsyncSession):
 
 
 def _state_bootstrap_stmt(session: AsyncSession):
+    if session.get_bind().dialect.name == "oracle":
+        return merge_values(
+            cast(Table, AccountUsageRollupState.__table__),
+            [{"id": _STATE_ROW_ID, "folded_through": _EPOCH, "upgrade_repair_from": None}],
+            ["id"],
+        )
     # `upgrade_repair_from` is explicitly NULL: a state row bootstrapped by
     # THIS (post-cancelled_count) code is never legacy-suspect. Old code's
     # bootstrap omits the column and gets the epoch server default, which is

@@ -8,6 +8,7 @@ from sqlalchemy import BigInteger, case, cast, func, literal, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.selectable import Subquery
 
+from app.core.utils.sql import oracle_epoch_expr
 from app.db.models import AccountUsageRollupState, RequestLog, RequestReportHourlyRollup
 from app.modules.accounts.usage_time_rollup import DIMENSION_SENTINEL, conversation_id_expr
 from app.modules.accounts.usage_time_rollup_read import ceil_to_grid, epoch_seconds, floor_to_grid
@@ -59,6 +60,8 @@ def report_source(
     watermark_epoch = (
         cast(func.extract("epoch", watermark), BigInteger)
         if session.get_bind().dialect.name == "postgresql"
+        else cast(oracle_epoch_expr(watermark), BigInteger)
+        if session.get_bind().dialect.name == "oracle"
         else cast(func.strftime("%s", watermark), BigInteger)
     )
     r = RequestReportHourlyRollup

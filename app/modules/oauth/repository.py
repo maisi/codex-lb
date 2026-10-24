@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import OAuthDeviceFlowSlot, OAuthFlowState
+from app.db.oracle_dml import oracle_upsert
 
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
 
@@ -190,6 +191,20 @@ class OAuthFlowRepository:
 
         now = utcnow()
         dialect = self._session.get_bind().dialect.name
+        if dialect == "oracle":
+            await oracle_upsert(
+                self._session,
+                OAuthDeviceFlowSlot,
+                keys=("slot_key",),
+                values={"slot_key": DEVICE_FLOW_SLOT_KEY, "flow_id": flow_id, "generation": 1, "updated_at": now},
+                update_values={
+                    "flow_id": flow_id,
+                    "generation": OAuthDeviceFlowSlot.generation + 1,
+                    "updated_at": now,
+                },
+            )
+            await self._session.commit()
+            return
         if dialect == "postgresql":
             insert_stmt = pg_insert(OAuthDeviceFlowSlot)
         elif dialect == "sqlite":

@@ -7,8 +7,7 @@ healthy account out of rotation. The :class:`RefreshClaimCoordinator` grants at
 most one claimant per account the right to run the upstream exchange, using a
 per-account row in ``account_refresh_claims``.
 
-Claim acquisition is a single conditional-upsert statement that is atomic on
-both backends:
+Claim acquisition serializes competing owners in a short transaction:
 
 - PostgreSQL: ``INSERT .. ON CONFLICT DO UPDATE .. WHERE`` serializes
   concurrent claimers on the row lock; exactly one statement's WHERE passes.
@@ -16,6 +15,9 @@ both backends:
   single-writer lock (safe across processes sharing one file via
   ``busy_timeout``), additionally wrapped in ``sqlite_writer_section`` for
   in-process serialization.
+- Prepared Oracle: a row lock and savepoint-protected first insert precede a
+  conditional update using database UTC time after the lock wait. Application
+  startup remains disabled until the complete backend is verified.
 
 No database lock or transaction is ever held across upstream network I/O: the
 claim is plain row state with a TTL (``claim_expires_at``) so a crashed
@@ -39,6 +41,7 @@ from app.core.config.settings import get_settings
 from app.db.models import AccountRefreshClaim
 from app.db.session import get_background_session, sqlite_writer_section
 from app.db.sqlite_lock_retry import should_retry_after_sqlite_lock
+from app.modules.accounts.oracle_refresh_claims import acquire_oracle_refresh_claim
 
 _SQLITE_BUSY_RETRY_ATTEMPTS = 4
 _SQLITE_BUSY_RETRY_BASE_SECONDS = 0.05
@@ -250,16 +253,21 @@ class RefreshClaimCoordinator:
             for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
                 try:
                     async with get_background_session() as session:
-                        stmt = build_refresh_claim_upsert(dialect_name=session.get_bind().dialect.name)
-                        result = await session.execute(
-                            stmt,
-                            {
-                                "account_id": account_id,
-                                "claimed_by": claimed_by,
-                                "ttl": float(ttl_seconds),
-                            },
-                        )
-                        claimed = result.scalar_one_or_none() is not None
+                        if session.get_bind().dialect.name == "oracle":
+                            claimed = await acquire_oracle_refresh_claim(
+                                session, account_id=account_id, claimed_by=claimed_by, ttl=float(ttl_seconds)
+                            )
+                        else:
+                            stmt = build_refresh_claim_upsert(dialect_name=session.get_bind().dialect.name)
+                            result = await session.execute(
+                                stmt,
+                                {
+                                    "account_id": account_id,
+                                    "claimed_by": claimed_by,
+                                    "ttl": float(ttl_seconds),
+                                },
+                            )
+                            claimed = result.scalar_one_or_none() is not None
                         await session.commit()
                         return claimed
                 except OperationalError as exc:

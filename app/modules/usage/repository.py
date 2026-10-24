@@ -12,7 +12,6 @@ from typing import Any, Callable, Literal, cast
 
 from anyio import to_thread
 from sqlalchemy import (
-    Integer,
     String,
     and_,
     case,
@@ -28,11 +27,11 @@ from sqlalchemy import (
     union_all,
     values,
 )
-from sqlalchemy import cast as sqlalchemy_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
+from app.core.utils.sql import bucket_epoch_expr
 from app.core.utils.time import utcnow
 from app.db.account_identity_lock import lock_postgresql_account_identities
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
@@ -1295,11 +1294,7 @@ class UsageRepository:
     ) -> list[UsageTrendBucket]:
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
-        if dialect == "postgresql":
-            bucket_expr = func.floor(func.extract("epoch", UsageHistory.recorded_at) / bucket_seconds) * bucket_seconds
-        else:
-            epoch_col = sqlalchemy_cast(func.strftime("%s", UsageHistory.recorded_at), Integer)
-            bucket_expr = sqlalchemy_cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+        bucket_expr = bucket_epoch_expr(UsageHistory.recorded_at, dialect=dialect, bucket_seconds=bucket_seconds)
         bucket_col = bucket_expr.label("bucket_epoch")
 
         conditions: list = [UsageHistory.recorded_at >= since]

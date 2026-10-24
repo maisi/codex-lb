@@ -190,7 +190,8 @@ class TelemetrySnapshotBuilder:
         feature_counts = await self._feature_counts(conditions)
 
         method = deployment_method()
-        db_backend = "postgres" if self._session.get_bind().dialect.name == "postgresql" else "sqlite"
+        dialect = self._session.get_bind().dialect.name
+        db_backend = "postgres" if dialect == "postgresql" else "oracle" if dialect == "oracle" else "sqlite"
         plan_mix = PlanMixSnapshot(
             plus=count_bucket(plan_counts.get("plus", 0)),
             pro=count_bucket(plan_counts.get("pro", 0)),

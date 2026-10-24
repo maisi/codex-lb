@@ -11,6 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache.oracle_invalidation import bump_oracle_invalidation
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     cache_invalidation_bump_failures_total,
@@ -242,6 +243,8 @@ class CacheInvalidationPoller:
                     )
                 )
                 await session.execute(stmt)
+            elif dialect == "oracle":
+                await bump_oracle_invalidation(session, namespace)
             else:
                 existing = await session.scalar(
                     select(CacheInvalidation).where(CacheInvalidation.namespace == namespace)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -100,6 +101,11 @@ async def test_capability_lineage_writes_markers_in_global_hash_order(monkeypatc
 
         async def execute(self, statement: Insert) -> None:
             self.statements.append(cast(str, statement))
+
+        def get_bind(self) -> MagicMock:
+            bind = MagicMock()
+            bind.dialect.name = "sqlite"
+            return bind
 
         async def commit(self) -> None:
             return None

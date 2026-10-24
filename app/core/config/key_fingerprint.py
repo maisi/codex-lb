@@ -5,14 +5,16 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
 from app.db.models import RuntimeSentinel
+from app.db.oracle_errors import is_oracle_unique_violation
 from app.db.sqlite_lock_retry import retry_on_sqlite_lock
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,15 @@ async def _stamp_if_absent(session: AsyncSession, fingerprint: str) -> None:
             .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
         )
         await session.execute(stmt)
+    elif dialect == "oracle":
+        try:
+            async with session.begin_nested():
+                await session.execute(insert(RuntimeSentinel).values(**values))
+        except IntegrityError as exc:
+            if not is_oracle_unique_violation(exc):
+                raise
+            # Another first boot committed the canonical key. Read and compare
+            # it below; the losing replica must never overwrite that value.
     else:
         existing = await session.scalar(
             select(RuntimeSentinel).where(RuntimeSentinel.name == ENCRYPTION_KEY_FINGERPRINT_SENTINEL)

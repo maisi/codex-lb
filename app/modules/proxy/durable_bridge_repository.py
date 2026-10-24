@@ -10,7 +10,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any, cast
 
-from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
+from sqlalchemy import Row, Select, and_, case, delete, exists, func, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -34,6 +34,7 @@ from app.db.models import (
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
 )
+from app.db.oracle_dml import oracle_insert_if_absent, oracle_upsert
 from app.db.session import sqlite_writer_section
 from app.modules.proxy.account_eligibility import HARD_OWNER_UNAVAILABLE_STATUSES
 from app.modules.proxy.continuity import (
@@ -297,6 +298,17 @@ class DurableBridgeRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    def _lock_operation_batch(self, statement: Select) -> Select:
+        if self._session.get_bind().dialect.name == "oracle":
+            # Oracle Free rejects FETCH FIRST ... FOR UPDATE (ORA-02014).
+            # Bound candidate IDs inside an independent subquery, then lock
+            # their operation/session join without a row-limiting clause.
+            # The original eligibility filters and later DELETE recheck stay
+            # in place, preserving a live owner's duplicate-suppression fence.
+            candidate_ids = statement.with_only_columns(HttpBridgeOperationRecord.operation_id).correlate(None)
+            statement = statement.limit(None).where(HttpBridgeOperationRecord.operation_id.in_(candidate_ids))
+        return statement.with_for_update()
+
     async def _commit_writer_section(self) -> None:
         async with sqlite_writer_section():
             await self._session.commit()
@@ -541,6 +553,69 @@ class DurableBridgeRepository:
             return case((last_detail == "clean_close", clean_cooldown), else_=regular_cooldown)
 
         dialect = self._session.get_bind().dialect.name
+        if dialect == "oracle":
+            predicate = (
+                HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+            )
+            try:
+                for _ in range(3):
+                    current = await self._session.scalar(
+                        select(HttpBridgeRetryCircuit)
+                        .where(*predicate)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if current is None:
+                        if await oracle_insert_if_absent(self._session, HttpBridgeRetryCircuit, values):
+                            break
+                        continue
+                    if (
+                        current.updated_at_epoch == base_updated_at_epoch
+                        and consecutive_failures >= current.consecutive_failures
+                    ):
+                        failures = max(current.consecutive_failures + 1, consecutive_failures)
+                        merged_at = max(current.updated_at_epoch, updated_at_epoch)
+                        poison_details = {"stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout"}
+                        preserve_detail = (
+                            current.last_detail in poison_details
+                            and current.consecutive_failures >= sticky_threshold
+                            and last_detail not in poison_details
+                        ) or current.last_detail == _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL
+                        if failures < threshold:
+                            merged_cooldown = 0.0
+                        else:
+                            backoff = (
+                                clean_close_max_backoff
+                                if last_detail == "clean_close"
+                                else (
+                                    max_backoff
+                                    if failures >= threshold + 3
+                                    else min(max_backoff, base_backoff * 2 ** (failures - threshold))
+                                )
+                            )
+                            merged_cooldown = max(cooldown_floor, merged_at + backoff)
+                        await self._session.execute(
+                            update(HttpBridgeRetryCircuit)
+                            .where(*predicate)
+                            .values(
+                                consecutive_failures=failures,
+                                cooldown_until_epoch=max(
+                                    current.cooldown_until_epoch, cooldown_until_epoch, merged_cooldown
+                                ),
+                                last_detail=current.last_detail if preserve_detail else last_detail,
+                                updated_at_epoch=merged_at,
+                            )
+                        )
+                    break
+                else:
+                    raise RuntimeError("Oracle retry circuit changed repeatedly during first insertion")
+                await self._session.commit()
+                return
+            except BaseException:
+                await self._session.rollback()
+                raise
         if dialect == "postgresql":
             insert_statement = pg_insert(HttpBridgeRetryCircuit).values(**values)
             excluded = insert_statement.excluded
@@ -802,6 +877,16 @@ class DurableBridgeRepository:
             if expected_updated_at_epoch is None:
                 if expected_admission_generation != 0:
                     return None
+                if dialect == "oracle":
+                    inserted = await oracle_insert_if_absent(self._session, HttpBridgeRetryCircuit, values)
+                    await self._session.commit()
+                    if not inserted:
+                        return None
+                    return await self.get_retry_circuit(
+                        session_key_kind=session_key_kind,
+                        session_key_value=session_key_value,
+                        api_key_scope=api_key_scope,
+                    )
                 if dialect == "postgresql":
                     statement = pg_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
                 elif dialect == "sqlite":
@@ -2071,7 +2156,7 @@ class DurableBridgeRepository:
                     )
                     .limit(page_size)
                 )
-                statement = statement.with_for_update()
+                statement = self._lock_operation_batch(statement)
                 selected = await self._session.execute(statement)
                 page = list(selected.all())
                 if not page:
@@ -2556,7 +2641,7 @@ class DurableBridgeRepository:
         )
         purgeable = or_(HttpBridgeOperationRecord.state.in_(terminal_states), stale_nonterminal)
         async with sqlite_writer_section():
-            selected = await self._session.execute(
+            statement = (
                 select(HttpBridgeOperationRecord)
                 .join(
                     HttpBridgeSessionRecord,
@@ -2565,8 +2650,8 @@ class DurableBridgeRepository:
                 .where(HttpBridgeOperationRecord.updated_at < cutoff, purgeable)
                 .order_by(HttpBridgeOperationRecord.updated_at.asc())
                 .limit(batch_size)
-                .with_for_update()
             )
+            selected = await self._session.execute(self._lock_operation_batch(statement))
             # The joined FOR UPDATE locks both the operation and owning
             # session on PostgreSQL, serializing retention deletion with
             # claim_session() on the same continuity row.
@@ -4113,7 +4198,7 @@ class DurableBridgeRepository:
         async with sqlite_writer_section():
             previous_session_valid = False
             dialect = self._session.get_bind().dialect.name
-            if dialect == "postgresql":
+            if dialect in {"postgresql", "oracle"}:
                 session_ids = {receipt.session_id}
                 if receipt.previous_alias_session_id is not None:
                     session_ids.add(receipt.previous_alias_session_id)
@@ -4172,7 +4257,7 @@ class DurableBridgeRepository:
                 await self._session.rollback()
                 return False
 
-            if dialect != "postgresql" and receipt.previous_alias_session_id is not None:
+            if dialect not in {"postgresql", "oracle"} and receipt.previous_alias_session_id is not None:
                 previous_record = (
                     await self._session.execute(
                         select(
@@ -4266,6 +4351,15 @@ class DurableBridgeRepository:
                 HttpBridgeSessionAlias.session_id == session_id,
                 ~existing_target_is_account_neutral_replay,
             )
+        if dialect == "oracle":
+            return await oracle_upsert(
+                self._session,
+                HttpBridgeSessionAlias,
+                keys=("alias_kind", "alias_hash", "api_key_scope"),
+                values=values,
+                update_values={"session_id": session_id, "alias_value": alias_value, "updated_at": now},
+                where=conflict_where,
+            )
         if dialect == "postgresql":
             statement = (
                 pg_insert(HttpBridgeSessionAlias)
@@ -4326,6 +4420,15 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
                 "AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits', "
                 "'http_bridge_recovery_attempts', 'http_bridge_operations', 'http_bridge_operation_events', "
                 "'http_bridge_operation_event_chunks')"
+            )
+        )
+    elif dialect == "oracle":
+        result = await session.execute(
+            text(
+                "SELECT LOWER(table_name) FROM user_tables WHERE table_name IN ("
+                "'HTTP_BRIDGE_SESSIONS', 'HTTP_BRIDGE_SESSION_ALIASES', 'HTTP_BRIDGE_RETRY_CIRCUITS', "
+                "'HTTP_BRIDGE_RECOVERY_ATTEMPTS', 'HTTP_BRIDGE_OPERATIONS', 'HTTP_BRIDGE_OPERATION_EVENTS', "
+                "'HTTP_BRIDGE_OPERATION_EVENT_CHUNKS')"
             )
         )
     else:
