@@ -309,6 +309,8 @@ class Settings(BaseSettings):
     # cap at (25 + 15) * 2 = 80 PostgreSQL connections, preserving >= 20 raw
     # server slots on PostgreSQL's default max_connections=100 for reserved
     # connections, the migration path's two-connection peak, and operations.
+    # Oracle defaults each unspecified field to 4 + 0 per pool;
+    # its Always Free tier has a shared 30-session ceiling.
     database_pool_size: int = Field(default=25, gt=0)
     database_max_overflow: int = Field(default=15, ge=0)
     database_migrate_on_startup: bool = True
@@ -783,6 +785,17 @@ class Settings(BaseSettings):
             and self.conversation_archive_dir == DEFAULT_CONVERSATION_ARCHIVE_DIR
         ):
             self.conversation_archive_dir = self.data_dir / "conversation-archive"
+        return self
+
+    @model_validator(mode="after")
+    def _apply_oracle_pool_defaults(self) -> "Settings":
+        if urlparse(self.database_url).scheme.partition("+")[0].lower() != "oracle":
+            return self
+        explicitly_set = self.model_fields_set.copy()
+        if "database_pool_size" not in explicitly_set:
+            self.database_pool_size = 4
+        if "database_max_overflow" not in explicitly_set:
+            self.database_max_overflow = 0
         return self
 
     @model_validator(mode="after")

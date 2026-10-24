@@ -1,69 +1,71 @@
-# Oracle database preparation
+# Oracle single-instance operation
 
-## Scope
+## Scope and evidence
 
-Oracle Autonomous Transaction Processing Always Free is the intended target: one application instance initially, then two sharing the database. The current draft provides connection validation, an offline schema inventory, Oracle timestamp/hash/sequence representations, a migration mutex, file ownership, scheduler leader coordination, token-refresh ownership, shared cache invalidation and encryption-key fingerprint agreement. Application startup and schema mutation remain disabled for Oracle until installation, runtime queries and accounting have been ported and verified. The supported production backends remain SQLite and PostgreSQL.
+One codex-lb instance can use Oracle Autonomous Transaction Processing with the optional native Thin driver. The single-instance milestone was exercised against the operator's OCI Always Free database over the selected **TP** service, using an encrypted PEM wallet, TCPS and certificate identity verification. Application startup, dashboard settings, account import, API-key creation, a simulated upstream response with real reservation/settlement and request logging, restart and shutdown use the real application lifecycle. This verifies the database integration; real upstream credentials and multi-host HA are separate acceptance work.
 
-The preparation requirements are defined in [the specification](spec.md). The full-port work remains tracked in [the active change](../../changes/add-oracle-autonomous-backend/tasks.md). A successful connection check is not evidence that codex-lb can run on Oracle.
+Requirements live in [spec.md](spec.md); implementation and remaining HA work live in [the active change](../../changes/add-oracle-autonomous-backend/tasks.md). The change stays open while HA is deferred. No customer-specific connection identifiers, wallet contents or credentials belong in the repository.
 
-## Preparation commands
+## Installation and connection configuration
 
-Install the optional Thin driver with `uv sync --frozen --extra oracle`. It does not require Oracle Instant Client. Supply `CODEX_LB_DATABASE_URL` through a protected environment/secret source; do not put real passwords or wallet passwords in shell history, logs or a PR. The native URL form is `oracle+oracledb://user:password@host:1522/?service_name=service&protocol=tcps`.
+Install the optional driver with `uv sync --frozen --extra oracle`. Oracle Instant Client is unnecessary. Use an isolated application user with CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, an appropriate tablespace quota, and EXECUTE on SYS.DBMS_LOCK. The application user owns its own tables; the runtime does not need the administrator account. Grant these privileges through the database's administrative tooling.
 
-Inspect connection budgets without opening a connection:
+Supply `CODEX_LB_DATABASE_URL` through a protected secret/environment file. Passwords and wallet passwords must be URL encoded; SQLAlchemy's `URL.create(...).render_as_string(hide_password=False)` can construct the value without writing it to shell history or logs. The canonical URL uses `oracle+oracledb://` and either a host/service name or a TNS alias.
+
+For mutual TLS, mount `tnsnames.ora` and the encrypted `ewallet.pem` at a protected path, and supply the `config_dir`, `wallet_location` and `wallet_password` URL options. One-way TLS can operate without a wallet when enabled on the database and permitted by its network rules. Unknown/repeated URL options and privileged/password-change options are rejected. Certificate identity verification remains enabled.
+
+After configuring the protected environment, run:
+
+```sh
+uv run --extra oracle codex-lb-db oracle-check
+uv run --extra oracle codex-lb-db upgrade head
+uv run --extra oracle codex-lb-db check
+uv run --extra oracle codex-lb --host 127.0.0.1 --port 2455
+```
+
+Startup also applies migrations when the existing `database_migrate_on_startup` setting is enabled. The separate Oracle Alembic lineage installs an immutable snapshot: 68 tables, 89 indexes, ten sequences and idempotent preset/settings/watermark seeds. Each existing object is verified before interrupted DDL is resumed. Oracle DDL commits implicitly, so installation never substitutes live ORM `create_all` plus a manual stamp for a versioned migration. Manual Oracle stamping and replaying the SQLite/PostgreSQL Alembic history are rejected. Downgrading the initial Oracle baseline is unsupported.
+
+The migration mutex holds a dedicated DBMS_LOCK session across DDL commits and releases it on failure or process loss. Missing package permissions fail explicitly. Keep the encryption key/data directory stable across restarts: the first stored fingerprint detects a different key before encrypted account data is used. Backing up that directory preserves the encryption key and archives; Oracle data itself needs a database export/recovery procedure.
+
+## Pool budgets, UTC and bounded cleanup
+
+Oracle defaults to **four connections and zero overflow in each of two independent pools**, for eight application sessions per instance. Existing explicit pool settings remain authoritative, and a budget consuming all 30 Always Free sessions is rejected before connecting. Other backends retain their existing defaults. Reserve additional connections for the two-connection migration peak and administration.
+
+`oracle-check --budget-only` opens no database connection. For example:
 
 ```sh
 uv run --extra oracle codex-lb-db oracle-check --budget-only \
   --pool-size 4 --max-overflow 0 --replicas 2 --extra-replicas 1
 ```
 
-This reports 16 steady-state application sessions, 24 during one extra replica's update overlap, and six remaining under the default limit of 30. It counts both independent application pools. The reserve must cover migration/administration connections and temporary disconnected sessions; it is not a measured throughput guarantee. `--pool-size` and `--max-overflow` affect the preparation calculation only. The future deployment must use matching existing `CODEX_LB_DATABASE_POOL_SIZE` and `CODEX_LB_DATABASE_MAX_OVERFLOW` settings on every instance.
+That hypothetical future topology budgets 16 normal sessions and 24 during update overlap, leaving six. It is a capacity calculation, not a throughput measurement or HA certification. Pool arguments affect the check only.
 
-Remove `--budget-only` to check both synchronous and asynchronous native Thin connections sequentially. The command performs `SELECT 1 FROM DUAL`, applies an overall worker deadline (`--timeout-seconds`, default 10, maximum 300), and reports sanitized driver error codes. It releases owned connections and does not create or stamp application tables.
+Every physical request/background and migration connection initializes UTC before application statements. This matters because the target inherited SESSIONTIMEZONE +02:00 while DBTIMEZONE was +00:00. Timestamp variants retain microseconds and normalize aware instants, including SELECT and RETURNING.
 
-Inspect the unresolved schema decisions without a driver, database URL or network:
+Native async I/O stays owned and shielded until completion or native timeout recovery, before caller cancellation propagates. This avoids the driver's cancellation-first RESET hang, while preventing simultaneous use of an in-flight session. Runtime calls allow 15 seconds per native round trip; recovery can add another 15 seconds. Initial Autonomous Free LOB writes exceeded a five-second limit, so synchronous migration calls have a separate 60-second bound. Native connect timeout is ten seconds. Interrupted commits are never automatically replayed.
 
-```sh
-uv run codex-lb-db oracle-schema
-uv run codex-lb-db oracle-schema --json
-```
+The read-only `oracle-check` performs synchronous and asynchronous `SELECT 1 FROM DUAL` checks in a subprocess with an overall deadline (default ten, maximum 300 seconds). It reports safe diagnostics and closes owned resources. A successful check establishes connectivity only.
 
-The inventory exits unsuccessfully while blockers remain. It reports unbounded strings, filtered-index semantics and empty-string semantics for VARCHAR and Text/CLOB columns. Binding an empty Python string to a nullable CLOB reads back as NULL, and the same bind into a NOT NULL CLOB fails; moving a VARCHAR to CLOB therefore does not resolve empty-string compatibility. The entries are review items, not independent engineering tasks; several entries can be resolved by one explicit storage design.
+## Storage contracts and limits
 
-## Connection and wallet configuration
+Oracle-specific variants preserve SQLite/PostgreSQL DDL. Oracle stores previously unbounded identifier/dimension strings in **1024 UTF-8 bytes**; oversized values fail explicitly and are never truncated. Existing bounded character fields reserve their Unicode width, and free-form text/long URLs remain CLOBs. This Oracle-specific identifier limit should be checked when importing unusually long external IDs.
 
-One-way TLS can connect without a wallet when enabled on the Autonomous instance and the client is allowed by its network access rules. For mutual TLS, mount the downloaded Thin wallet material (`tnsnames.ora`, `ewallet.pem`) at a protected path and provide `config_dir`, `wallet_location` and `wallet_password` URL options as required. Certificate identity verification stays enabled. The preflight accepts the native driver URL with either a host/service name or a TNS alias; it rejects unknown/repeated options and privileged/password-change options.
+Empty string and NULL remain distinct through a reversible Oracle-only codec: empty stores U+0001, and values beginning with U+0001 escape that prefix. Both VARCHAR and CLOB values use the codec. Conditional indexes use CASE expressions to preserve filtered uniqueness. CLOB equality uses an indexed 512-character prefix as a candidate filter and authoritative DBMS_LOB.COMPARE for the complete value; prefix collisions cannot establish equality. Invitation hashes use RAW(32); numeric generated IDs use named sequences.
 
-The operator selected the TP service. Oracle recommends TP or LOW for short OLTP transactions; see [database service names](https://docs.oracle.com/en/cloud/paas/autonomous-database/serverless/adbsb/predefined-database-services-names.html). A read-only probe of the supplied target reported TP concurrency 30 and HIGH concurrency 3 through `CS_RESOURCE_MANAGER.LIST_CURRENT_RULES()`. These instance-specific active-statement limits are separate from the total session cap and are not a throughput benchmark.
+`codex-lb-db oracle-schema [--json]` reports the offline model inventory without loading the driver or opening a connection. Unresolved custom representations cause an unsuccessful exit; a zero-blocker inventory does not verify a running deployment. `codex-lb-db check` additionally compares the installed tables, defaults, constraints, function indexes and sequences against expected storage.
 
-On 2026-10-24 (Europe/Vienna), native synchronous and asynchronous Thin checks succeeded against the supplied Autonomous **23.26.4.1.0** endpoint using an encrypted PEM wallet, the TP service and certificate identity verification. The checks did not install application schema or verify runtime/failover. Wallet contents, credentials and customer-specific connection identifiers remain private.
+## TP, Free limits and future HA
 
-See the official [python-oracledb connection guide](https://python-oracledb.readthedocs.io/en/stable/user_guide/connection_handling.html) for the current OCI TLS and mTLS prerequisites. Local Oracle Free tests exercise SQL/driver behavior and do not replace OCI certificate, wallet or network validation.
+The tested target ran Autonomous **23.26.4.1.0** with python-oracledb 26.0.1. Its actual resource-manager rules reported TP active-statement concurrency 30 and HIGH concurrency three. Active-statement concurrency differs from the 30-total-session connection budget. Oracle recommends TP or LOW for short OLTP work; see [service names](https://docs.oracle.com/en/cloud/paas/autonomous-database/serverless/adbsb/predefined-database-services-names.html).
 
-## Storage and migration decisions
+The future topology is a health-aware load balancer, two separately addressable application instances and a shared database. Shared encryption material, distinct bridge IDs/peer addresses, leader election and one worker per instance remain necessary. Ownership components have database concurrency coverage, but host loss, failover and multi-instance peak budgets are still unverified. The existing [replica topology contract](../replica-operations/spec.md) currently requires PostgreSQL.
 
-Generic Oracle DATE loses fractional seconds. Oracle-specific timestamp representations therefore preserve microseconds, normalize aware instants to UTC and cover SELECT as well as DML RETURNING under non-UTC sessions. Fixed invitation hashes use RAW(32), and generated integer IDs have named Oracle sequences. SQLite/PostgreSQL schema output remains unchanged. The live OCI session inherited +02:00 even though DBTIMEZONE was +00:00. Future Oracle pool initialization still needs to enforce UTC for every physical request/background connection and verify naive-UTC defaults and comparisons under a non-UTC client environment.
-
-Prepared cache invalidation increments namespace versions atomically, including simultaneous first writes. A rolled-back transaction leaves no partial increment; an uncertain commit may cause a redundant bump on retry. Versions indicate cache change, not exactly-once event delivery. Prepared key fingerprint stamping preserves the first committed key and detects concurrent divergent first boots through the existing enforce/warn/off verifier. These are component checks, not a complete two-instance deployment.
-
-An Oracle Alembic baseline must explicitly create those sequences and preserve historical migration governance. Creating current ORM metadata and stamping it as head is not a supported installation strategy. Bounded string storage, empty strings versus NULL, partial uniqueness, retry behavior after implicit DDL commits, and model/schema drift remain installation blockers.
-
-The prepared migration mutex uses a dedicated Oracle session and `SYS.DBMS_LOCK`; it must survive commits on other connections. The database user needs EXECUTE on that package. No unlocked fallback is allowed. The live OCI catalog showed the supplied administrator had a direct EXECUTE privilege with grant option, and REQUEST/RELEASE were visible. This is catalog evidence only: package execution, the eventual app-user grant and mutex behavior on OCI remain unverified. The local SYSDBA grant step is test-container setup, not an OCI installation procedure.
-
-## Two-instance topology and failure modes
-
-After the Oracle runtime port is verified, the intended topology is a health-aware load balancer, two independently addressable application instances and one shared database. Both instances share encryption-key material, use unique bridge instance IDs and directly reachable peer URLs, and keep leader election enabled. Each instance runs one application worker. See the current [replica topology contract](../replica-operations/spec.md), which presently requires PostgreSQL.
-
-This topology can tolerate an application-host failure. Active HTTP/WebSocket streams on the failed host may terminate, and failover still observes ownership leases. The common database remains a dependency for both hosts. Always Free does not provide Autonomous Data Guard or restore to a selected historical backup/timestamp; plan external exports and recovery separately. Its 20 GB storage budget also makes log/usage retention relevant; retention is disabled by default in the current application.
-
-Official limits: [Oracle Always Free Autonomous Database](https://docs.oracle.com/en-us/iaas/autonomous-database-serverless/doc/autonomous-always-free.html).
+The shared database is a dependency for both application hosts. Always Free's documented storage budget is 20 GB, so log/usage retention matters. Autonomous Data Guard and point-in-time restore to a selected historical backup/timestamp are unavailable on Always Free; plan external exports and recovery. See [official Free limits](https://docs.oracle.com/en-us/iaas/autonomous-database-serverless/doc/autonomous-always-free.html).
 
 ## Developer verification
 
-`make test-oracle` requires `CODEX_LB_TEST_ORACLE_URL` pointing to an owned, disposable Oracle test schema. The test suite creates and removes its own probe objects and requires no pre-existing `file_account_pins`, `scheduler_leader`, `account_refresh_claims`, `cache_invalidation` or `runtime_sentinels` table. Do not supply production credentials. Migration-lock tests additionally require EXECUTE on SYS.DBMS_LOCK. The pinned Oracle Free CI container receives that permission only for its disposable test user.
+`make test-oracle` uses disposable test schemas. `CODEX_LB_TEST_ORACLE_URL` covers primitives and repository paths; `CODEX_LB_TEST_ORACLE_BASELINE_URL` isolates destructive fresh/interrupted/drift tests; `CODEX_LB_TEST_ORACLE_RUNTIME_URL` isolates the real application subprocess. Each user requires the installation permissions above. Runtime/repository probes refuse pre-existing tables and remove only their owned application objects. Baseline tests explicitly reset their dedicated schema.
 
-A canceled row-lock wait currently exceeds the five-second test deadline with the frozen SQLAlchemy 2.0.52 and python-oracledb 26.0.1 stack. An isolated SQLAlchemy 2.0.55 check also exceeded that deadline. The test releases its competing transaction before joining cleanup, so the known failure cannot deadlock its own teardown. It is retained as a strict expected failure: an unexpected success fails CI until the limitation is reviewed and the marker removed. All other refresh ownership tests must pass. This is an unresolved runtime blocker, including for scheduler/file row-lock paths; a successful coordination test does not establish bounded connection reclamation.
+The Oracle CI workflow creates separate users for installation and application smoke tests. It verifies a canceled row-lock wait and recovery of the same single-slot pool while the blocker remains held; a local TCP relay also verifies cancellation with silent traffic. TLS targets skip that local TCP fault injection, while wallet/UTC, row-lock cancellation and actual OCI writes are tested separately. The former strict cancellation expected failure has been removed after native-timeout-first ownership passed.
 
-Related upstream reports describe [unbounded cancellation recovery](https://github.com/oracle/python-oracledb/issues/623) and [Oracle termination integration](https://github.com/sqlalchemy/sqlalchemy/issues/13578). Their scenarios differ from this local row-lock regression; neither is treated as proof of a released fix.
-
-Until the full runtime and installation checklist passes against Oracle, the active change remains unarchived and the PR remains draft.
+Related upstream context: [python-oracledb cancellation recovery](https://github.com/oracle/python-oracledb/issues/623), [SQLAlchemy Oracle termination](https://github.com/sqlalchemy/sqlalchemy/issues/13578), and the [driver connection guide](https://python-oracledb.readthedocs.io/en/stable/user_guide/connection_handling.html).

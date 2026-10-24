@@ -22,6 +22,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config.settings import get_settings
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.backend_support import require_supported_database_backend
+from app.db.oracle_connection import create_oracle_async_engine
 from app.db.sqlite_utils import (
     IntegrityCheck,
     SqliteFileIdentity,
@@ -125,6 +126,18 @@ def _is_sqlite_url(url: str) -> bool:
 
 def _is_sqlite_memory_url(url: str) -> bool:
     return sqlite_url_is_memory(url)
+
+
+def _is_oracle_url(url: str) -> bool:
+    return url.startswith("oracle+oracledb://")
+
+
+def _create_oracle_engine(url: str) -> AsyncEngine:
+    return create_oracle_async_engine(
+        url,
+        pool_size=_settings.database_pool_size,
+        max_overflow=_settings.database_max_overflow,
+    )
 
 
 def _postgres_async_connect_args(url: str) -> dict[str, object] | None:
@@ -347,6 +360,8 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
 
 def _create_main_engine(url: str) -> AsyncEngine:
     require_supported_database_backend(url, operation="Application startup")
+    if _is_oracle_url(url):
+        return _create_oracle_engine(url)
     if not _is_sqlite_url(url):
         return _create_postgres_async_engine(
             url,
@@ -993,6 +1008,8 @@ def init_background_db(url: str | None = None) -> None:
             **_sqlite_file_async_engine_kwargs(),
         )
         _configure_sqlite_engine(_background_engine.sync_engine, enable_wal=not is_sqlite_memory)
+    elif _is_oracle_url(db_url):
+        _background_engine = _create_oracle_engine(db_url)
     else:
         _background_engine = _create_postgres_async_engine(
             db_url,

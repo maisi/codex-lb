@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from typing import cast
 
-from sqlalchemy import case, delete, func, insert, literal, select, update
+from sqlalchemy import Table, case, delete, func, insert, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
 from app.db.models import AccountUsageRollupState, RequestLog, RequestReportHourlyRollup
+from app.db.oracle_merge import OracleMerge
 from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.usage_rollup import FOLD_LAG, _insert_fn, _locked_state, _state_bootstrap_stmt
 from app.modules.accounts.usage_time_rollup import (
@@ -158,6 +160,19 @@ async def rekey_report_accounts(session: AsyncSession, account_ids: list[str], t
         .where(source)
         .group_by(*keys)
     )
+    if session.get_bind().dialect.name == "oracle":
+        await session.execute(
+            OracleMerge(
+                cast(Table, table.__table__),
+                stmt,
+                [*KEYS, "first_requested_at", *MEASURES],
+                KEYS,
+                add=MEASURES,
+                minimum=["first_requested_at"],
+            )
+        )
+        await session.execute(delete(table).where(source))
+        return
     upsert = _insert_fn(session)(table).from_select([*KEYS, "first_requested_at", *MEASURES], stmt)
     updates = {name: getattr(table, name) + getattr(upsert.excluded, name) for name in MEASURES}
     updates["first_requested_at"] = case(

@@ -2,11 +2,24 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from hashlib import sha256
+from typing import Protocol, TypedDict, cast
 
-from sqlalchemy import text
+from sqlalchemy import Integer, outparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _POSTGRES_ACCOUNT_IDENTITY_LOCK_TIMEOUT_MS = 30_000
+_ORACLE_ACCOUNT_IDENTITY_LOCK = text(
+    "BEGIN :result := DBMS_LOCK.REQUEST(id => :lock_id, lockmode => DBMS_LOCK.X_MODE, "
+    "timeout => :timeout, release_on_commit => TRUE); END;"
+).bindparams(outparam("result", Integer()))
+
+
+class _OracleLockParameters(TypedDict):
+    result: int
+
+
+class _OracleLockResult(Protocol):
+    out_parameters: _OracleLockParameters
 
 
 def advisory_lock_key(scope: str, value: str) -> int:
@@ -25,7 +38,7 @@ async def lock_postgresql_account_identities(
 ) -> tuple[int, ...]:
     """Lock upstream identity membership in canonical transaction-scoped order."""
     bind = session.get_bind()
-    if bind is None or bind.dialect.name != "postgresql":
+    if bind is None or bind.dialect.name not in {"postgresql", "oracle"}:
         return ()
     lock_keys = tuple(
         sorted(
@@ -36,6 +49,25 @@ async def lock_postgresql_account_identities(
             }
         )
     )
+    if bind.dialect.name == "oracle":
+        # Hash collisions only serialize unrelated identities. Use canonical
+        # order after folding into Oracle's numeric user-lock namespace.
+        oracle_keys = tuple(sorted({key % (1 << 30) for key in lock_keys}))
+        try:
+            for lock_key in oracle_keys:
+                result = await session.execute(
+                    _ORACLE_ACCOUNT_IDENTITY_LOCK,
+                    {"lock_id": lock_key, "timeout": _POSTGRES_ACCOUNT_IDENTITY_LOCK_TIMEOUT_MS // 1000},
+                )
+                code = cast(_OracleLockResult, result).out_parameters["result"]
+                if code == 1:
+                    raise TimeoutError("Timed out waiting for Oracle account identity ownership")
+                if code not in {0, 4}:
+                    raise RuntimeError(f"Oracle account identity lock failed (DBMS_LOCK result {code})")
+        except BaseException:
+            await session.rollback()
+            raise
+        return lock_keys
     try:
         if lock_keys:
             # Match the database layer's existing 30-second contention budget.

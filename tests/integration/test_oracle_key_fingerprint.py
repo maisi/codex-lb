@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 from sqlalchemy import Table, func, inspect, select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config.key_fingerprint import (
     ENCRYPTION_KEY_FINGERPRINT_SENTINEL,
@@ -20,6 +20,7 @@ from app.core.config.key_fingerprint import (
     verify_encryption_key_fingerprint,
 )
 from app.db.models import RuntimeSentinel
+from app.db.oracle_connection import create_oracle_async_engine
 
 _ORACLE_URL = os.environ.get("CODEX_LB_TEST_ORACLE_URL", "")
 pytestmark = [
@@ -31,7 +32,7 @@ pytestmark = [
 @pytest.fixture
 async def oracle_sentinels() -> AsyncIterator[AsyncEngine]:
     pytest.importorskip("oracledb")
-    engine = create_async_engine(_ORACLE_URL, hide_parameters=True, pool_size=4, max_overflow=0)
+    engine = create_oracle_async_engine(_ORACLE_URL, pool_size=4, max_overflow=0)
     table = cast(Table, RuntimeSentinel.__table__)
     created = False
     try:

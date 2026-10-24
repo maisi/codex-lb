@@ -10,11 +10,12 @@ from typing import Any
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, event, inspect, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.core.scheduling.leader_election as leader_module
 from app.core.config.settings import Settings
 from app.core.scheduling.leader_election import LeaderElection
+from app.db.oracle_connection import create_oracle_async_engine
 from app.db.oracle_types import database_datetime
 
 _ORACLE_URL = os.environ.get("CODEX_LB_TEST_ORACLE_URL", "")
@@ -27,7 +28,7 @@ pytestmark = [
 @pytest.fixture
 async def oracle_leaders(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncEngine]:
     pytest.importorskip("oracledb")
-    engine = create_async_engine(_ORACLE_URL, hide_parameters=True, pool_size=4, max_overflow=0)
+    engine = create_oracle_async_engine(_ORACLE_URL, pool_size=4, max_overflow=0)
     metadata = MetaData()
     table = Table(
         "scheduler_leader",

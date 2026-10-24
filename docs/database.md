@@ -2,22 +2,22 @@
 
 SQLite is the default database backend and needs no configuration. PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb`).
 
-## Oracle Autonomous Database preparation
+## Oracle Autonomous Database
 
-Oracle application startup and schema migrations are not supported yet. Experimental preparation tools can check a future Oracle connection and inventory the remaining schema work. They do not enable an Oracle deployment.
+Experimental single-instance Oracle operation is available with the optional native Thin driver. Installation, dashboard settings, account import, API keys, proxy accounting/logging and restart have been exercised on OCI over the TP service. HA remains unverified.
 
-Install the optional driver with `uv sync --frozen --extra oracle`. After supplying an `oracle+oracledb://` URL through a protected `CODEX_LB_DATABASE_URL` environment variable, check both Thin connection modes with:
+Install the driver with `uv sync --frozen --extra oracle`, and supply an `oracle+oracledb://` URL and wallet options through a protected `CODEX_LB_DATABASE_URL` secret/environment file. Use a dedicated application schema with CREATE SESSION/TABLE/SEQUENCE, a tablespace quota and EXECUTE on SYS.DBMS_LOCK. Then run:
 
 ```sh
-uv run --extra oracle codex-lb-db oracle-check \
-  --pool-size 4 --max-overflow 0 --replicas 2 --extra-replicas 1
+uv run --extra oracle codex-lb-db oracle-check
+uv run --extra oracle codex-lb-db upgrade head
+uv run --extra oracle codex-lb-db check
+uv run --extra oracle codex-lb --host 127.0.0.1 --port 2455
 ```
 
-The check is read-only. Add `--budget-only` to skip connecting: the example budgets 16 application sessions normally and 24 while an extra replica overlaps an update, leaving six under Always Free's 30-session limit. The calculation does not measure throughput or establish HA readiness. Pool arguments affect this check only.
+Oracle defaults to four connections and zero overflow per pool, eight application sessions in total. Explicit existing pool settings override these defaults. Previously unbounded identifier fields have an Oracle-specific limit of 1024 UTF-8 bytes; free-form text remains CLOB. SQLite/PostgreSQL behavior is unchanged.
 
-`uv run codex-lb-db oracle-schema --json` produces a complete offline inventory of unresolved schema representations and exits unsuccessfully while blockers remain; it needs neither the Oracle driver nor a database connection.
-
-For TLS/wallet setup, the planned two-instance topology, recovery limits and current support boundaries, see the owning [Oracle preparation capability](https://github.com/maisi/codex-lb/tree/main/openspec/specs/oracle-database).
+The read-only connection check and offline `oracle-schema --json` inventory do not establish application or HA readiness. For wallet configuration, migration permissions, storage limits, timeout behavior and the remaining HA scope, see the owning [Oracle database capability](https://github.com/maisi/codex-lb/tree/main/openspec/specs/oracle-database).
 
 ## Data paths
 

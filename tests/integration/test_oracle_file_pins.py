@@ -10,8 +10,9 @@ from typing import Any
 import pytest
 from sqlalchemy import Column, MetaData, String, Table, event, inspect, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.db.oracle_connection import create_oracle_async_engine
 from app.db.oracle_types import database_datetime
 from app.modules.proxy.file_pin_repository import FileAccountPinOwnershipConflict, FileAccountPinRepository
 
@@ -25,7 +26,7 @@ pytestmark = [
 @pytest.fixture
 async def oracle_pins() -> AsyncIterator[AsyncEngine]:
     pytest.importorskip("oracledb")
-    engine = create_async_engine(_ORACLE_URL, hide_parameters=True, pool_size=4, max_overflow=0)
+    engine = create_oracle_async_engine(_ORACLE_URL, pool_size=4, max_overflow=0)
     metadata = MetaData()
     # Bounds here isolate testing of ownership; the full Oracle application
     # schema remains blocked on the documented String/empty-value decisions.

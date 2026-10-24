@@ -137,7 +137,7 @@ def test_cli_budget_two_replicas_and_update_reserve(monkeypatch, capsys) -> None
     assert "overlap_sessions=24" in output
     assert "remaining_sessions=6" in output
     assert "oracle_connection=not_checked" in output
-    assert "oracle_runtime_support=unverified" in output
+    assert "oracle_runtime_support=single_instance" in output
     assert "not a throughput or HA guarantee" in output
 
 

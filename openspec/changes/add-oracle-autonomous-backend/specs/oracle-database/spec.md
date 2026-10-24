@@ -1,6 +1,6 @@
 ## Purpose
 
-Define safe preparation and validation of an Oracle Autonomous Database backend before full application and two-instance support is enabled.
+Define installation, storage, connection validation and operation of one Oracle Autonomous Database application instance.
 
 ## ADDED Requirements
 
@@ -11,7 +11,7 @@ The database CLI SHALL provide an explicitly invoked Oracle connectivity check. 
 #### Scenario: Successful Oracle preparation check
 - **WHEN** an operator invokes the Oracle check with a reachable Oracle database
 - **THEN** the command reports connectivity and server information without modifying application data
-- **AND** it states that Oracle application runtime support is not yet verified
+- **AND** it states that the check establishes connectivity only and does not verify application or HA readiness
 
 #### Scenario: Invalid or failed connection
 - **WHEN** the supplied URL is not an Oracle URL, the Oracle driver is absent, or connection establishment fails
@@ -31,14 +31,19 @@ The Oracle preparation check SHALL calculate application session demand from bot
 - **WHEN** the application session demand is greater than or equal to the configured session limit
 - **THEN** the check reports an unsuccessful preparation result naming the pool and replica budget
 
-### Requirement: Incomplete Oracle support cannot mutate schema or start the application
+### Requirement: Oracle runtime uses its verified driver and migration lineage
 
-Until Oracle migrations and runtime coordination are implemented and verified, application startup and schema-mutating database commands targeting Oracle MUST stop with an explicit unsupported-backend error before opening a database connection or performing schema mutation. The Oracle preparation command SHALL remain available. SQLite and PostgreSQL SHALL preserve their current startup and migration behavior.
+Oracle application startup SHALL use the native oracle+oracledb Thin driver. Unsupported Oracle driver variants MUST fail before loading a database driver and MUST NOT expose credentials. Oracle installation MUST use its dedicated Alembic lineage, MUST reject manual stamping that bypasses baseline verification, and MUST reject replaying the SQLite/PostgreSQL migration history. SQLite and PostgreSQL SHALL preserve their existing behavior.
 
-#### Scenario: Oracle startup or migration is attempted
-- **WHEN** an operator selects an Oracle database for application startup or a schema-mutating command
-- **THEN** the operation fails before database connection or mutation
-- **AND** the diagnostic identifies the preparation command and incomplete support boundary
+#### Scenario: Unsupported Oracle driver is selected
+- **WHEN** an operator selects an Oracle driver other than oracle+oracledb
+- **THEN** startup fails before creating an engine with guidance naming the native Thin driver
+- **AND** its diagnostic omits database and wallet credentials
+
+#### Scenario: Oracle baseline verification is bypassed
+- **WHEN** an operator attempts to stamp an Oracle schema or replay the SQLite/PostgreSQL migration history
+- **THEN** the operation fails before opening a database connection
+- **AND** it identifies the dedicated Oracle upgrade command
 
 ### Requirement: Oracle schema preparation preserves existing storage behavior
 
@@ -54,7 +59,7 @@ Oracle-specific schema representations MUST preserve subsecond timestamp precisi
 
 ### Requirement: Oracle schema inventory is available without a database
 
-The database CLI SHALL provide an offline Oracle schema inventory command that reports model table counts and unresolved Oracle representation blockers, including unbounded strings, filtered index semantics, and empty-string semantics. It MUST support structured JSON output, MUST exit unsuccessfully while blockers remain, and MUST NOT open a database connection or require the optional Oracle driver. It MUST identify the report as preparation rather than application readiness.
+The database CLI SHALL provide an offline Oracle schema inventory command that reports model table counts and unresolved Oracle representation blockers, including unbounded strings, filtered index semantics, and empty-string semantics. It MUST support structured JSON output, MUST exit unsuccessfully while blockers remain, and MUST NOT open a database connection or require the optional Oracle driver. It MUST identify the report as an offline schema inventory rather than application readiness.
 
 #### Scenario: Schema blockers are inspected offline
 - **WHEN** an operator invokes the Oracle schema inventory with Oracle selected in the environment
@@ -158,3 +163,46 @@ Oracle encryption-key fingerprint verification against a prepared test schema MU
 - **WHEN** verification uses warn mode
 - **THEN** it logs the mismatch and preserves the sentinel
 - **AND** off mode skips database verification
+
+
+### Requirement: Verified single-instance runtime can install and operate
+
+After real-database verification, Oracle application startup SHALL support one application instance using an isolated, explicitly selected application schema. Installation MUST use an immutable Alembic-owned Oracle baseline, MUST preserve unrelated schemas and data, and MUST reject incompatible or partially installed schema rather than stamp unverified live ORM metadata. Repeat upgrades MUST be idempotent. Multi-instance HA SHALL remain outside this milestone.
+
+#### Scenario: Fresh isolated Oracle installation
+- **WHEN** the operator installs and starts one instance against a fresh Oracle application schema
+- **THEN** the versioned schema is installed and dashboard settings, accounts, keys, usage and logs persist through the existing application interfaces
+- **AND** a subsequent restart uses that schema without deleting application data
+
+### Requirement: Oracle runtime storage and lifecycle preserve application contracts
+
+Oracle runtime SHALL preserve distinct empty-string and NULL values, timestamp microseconds and UTC semantics, generated identifiers, and conditional uniqueness. Request and background pools MUST initialize each physical connection in UTC, use bounded connection budgets compatible with the Free database, and release or invalidate connections on errors and cancellation within a documented bound. SQLite and PostgreSQL behavior MUST remain unchanged.
+
+#### Scenario: Oracle session defaults differ from UTC
+- **WHEN** a new runtime connection inherits a non-UTC session timezone
+- **THEN** pool initialization sets that connection to UTC before application statements execute
+- **AND** persisted and queried application timestamps retain their UTC meaning
+
+#### Scenario: A request is canceled during a database operation
+- **WHEN** an Oracle request is canceled while waiting for database work
+- **THEN** the application bounds cleanup and prevents reuse of an in-flight connection
+- **AND** subsequent requests can obtain a usable connection
+
+
+### Requirement: Oracle defaults fit a single Free instance
+
+When Oracle is selected and the existing pool settings are not explicitly supplied, each runtime pool SHALL default to size four with zero overflow. Explicit existing settings MUST remain authoritative and an exhausted 30-session budget MUST fail before connecting. Other database backends MUST retain their existing defaults.
+
+#### Scenario: Oracle is selected without pool overrides
+- **WHEN** the application uses an Oracle URL with no explicit pool size or overflow
+- **THEN** the request and background pools each use four connections with zero overflow
+- **AND** their combined maximum is eight application sessions
+
+### Requirement: Oracle string bounds are explicit and lossless
+
+Previously unbounded Oracle identifier and dimension columns SHALL permit at most 1024 UTF-8 storage bytes, including codec escapes. Oversized values MUST fail without truncation. Existing bounded character fields MUST reserve their supported Unicode width. Free-form text and long URLs MUST remain CLOB values with full-value equality and distinct empty-string/NULL storage.
+
+#### Scenario: A stored CLOB shares an indexed prefix
+- **WHEN** two values share the indexed CLOB prefix but differ later
+- **THEN** equality lookup distinguishes their complete values
+- **AND** prefix index collisions do not establish equality

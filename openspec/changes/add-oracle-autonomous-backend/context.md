@@ -1,61 +1,42 @@
-# Implementation and verification log
+# Oracle implementation context
 
-## Intended deployment
+## Current milestone
 
-The operator targets Autonomous Transaction Processing Always Free, initially one application instance and eventually two behind a health-aware load balancer. The initial spike used an isolated local Oracle Free container. The operator subsequently supplied a live OCI wallet and credentials and selected the TP service. Native sync/async connectivity now works against that target; application installation and production readiness remain unverified.
+The operator requested actual single-instance operation on the supplied Autonomous TP database, then explicitly authorized every schema/data test because that database was created solely for this work. HA is deferred. The original two-hour preparation spike and read-only wallet check established the starting point; this milestone adds installation and application runtime.
 
-## Verified preparation
+The live target is Autonomous 23.26.4.1.0, tested with python-oracledb 26.0.1 and frozen SQLAlchemy 2.0.52. Tests use separate application, migration and primitive schemas. Credentials, wallet material and customer-specific connection identifiers remain outside the repository. The runtime uses an application user rather than ADMIN.
 
-- Optional python-oracledb 26.0.1 Thin driver with native sync/async checks against Oracle Free 23.26.3.0.0.
-- Read-only connection preflight, an offline schema inventory, credential-safe errors and a bounded preflight worker. A silent local TCP endpoint proves that the real native connection is closed when the CLI deadline kills its worker.
-- Both pools counted for steady-state/update overlap: size four, overflow zero, two instances plus one extra gives 16/24 application sessions and six spare under the Free limit.
-- Oracle timestamp microseconds and UTC instants, including offset inputs, non-UTC sessions, defaults and RETURNING; RAW(32) invitation hashes and ten generated-ID sequences.
-- Exact pre-edit SQLite/PostgreSQL DDL comparison across 68 tables and 92 indexes; fresh SQLite Alembic upgrade/check reports no drift.
-- Oracle migration serialization through DBMS_LOCK across independent processes, commits, body failure and process loss. The local test schema was explicitly granted package access. A later live catalog probe confirmed an administrator grant on OCI, while the app-user grant and actual OCI lock operation remain unverified.
-- Oracle file ownership with a forced simultaneous-first-read race, account isolation, expiry takeover, fresh post-lock TTL and rollback after a non-unique integrity error.
-- Oracle token-refresh ownership through the existing coordinator: one concurrent owner pair, same-pair re-entry, distinct-token exclusion, exact-owner release, UTC expiry takeover and full TTL after row-lock waits or a competing first insert that rolls back. Oracle lock-wait tests release their owned blockers before joining canceled tasks, including on assertion failure.
-- Oracle shared cache version increments and peer callbacks, including simultaneous first insert, rollback-before-retry and a lost commit acknowledgement. Five native Oracle cases pass alongside 25 existing cache regression cases.
-- Oracle startup key fingerprint agreement, including concurrent same-key and divergent-key first boots, immutable canonical key and enforce/warn/off modes. Three native Oracle cases pass alongside 24 existing startup/replica regression cases.
-- Oracle scheduler leadership through the existing LeaderElection API: one concurrent winner, renewal, takeover, release, shutdown renewal, full TTL after a lock wait and no resurrection of an expired lease.
+## Implemented behavior
 
-## Local validation
+- Native Thin request/background pools, each defaulting to four connections and zero overflow, share the existing configurable pool controls. Both physical pools and synchronous migration connections initialize UTC before use.
+- A dedicated immutable Oracle Alembic baseline installs 68 tables, 89 indexes, ten sequences and 12 idempotent seeds. Interrupted DDL resumes only after existing-object verification; drift includes defaults, keys, function indexes and sequence properties. Manual stamping and historical SQLite/PostgreSQL replay are rejected.
+- Oracle-only string storage preserves empty/NULL/sentinel round trips. Previously unbounded identifiers are limited to 1024 UTF-8 storage bytes, without truncation. Existing bounded Unicode fields retain their supported widths, long URLs/text remain CLOB, CLOB equality checks full values, and conditional uniqueness uses function indexes.
+- Existing repository interfaces support Oracle settings/model registry, account identity/token CAS, API-key reservations/settlement, OAuth, sticky/file ownership, scheduler/refresh claims, cache/fingerprint state, auth rate limits, quota decisions, reports/usage folds, bridge continuity and membership.
+- Oracle Boolean IS predicates now compile to valid numeric predicates with correct nullable IS/IS NOT behavior. Reporting uses portable CASE sums and Oracle epoch arithmetic.
+- Startup, settings updates, account import, API-key creation, proxy streaming with a simulated upstream and real token settlement/request logging, dashboard queries, restart and shutdown have passed through the real application lifecycle on OCI. Network-facing schedulers/upstream responses are stubbed in that smoke; database-only maintenance, leader/ring/cache lifecycle and migrations remain real.
 
-The initial combined regression selection passed **390 tests**, with **11 PostgreSQL-only tests skipped** on the SQLite selection. It covered the new preparation suites plus existing database sessions, migration CLI/history, file API and migration serialization. A further selection of existing leader-lifecycle tests and all Oracle integration suites passed **65 tests** (including the four new Oracle leader cases).
+## Connection and cancellation findings
 
-The final Oracle integration selection passed **37 tests** and retained **one strict expected failure** for bounded cancellation. A combined refresh selection passed **60 tests** (five new Oracle ownership cases plus existing unit/integration cases). The schema review additionally includes a real Oracle CLOB empty-bind regression.
+The target's resource-manager rules reported active-statement concurrency HIGH=3, MEDIUM=2, LOW=30, TP=30 and TPURGENT=30. These are instance-specific active-statement limits, distinct from the total session budget and not a throughput benchmark. The operator selected TP. The live session originally inherited +02:00 while DBTIMEZONE was +00:00, motivating per-physical-connection UTC initialization.
 
-Full Ruff/type checks, project architecture/settings/migration-topology checks, strict changed OpenSpec validation and the new capability validation passed. The Oracle workflow is also checked with pinned actionlint 1.7.7; an initial job-level service-port context was corrected to step-level environment configuration with a string port key.
+Native cancellation-first recovery can wait indefinitely for RESET under a row lock. Shielding/owning native I/O until native timeout recovery completes resolves the strict expected failure without sharing an in-flight session or replaying commits. A row-lock cancellation test obtains a usable connection while the competing lock remains held. A local silent-TCP relay additionally proves single-slot recovery under traffic loss. OCI TCPS skips that local TCP relay only.
 
-GitHub PR: https://github.com/maisi/codex-lb/pull/43 (draft). Cloud checks refer to their actual head SHA; results must be refreshed after each follow-up commit.
+A five-second native call limit was too short for initial Autonomous Free LOB writes: both the settings seed and account token writes exceeded it. Runtime round trips now allow 15 seconds, with recovery potentially adding another 15 seconds; synchronous migration calls allow 60 seconds. Connections use a ten-second connect timeout. The bounded read-only preflight retains its independent hard subprocess deadline.
 
-## Live OCI follow-up: 2026-10-24 (Europe/Vienna)
+## Validation evidence
 
-The existing read-only CLI preflight succeeded over the operator-selected TP service with python-oracledb 26.0.1 and Oracle Autonomous server **23.26.4.1.0**. Both synchronous and asynchronous native Thin connections used the supplied encrypted PEM wallet over TCPS with certificate identity verification enabled. No application tables were created or changed. Wallet contents, credentials and customer-specific connection identifiers remain outside the repository and PR.
+- OCI installation: seven fresh/repeat/interrupted-DDL, drift, CLOB/empty/sentinel and invitation-uniqueness tests passed.
+- OCI repositories: four native tests passed across account/token updates, OAuth/sticky/planner operations, concurrent settings upserts, reservation settlement/rate limiting, trends/facets, bridge CLOB aliases/retry CAS and ring heartbeat.
+- OCI real application subprocess: fresh installation, core API persistence, API-key usage accounting, restart and shutdown passed. A separate repeat against the persistent application schema passed without bypassing the runtime guard.
+- OCI historical folds: dashboard bucket reads before/after lifetime, hourly, conversation and report folding passed.
+- Oracle unit/migration/configuration selection: 159 passed. SQLite lifecycle/rollup/report/reset-credit regression selections passed (15 and 77 tests); overlapping agent selections are not added to these counts.
+- `make lint` passed all architecture, cancellation, timing, settings-tier and migration-topology checks plus Ruff/format. Full `ty check` passed. Strict OpenSpec change and Oracle capability validation passed.
+- Final complete OCI Oracle integration suite: **53 passed, one skipped** in 259.42 seconds. The only skip is the local plain-TCP silent-relay injection; the native local suite covered that fault separately. This combined run includes baseline installation/recovery, wallet/UTC, primitives, real application startup/accounting/restart and historical folds. Earlier selections overlap and are not summed.
+- Five additional existing SQLite product-path smoke tests passed: settings updates, account import, API-key CRUD, key usage/request-log linkage and streaming proxy persistence.
+- `codex-lb-db check` on the persistent OCI application schema reports `migration_policy=ok` and `schema_drift=none`. All 68 main specifications passed strict validation.
 
-A separate metadata probe ran in a read-only transaction:
+## Remaining scope
 
-| Consumer group | Configured concurrency limit | Parallel degree |
-|---|---:|---:|
-| HIGH | 3 | 2 |
-| MEDIUM | 2 | 2 |
-| LOW | 30 | 1 |
-| TP | 30 | 1 |
-| TPURGENT | 30 | Database default |
+The current milestone is one application instance and fresh Oracle installation. Two-instance host-loss/failover, lease takeover across full application instances, duplicate-refresh prevention during host failure and measured peak connection budgets are deferred. Existing SQLite/PostgreSQL data migration to Oracle is not automatic. Broader long-history/report/retention parity and workload capacity testing remain useful follow-up coverage.
 
-These are the actual target's `CS_RESOURCE_MANAGER.LIST_CURRENT_RULES()` results, not a universal Always Free service table or a throughput measurement. Service concurrency and the 30-total-session connection budget are separate constraints.
-
-The session inherited **+02:00** while `DBTIMEZONE` was **+00:00**. UTC initialization for both future Oracle pools is therefore an explicit remaining task, including naive timestamp defaults and comparisons. The aware timestamp variants already have separate non-UTC-session tests, which do not establish UTC behavior for every naive/default path.
-
-Catalog queries found a valid `SYS.DBMS_LOCK` package, visible REQUEST/RELEASE subprograms and a direct EXECUTE privilege with grant option for the supplied administrator. No REQUEST/RELEASE call or grant was executed; the future app user's privileges and mutex behavior on OCI still need verification. The metadata probe found no current application tables in the tested schema; no writable integration suite was run.
-
-## Remaining production blockers
-
-The full Oracle port is incomplete: no Alembic-owned Oracle installation baseline or interrupted-DDL recovery exists yet. Live OCI TLS/wallet connectivity is verified for the supplied administrator; runtime and privilege checks under the eventual app user remain outstanding. The inventory still reports 199 unbounded strings, seven filtered-index definitions and 363 VARCHAR/Text empty-value review entries (569 total). A real Oracle bind/read regression confirms that an empty Python string becomes NULL in a nullable CLOB and fails in a NOT NULL CLOB. These are review items rather than independent task estimates. Additional upserts, bridge/ring ownership, identity/rate-limit locking, reservations/accounting, schema discovery and reports remain to be ported. Bounded query cancellation and connection reclamation are an additional measured blocker: the canceled row-lock test exceeds five seconds on both the frozen SQLAlchemy 2.0.52 / oracledb 26.0.1 stack and an isolated SQLAlchemy 2.0.55 check. Documented native cancel, call-timeout and out-of-band settings, and an isolated oracledb 3.4.2 check did not establish bounded cancellation; no workaround or dependency change was adopted. The strict expected-failure marker accepts only this dedicated deadline exception; unrelated assertion or fixture cleanup failures still fail the test.
-
-Application startup and schema mutation therefore remain explicitly disabled for every Oracle URL. Do not remove that guard on the strength of connection or prepared-coordination tests. The change must remain active until the full task list and single-/two-instance product checks pass.
-
-## Verification and remaining effort
-
-The preparation delta covers 11 requirements and 23 scenarios. The completed tasks cover connection tooling, schema groundwork, the migration mutex, ownership/leader coordination, shared cache invalidation and startup key agreement; full installation/runtime tasks remain incomplete. Independent review found and corrected the CLOB inventory omission and identified the native cancellation blocker. The change is intentionally not archived or marked as an Oracle deployment release.
-
-This is a backend port rather than a driver configuration change: the audit found runtime conflict/upsert constructs across 18 modules, alongside Oracle-specific installation and schema semantics. A planning estimate is roughly **5–10 focused developer days** for a verified fresh installation and two-instance support: about 1–3 for storage/baseline/recovery, 2–4 for remaining query/coordination/accounting paths and 1–3 for OCI setup plus product/failover checks. These ranges overlap and are indicative, not a commitment. The native cancellation limitation may require upstream work and can extend the schedule. Existing-data import is excluded from this estimate; the initial implementation assumes a fresh schema unless the operator asks otherwise.
+The active change remains unarchived because its original HA checklist is incomplete. Stable operation guidance lives in [the capability context](../../specs/oracle-database/context.md) and [the rendered database guide](../../../docs/database.md).

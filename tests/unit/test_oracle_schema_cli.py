@@ -52,7 +52,7 @@ def test_schema_cli_reports_full_inventory_before_settings_or_backend_guard(monk
             "blockers": [asdict(blocker) for blocker in report.blockers],
             "database_connection": "not_attempted",
             "schema_mutation": "none",
-            "oracle_runtime_support": "unsupported",
+            "oracle_runtime_support": "single_instance_experimental",
         }
     else:
         for expected in (
@@ -62,7 +62,7 @@ def test_schema_cli_reports_full_inventory_before_settings_or_backend_guard(monk
             "empty_string_representation=1",
             "database_connection=not_attempted",
             "schema_mutation=none",
-            "oracle_runtime_support=unsupported",
+            "oracle_runtime_support=single_instance_experimental",
             "oracle_schema=blocked",
             "oracle-schema --json",
         ):
@@ -80,7 +80,7 @@ def test_schema_cli_empty_inventory_preserves_unsupported_runtime_and_zero_count
     assert payload["blockers"] == []
     assert payload["table_count"] == 0
     assert payload["blocker_counts"] == {kind.value: 0 for kind in OracleSchemaBlockerKind}
-    assert payload["oracle_runtime_support"] == "unsupported"
+    assert payload["oracle_runtime_support"] == "single_instance_experimental"
 
 
 @pytest.mark.parametrize(
@@ -122,7 +122,7 @@ main()
         timeout=15,
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 0
     assert result.stderr == ""
     assert "Traceback" not in result.stdout
     assert "db-secret" not in result.stdout
@@ -132,8 +132,8 @@ main()
         assert payload["table_count"] > 0
         assert payload["database_connection"] == "not_attempted"
         assert payload["schema_mutation"] == "none"
-        assert payload["oracle_runtime_support"] == "unsupported"
-        assert sum(payload["blocker_counts"].values()) == len(payload["blockers"]) > 0
+        assert payload["oracle_runtime_support"] == "single_instance_experimental"
+        assert sum(payload["blocker_counts"].values()) == len(payload["blockers"]) == 0
     else:
-        assert "oracle_schema=blocked" in result.stdout
+        assert "oracle_schema=no_blockers_detected" in result.stdout
         assert "offline metadata inventory" in result.stdout

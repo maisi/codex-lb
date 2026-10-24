@@ -11,9 +11,10 @@ from typing import Any
 import pytest
 from sqlalchemy import Column, MetaData, String, Table, event, inspect, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.modules.accounts.refresh_claims as claim_module
+from app.db.oracle_connection import ORACLE_CALL_TIMEOUT_MS, create_oracle_async_engine
 from app.db.oracle_types import database_datetime
 from app.modules.accounts.refresh_claims import RefreshClaimCoordinator
 
@@ -26,14 +27,10 @@ pytestmark = [
 ]
 
 
-class OracleCancellationDeadlineExceeded(AssertionError):
-    """Known runtime blocker retained until native cleanup is bounded."""
-
-
 @pytest.fixture
 async def oracle_claims(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncEngine]:
     pytest.importorskip("oracledb")
-    engine = create_async_engine(_ORACLE_URL, hide_parameters=True, pool_size=4, max_overflow=0)
+    engine = create_oracle_async_engine(_ORACLE_URL, pool_size=4, max_overflow=0)
     table = Table(
         "account_refresh_claims",
         MetaData(),
@@ -234,11 +231,6 @@ async def test_oracle_refresh_first_insert_wait_gets_full_ttl_after_contender_ro
     assert 1 < (claim.claim_expires_at - now).total_seconds() <= 2
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=OracleCancellationDeadlineExceeded,
-    reason="Oracle runtime blocker: canceled row-lock wait does not finish before lock release; see driver issue #623",
-)
 async def test_oracle_refresh_cancellation_releases_connection(oracle_claims: AsyncEngine) -> None:
     coordinator = RefreshClaimCoordinator(claimant_id="first")
     assert await coordinator.try_acquire("account", ttl_seconds=30, owner=_OWNER_A)
@@ -255,11 +247,10 @@ async def test_oracle_refresh_cancellation_releases_connection(oracle_claims: As
         try:
             await asyncio.wait_for(attempted.wait(), timeout=5)
             waiter.cancel()
-            done, pending = await asyncio.wait({waiter}, timeout=5)
-            if pending:
-                raise OracleCancellationDeadlineExceeded(
-                    "Cancellation must finish while the competing row remains locked"
-                )
+            # Native timeout and recovery each have one round-trip budget.
+            # Caller cancellation never interrupts native RESET.
+            done, pending = await asyncio.wait({waiter}, timeout=2 * ORACLE_CALL_TIMEOUT_MS / 1000 + 5)
+            assert not pending, "Cancellation must finish while the competing row remains locked"
             assert next(iter(done)).cancelled()
         finally:
             event.remove(oracle_claims.sync_engine, "before_cursor_execute", before_cursor_execute)

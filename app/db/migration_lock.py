@@ -14,6 +14,7 @@ from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
 
+from app.db.oracle_connection import create_oracle_sync_engine
 from app.db.sqlite_utils import sqlite_db_path_from_url
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,7 @@ def _oracle_migration_lock(sync_database_url: str, *, timeout_seconds: float) ->
     # connection/transaction, including Oracle's implicit DDL commits. NullPool
     # closes that session even if explicit RELEASE fails, instead of returning
     # a still-locked session to a pool. Oracle releases its locks on session loss.
-    engine = create_engine(sync_database_url, future=True, poolclass=NullPool, hide_parameters=True)
+    engine = create_oracle_sync_engine(sync_database_url, future=True, poolclass=NullPool, hide_parameters=True)
     try:
         with engine.connect() as connection:
 

@@ -10,10 +10,11 @@ from typing import Any, cast
 import pytest
 from sqlalchemy import CursorResult, Table, inspect, select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.cache.invalidation import NAMESPACE_SETTINGS, CacheInvalidationPoller
 from app.db.models import CacheInvalidation
+from app.db.oracle_connection import create_oracle_async_engine
 
 _ORACLE_URL = os.environ.get("CODEX_LB_TEST_ORACLE_URL", "")
 pytestmark = [
@@ -25,7 +26,7 @@ pytestmark = [
 @pytest.fixture
 async def oracle_invalidations() -> AsyncIterator[AsyncEngine]:
     pytest.importorskip("oracledb")
-    engine = create_async_engine(_ORACLE_URL, hide_parameters=True, pool_size=4, max_overflow=0)
+    engine = create_oracle_async_engine(_ORACLE_URL, pool_size=4, max_overflow=0)
     table = cast(Table, CacheInvalidation.__table__)
     created = False
     try:

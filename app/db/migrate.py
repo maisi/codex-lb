@@ -23,7 +23,7 @@ from alembic.util.exc import CommandError
 from anyio import to_thread
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy import exc as sa_exc
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, make_url
 
 from app.core.config.settings import get_settings
 from app.db.alembic.revision_ids import LEGACY_MIGRATION_TO_NEW_REVISION, OLD_TO_NEW_REVISION_MAP, REVISION_ID_PATTERN
@@ -31,8 +31,10 @@ from app.db.backend_support import UnsupportedDatabaseBackendError, require_supp
 from app.db.migration_lock import migration_lock
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
+from app.db.oracle_baseline import oracle_schema_drift
+from app.db.oracle_connection import create_oracle_sync_engine
 from app.db.oracle_preflight import OraclePreflightError, OracleSessionBudget, run_oracle_preflight
-from app.db.oracle_schema import OracleSchemaBlockerKind, inspect_oracle_schema
+from app.db.oracle_schema import OracleSchemaBlockerKind, inspect_oracle_schema, oracle_snapshot_from_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -167,14 +169,15 @@ class MigrationBootstrapError(RuntimeError):
     pass
 
 
-def _script_location() -> str:
-    return str((Path(__file__).resolve().parent / "alembic").resolve())
+def _script_location(database_url: str = "") -> str:
+    name = "oracle_alembic" if database_url and make_url(database_url).get_backend_name() == "oracle" else "alembic"
+    return str((Path(__file__).resolve().parent / name).resolve())
 
 
 def _build_alembic_config(database_url: str) -> Config:
     require_supported_database_backend(database_url, operation="schema migration")
     config = Config()
-    config.set_main_option("script_location", _script_location())
+    config.set_main_option("script_location", _script_location(database_url))
     sync_database_url = to_sync_database_url(database_url)
     # `to_sync_database_url` routes the URL through `make_url().render_as_string()`,
     # which percent-encodes the path on Windows (e.g.
@@ -199,7 +202,11 @@ def _required_sqlalchemy_url(config: Config) -> str:
 @contextmanager
 def _sync_connection(sync_database_url: str) -> Iterator[Connection]:
     require_supported_database_backend(sync_database_url, operation="database inspection")
-    engine = create_engine(sync_database_url, future=True)
+    engine = (
+        create_oracle_sync_engine(sync_database_url, future=True)
+        if make_url(sync_database_url).get_backend_name() == "oracle"
+        else create_engine(sync_database_url, future=True)
+    )
     try:
         with engine.connect() as connection:
             yield connection
@@ -210,7 +217,11 @@ def _sync_connection(sync_database_url: str) -> Iterator[Connection]:
 @contextmanager
 def _sync_transaction(sync_database_url: str) -> Iterator[Connection]:
     require_supported_database_backend(sync_database_url, operation="database transaction")
-    engine = create_engine(sync_database_url, future=True)
+    engine = (
+        create_oracle_sync_engine(sync_database_url, future=True)
+        if make_url(sync_database_url).get_backend_name() == "oracle"
+        else create_engine(sync_database_url, future=True)
+    )
     try:
         with engine.begin() as connection:
             yield connection
@@ -655,6 +666,8 @@ def check_schema_drift(database_url: str) -> tuple[str, ...]:
     sync_database_url = _required_sqlalchemy_url(config)
 
     with _sync_connection(sync_database_url) as connection:
+        if make_url(sync_database_url).get_backend_name() == "oracle":
+            return oracle_schema_drift(connection, oracle_snapshot_from_metadata())
         migration_context = MigrationContext.configure(
             connection=connection,
             opts={
@@ -964,6 +977,15 @@ def _run_upgrade_locked(
     if state_before.is_ahead:
         raise _schema_ahead_error(state_before)
 
+    if make_url(database_url).get_backend_name() == "oracle":
+        # Oracle owns a separate baseline lineage. Historical SQLite/PostgreSQL
+        # migrations and legacy-ledger repairs never execute on this backend.
+        command.upgrade(config, revision)
+        return MigrationRunResult(
+            current_revision=_read_current_revision(_required_sqlalchemy_url(config)),
+            bootstrap=_NO_LEGACY_BOOTSTRAP,
+        )
+
     # Post-acquire re-check: a peer holding the lock first may already have
     # migrated to head. When alembic_version exists the legacy bootstrap never
     # stamps, and current == head means no legacy remap is pending, so skipping
@@ -1039,6 +1061,11 @@ def current_revision(database_url: str) -> str | None:
 
 
 def stamp_revision(database_url: str, revision: str, *, lock_timeout_seconds: float | None = None) -> None:
+    if make_url(database_url).get_backend_name().lower() == "oracle":
+        raise UnsupportedDatabaseBackendError(
+            "Stamping Oracle schemas is disabled; use codex-lb-db upgrade head "
+            "to install and verify the dedicated Oracle baseline."
+        )
     config = _build_alembic_config(database_url)
     sync_database_url = _required_sqlalchemy_url(config)
     with migration_lock(
@@ -1136,7 +1163,7 @@ def _print_oracle_schema_inventory(*, as_json: bool) -> bool:
                     "blockers": [asdict(blocker) for blocker in report.blockers],
                     "database_connection": "not_attempted",
                     "schema_mutation": "none",
-                    "oracle_runtime_support": "unsupported",
+                    "oracle_runtime_support": "single_instance_experimental",
                 },
                 indent=2,
                 sort_keys=True,
@@ -1144,7 +1171,7 @@ def _print_oracle_schema_inventory(*, as_json: bool) -> bool:
         )
     else:
         print("database_connection=not_attempted schema_mutation=none (offline metadata inventory)")
-        print("oracle_runtime_support=unsupported; this report does not verify application compatibility")
+        print("oracle_runtime_support=single_instance_experimental; inventory does not verify deployment health")
         print(f"table_count={report.table_count}")
         for kind, count in blocker_counts.items():
             print(f"{kind}={count}")

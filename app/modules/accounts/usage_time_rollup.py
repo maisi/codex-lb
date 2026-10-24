@@ -65,6 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import SQLCoreOperations
 
 from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
+from app.core.utils.sql import oracle_epoch_expr
 from app.core.utils.time import utcnow
 from app.db.models import (
     AccountUsageRollupState,
@@ -326,6 +327,15 @@ def _add_rows_stmt(
     session: AsyncSession, model, rows: Sequence, key_columns: tuple[str, ...], columns: tuple[str, ...]
 ):
     measure_columns = columns[len(key_columns) :]
+    if session.get_bind().dialect.name == "oracle":
+        from app.db.oracle_merge import merge_values
+
+        return merge_values(
+            model.__table__,
+            [dict(zip(columns, astuple(row), strict=True)) for row in rows],
+            key_columns,
+            add=measure_columns,
+        )
     stmt = _insert_fn(session)(model).values([dict(zip(columns, astuple(row), strict=True)) for row in rows])
     return stmt.on_conflict_do_update(
         index_elements=[getattr(model, column) for column in key_columns],
@@ -490,6 +500,10 @@ def _requested_at_epoch_bucket_expr(session: AsyncSession, bucket_seconds: int) 
     bucketing the read paths use (`RequestLogsRepository._bucket_epoch_expr`),
     so folded buckets and legacy raw bucketing can never disagree."""
     dialect = session.get_bind().dialect.name
+    if dialect == "oracle":
+        return cast(
+            func.floor(oracle_epoch_expr(RequestLog.requested_at) / bucket_seconds) * bucket_seconds, BigInteger
+        )
     if dialect == "postgresql":
         return cast(
             func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds,
@@ -512,8 +526,8 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
     # value UNclamped, otherwise clamp to [0, input]. SQLite's two-argument
     # min()/max() scalar functions are its least()/greatest().
     dialect = session.get_bind().dialect.name
-    least = func.least if dialect == "postgresql" else func.min
-    greatest = func.greatest if dialect == "postgresql" else func.max
+    least = func.least if dialect != "sqlite" else func.min
+    greatest = func.greatest if dialect != "sqlite" else func.max
     cached_clamped = case(
         (RequestLog.cached_input_tokens.is_(None), 0),
         (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),

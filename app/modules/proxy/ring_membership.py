@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
+from app.db.oracle_dml import oracle_upsert
 from app.db.session import close_session
 
 if TYPE_CHECKING:
@@ -43,6 +44,23 @@ class RingMembershipService:
             # Dialect-specific upsert
             dialect = session.get_bind().dialect.name
             metadata_json = _bridge_ring_metadata_json(endpoint_base_url)
+            if dialect == "oracle":
+                now = utcnow()
+                await oracle_upsert(
+                    session,
+                    BridgeRingMember,
+                    keys=("instance_id",),
+                    values={
+                        "id": str(uuid.uuid4()),
+                        "instance_id": instance_id,
+                        "registered_at": now,
+                        "last_heartbeat_at": now,
+                        "metadata_json": metadata_json,
+                    },
+                    update_values={"registered_at": now, "last_heartbeat_at": now, "metadata_json": metadata_json},
+                )
+                await session.commit()
+                return
             if dialect == "postgresql":
                 stmt = (
                     pg_insert(BridgeRingMember)
@@ -92,6 +110,22 @@ class RingMembershipService:
             dialect = session.get_bind().dialect.name
             now = utcnow()
             metadata_json = _bridge_ring_metadata_json(endpoint_base_url)
+            if dialect == "oracle":
+                await oracle_upsert(
+                    session,
+                    BridgeRingMember,
+                    keys=("instance_id",),
+                    values={
+                        "id": str(uuid.uuid4()),
+                        "instance_id": instance_id,
+                        "registered_at": now,
+                        "last_heartbeat_at": now,
+                        "metadata_json": metadata_json,
+                    },
+                    update_values={"last_heartbeat_at": now, "metadata_json": metadata_json},
+                )
+                await session.commit()
+                return
             if dialect == "postgresql":
                 stmt = (
                     pg_insert(BridgeRingMember)

@@ -79,7 +79,7 @@ def oracle_engine(monkeypatch: pytest.MonkeyPatch) -> _Engine:
         assert hide_parameters is True
         return engine
 
-    monkeypatch.setattr(lock_module, "create_engine", create_engine)
+    monkeypatch.setattr(lock_module, "create_oracle_sync_engine", create_engine)
     return engine
 
 

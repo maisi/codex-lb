@@ -1,4 +1,4 @@
-name: Oracle preparation
+name: Oracle single-instance validation
 
 on:
   workflow_dispatch:
@@ -11,7 +11,9 @@ on:
       - app/core/config/key_fingerprint.py
       - app/modules/accounts/refresh_claims.py
       - app/modules/accounts/oracle_refresh_claims.py
-      - app/modules/proxy/file_pin_repository.py
+      - app/modules/**
+      - app/core/utils/sql.py
+      - app/core/rate_limiter/**
       - tests/integration/test_oracle*.py
       - tests/unit/test_oracle*.py
       - pyproject.toml
@@ -27,7 +29,7 @@ concurrency:
 
 jobs:
   oracle-preparation:
-    name: Oracle Free preparation smoke
+    name: Oracle Free runtime smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
@@ -62,9 +64,17 @@ jobs:
           WHENEVER SQLERROR EXIT SQL.SQLCODE
           ALTER SESSION SET CONTAINER = FREEPDB1;
           GRANT EXECUTE ON SYS.DBMS_LOCK TO codex_test;
+          CREATE USER codex_baseline IDENTIFIED BY codex_baseline_test_only QUOTA UNLIMITED ON USERS;
+          GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE TO codex_baseline;
+          GRANT EXECUTE ON SYS.DBMS_LOCK TO codex_baseline;
+          CREATE USER codex_runtime IDENTIFIED BY codex_runtime_test_only QUOTA UNLIMITED ON USERS;
+          GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE TO codex_runtime;
+          GRANT EXECUTE ON SYS.DBMS_LOCK TO codex_runtime;
           EXIT;
           SQL
-      - name: Test Oracle preparation on an isolated database
+      - name: Test Oracle installation and runtime on isolated schemas
         env:
           CODEX_LB_TEST_ORACLE_URL: oracle+oracledb://codex_test:codex_test@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
+          CODEX_LB_TEST_ORACLE_BASELINE_URL: oracle+oracledb://codex_baseline:codex_baseline_test_only@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
+          CODEX_LB_TEST_ORACLE_RUNTIME_URL: oracle+oracledb://codex_runtime:codex_runtime_test_only@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
         run: make test-oracle

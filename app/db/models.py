@@ -27,7 +27,12 @@ from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
-from app.db.oracle_types import database_datetime, sha256_binary
+from app.db.oracle_types import (
+    configure_oracle_string_storage,
+    database_datetime,
+    database_epoch_default,
+    sha256_binary,
+)
 
 
 class Base(DeclarativeBase):
@@ -258,7 +263,7 @@ class AccountUsageRollupState(Base):
     hourly_folded_through: Mapped[datetime] = mapped_column(
         database_datetime(),
         nullable=False,
-        server_default=text("'1970-01-01 00:00:00'"),
+        server_default=database_epoch_default(),
     )
     # Watermark for the conversation presence satellite. Separate from
     # `hourly_folded_through` (same alignment invariant, same state row and
@@ -267,7 +272,7 @@ class AccountUsageRollupState(Base):
     conversation_folded_through: Mapped[datetime] = mapped_column(
         database_datetime(),
         nullable=False,
-        server_default=text("'1970-01-01 00:00:00'"),
+        server_default=database_epoch_default(),
     )
     # Start of the hourly range a legacy (pre-cancelled_count) fold pass may
     # have written after the migration ran (#1552 rolling-upgrade fence).
@@ -279,13 +284,13 @@ class AccountUsageRollupState(Base):
     upgrade_repair_from: Mapped[datetime | None] = mapped_column(
         database_datetime(),
         nullable=True,
-        server_default=text("'1970-01-01 00:00:00'"),
+        server_default=database_epoch_default(),
     )
 
     reports_folded_through: Mapped[datetime] = mapped_column(
         database_datetime(),
         nullable=False,
-        server_default=text("'1970-01-01 00:00:00'"),
+        server_default=database_epoch_default(),
     )
 
 
@@ -3163,3 +3168,6 @@ Index(
     AdditionalUsageHistory.used_percent.desc(),
     AdditionalUsageHistory.id.desc(),
 )
+
+
+configure_oracle_string_storage(Base.metadata)

@@ -13,11 +13,11 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, Sequence, Table, Text, create_engine, func, insert, select, text
+from sqlalchemy import Boolean, Column, Integer, MetaData, Sequence, Table, Text, func, insert, select, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.db.oracle_connection import create_oracle_async_engine, create_oracle_sync_engine
 from app.db.oracle_schema import OracleSchemaBlockerKind, inspect_oracle_schema
 from app.db.oracle_types import database_datetime, sha256_binary
 
@@ -28,11 +28,38 @@ pytestmark = [
 ]
 
 
+def test_oracle_boolean_predicates_preserve_nullable_is_semantics() -> None:
+    engine = create_oracle_sync_engine(_ORACLE_URL)
+    metadata = MetaData()
+    table = Table(
+        f"codex_bool_{uuid4().hex[:12]}",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("flag", Boolean, nullable=True),
+    )
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                insert(table), [{"id": 0, "flag": False}, {"id": 1, "flag": True}, {"id": 2, "flag": None}]
+            )
+            for predicate, expected in (
+                (table.c.flag.is_(True), [1]),
+                (table.c.flag.is_(False), [0]),
+                (table.c.flag.is_not(True), [0, 2]),
+                (table.c.flag.is_not(False), [1, 2]),
+            ):
+                assert list(connection.scalars(select(table.c.id).where(predicate).order_by(table.c.id))) == expected
+    finally:
+        metadata.drop_all(engine)
+        engine.dispose()
+
+
 @pytest.fixture
 def oracle_probe() -> Iterator[tuple[Engine, Table]]:
     pytest.importorskip("oracledb")
     assert make_url(_ORACLE_URL).drivername == "oracle+oracledb"
-    engine = create_engine(_ORACLE_URL, pool_pre_ping=True, hide_parameters=True)
+    engine = create_oracle_sync_engine(_ORACLE_URL, pool_pre_ping=True, hide_parameters=True)
     metadata = MetaData()
     name = f"codex_probe_{uuid4().hex[:12]}"
     table = Table(
@@ -107,7 +134,7 @@ def test_oracle_types_round_trip_generated_ids_precision_and_hashes(
 
 async def test_oracle_native_async_sqlalchemy_round_trip(oracle_probe: tuple[Engine, Table]) -> None:
     _, table = oracle_probe
-    engine = create_async_engine(_ORACLE_URL, hide_parameters=True)
+    engine = create_oracle_async_engine(_ORACLE_URL, pool_size=4, max_overflow=0)
     recorded_at = datetime(2026, 10, 23, 12, 34, 56, 654321)
     try:
         async with engine.begin() as connection:
@@ -170,13 +197,13 @@ def test_oracle_check_cli_preserves_existing_rows(oracle_probe: tuple[Engine, Ta
         assert connection.scalar(select(table.c.token_hash)) == b"d" * 32
 
 
-def test_oracle_upgrade_cli_refuses_incomplete_backend(oracle_probe: tuple[Engine, Table]) -> None:
+def test_oracle_stamp_cli_refuses_to_bypass_baseline(oracle_probe: tuple[Engine, Table]) -> None:
     engine, table = oracle_probe
 
-    result = _run_database_cli("upgrade")
+    result = _run_database_cli("stamp", "head")
 
     assert result.returncode != 0
-    assert "oracle-check" in result.stderr
+    assert "Stamping Oracle schemas is disabled" in result.stderr
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(table)) == 0
 

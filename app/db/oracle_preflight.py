@@ -114,7 +114,7 @@ def run_oracle_preflight(
     timeout_seconds: float = 10.0,
 ) -> None:
     _validate_timeout(timeout_seconds)
-    print("oracle_runtime_support=unverified; application startup and schema mutation remain unsupported")
+    print("oracle_runtime_support=single_instance; this check verifies connectivity only; HA remains unverified")
     print(f"pool_count_per_replica=2 pool_size={budget.pool_size} max_overflow={budget.max_overflow}")
     print(f"replicas={budget.replicas} extra_replicas={budget.extra_replicas} session_limit={budget.session_limit}")
     print(f"steady_sessions={budget.steady_sessions}")

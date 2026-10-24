@@ -11,12 +11,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import event, text
 from sqlalchemy.engine import Connection, Engine, make_url
 from sqlalchemy.pool import NullPool
 
 import app.db.migration_lock as lock_module
 from app.db.migration_lock import migration_lock
+from app.db.oracle_connection import create_oracle_sync_engine
 
 _ORACLE_URL = os.environ.get("CODEX_LB_TEST_ORACLE_URL", "")
 pytestmark = [
@@ -172,7 +173,7 @@ def test_oracle_mutex_survives_schema_commits_on_another_connection(
     processes: list[subprocess.Popen[str]], tmp_path: Path
 ) -> None:
     name = f"codex_lock_{uuid4().hex[:12]}"
-    engine = create_engine(_ORACLE_URL, poolclass=NullPool, hide_parameters=True)
+    engine = create_oracle_sync_engine(_ORACLE_URL, poolclass=NullPool, hide_parameters=True)
     created = False
     try:
         with migration_lock(_ORACLE_URL, timeout_seconds=5):
@@ -202,11 +203,11 @@ def test_oracle_mutex_survives_commit_on_its_own_connection(
     connections: list[Connection] = []
 
     def observe_engine(url: str, *, future: bool, poolclass: type[NullPool], hide_parameters: bool) -> Engine:
-        engine = create_engine(url, future=future, poolclass=poolclass, hide_parameters=hide_parameters)
+        engine = create_oracle_sync_engine(url, future=future, poolclass=poolclass, hide_parameters=hide_parameters)
         event.listen(engine, "engine_connect", connections.append)
         return engine
 
-    monkeypatch.setattr(lock_module, "create_engine", observe_engine)
+    monkeypatch.setattr(lock_module, "create_oracle_sync_engine", observe_engine)
     with migration_lock(_ORACLE_URL, timeout_seconds=5):
         assert len(connections) == 1
         connections[0].commit()

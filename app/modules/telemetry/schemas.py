@@ -15,7 +15,7 @@ class TelemetryModel(BaseModel):
 
 class DeploymentSnapshot(TelemetryModel):
     method: DeploymentMethod
-    db_backend: Literal["sqlite", "postgres"]
+    db_backend: Literal["sqlite", "postgres", "oracle"]
     db_size_bucket: Literal["unknown", "<100MB", "100MB-1GB", "1-5GB", "5-10GB", "10-50GB", "50GB+"]
     replicas: int = Field(ge=1)
     reverse_proxy: bool

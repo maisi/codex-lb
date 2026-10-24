@@ -14,6 +14,7 @@ from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SE
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import DashboardSettings, DashboardUser, LocalLoginPolicy, ModelContextWindowOverride
+from app.db.oracle_dml import oracle_upsert
 from app.modules.dashboard_users.repository import DashboardUsersRepository
 
 _SETTINGS_ID = 1
@@ -582,6 +583,16 @@ class ModelContextWindowOverridesRepository:
         the ORM ``onupdate`` does not fire for a Core insert.
         """
         dialect = self._session.get_bind().dialect.name
+        if dialect == "oracle":
+            await oracle_upsert(
+                self._session,
+                ModelContextWindowOverride,
+                keys=("slug",),
+                values={"slug": slug, "context_window": context_window},
+                update_values={"context_window": context_window, "updated_at": func.now()},
+            )
+            await self._session.commit()
+            return
         insert_fn = _UPSERT_INSERT_FNS.get(dialect)
         if insert_fn is None:
             raise RuntimeError(f"model_context_window_overrides upsert unsupported for dialect={dialect!r}")

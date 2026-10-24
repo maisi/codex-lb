@@ -154,7 +154,6 @@ def test_schema_report_identifies_representation_decisions_without_mutating_meta
         (OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION, "alias"),
         (OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION, "description"),
         (OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION, "bounded_variant"),
-        (OracleSchemaBlockerKind.PARTIAL_INDEX, "uq_example_active_key"),
     }
     assert all(blocker.table_name == "example" for blocker in report.blockers)
     assert "NOT NULL" in next(
@@ -166,20 +165,9 @@ def test_schema_report_identifies_representation_decisions_without_mutating_meta
     assert str(CreateIndex(index).compile(dialect=sqlite.dialect())) == original_index
 
 
-def test_application_schema_report_keeps_invite_uniqueness_and_rollup_empty_keys_explicit() -> None:
+def test_application_schema_inventory_has_explicit_oracle_storage() -> None:
     report = inspect_oracle_schema()
-    blockers = {(blocker.kind, blocker.table_name, blocker.object_name) for blocker in report.blockers}
 
     assert report.table_count == len(Base.metadata.tables)
-    assert (OracleSchemaBlockerKind.UNBOUNDED_STRING, "accounts", "id") in blockers
-    assert (
-        OracleSchemaBlockerKind.PARTIAL_INDEX,
-        "dashboard_user_invites",
-        "uq_dashboard_user_invites_expected_identity",
-    ) in blockers
-    assert (
-        OracleSchemaBlockerKind.EMPTY_STRING_REPRESENTATION,
-        "request_report_hourly_rollups",
-        "api_key_id",
-    ) in blockers
+    assert report.blockers == ()
     assert inspect_oracle_schema() == report
