@@ -39,7 +39,7 @@ ENV PATH="/opt/venv/bin:/usr/local/bin:$PATH"
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project --extra metrics --extra tracing
+    uv sync --frozen --no-dev --no-install-project --extra metrics --extra tracing --extra oracle
 
 FROM python:3.14-slim AS runtime
 

@@ -1192,6 +1192,16 @@ def _parse_args() -> argparse.Namespace:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    transfer_parser = subparsers.add_parser(
+        "migrate-to-oracle", help="Transfer all application data from a stopped SQLite installation to fresh Oracle."
+    )
+    transfer_parser.add_argument("--source-sqlite", type=Path, required=True, help="Existing source SQLite database.")
+    transfer_parser.add_argument(
+        "--source-key-file", type=Path, help="Existing encryption key (default: encryption.key beside source SQLite)."
+    )
+    transfer_parser.add_argument("--batch-size", type=int, default=500, help="Rows per batch, 1-10000 (default: 500).")
+    transfer_parser.add_argument("--dry-run", action="store_true", help="Validate without changing the Oracle target.")
+
     oracle_schema_parser = subparsers.add_parser(
         "oracle-schema", help="Inspect Oracle schema blockers offline; no driver, database URL or connection required."
     )
@@ -1287,6 +1297,25 @@ def main() -> None:
         return
 
     database_url = get_settings().database_url if args.db_url is None else args.db_url
+
+    if args.command == "migrate-to-oracle":
+        from app.db.oracle_transfer import OracleTransferError, transfer_sqlite_to_oracle
+
+        try:
+            report = transfer_sqlite_to_oracle(
+                database_url,
+                source_sqlite=args.source_sqlite,
+                source_key_file=args.source_key_file,
+                batch_size=args.batch_size,
+                dry_run=args.dry_run,
+            )
+        except (OracleTransferError, OraclePreflightError) as exc:
+            raise SystemExit(str(exc)) from None
+        print(f"oracle_transfer={'dry_run' if report.dry_run else 'complete'}")
+        print(f"tables={len(report.tables)} rows={sum(table.rows for table in report.tables)}")
+        print(f"target_preparation_required={str(report.needs_target_preparation).lower()}")
+        print("cutover_requires=existing_encryption_key_and_data_directory_including_archives")
+        return
 
     if args.command == "oracle-check":
         settings = get_settings()
