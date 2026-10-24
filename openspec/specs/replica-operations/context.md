@@ -13,7 +13,7 @@ guarded at startup, and which cross-replica behaviors are best-effort.
 
 A supported multi-replica deployment looks like:
 
-- **Shared PostgreSQL** (`CODEX_LB_DATABASE_URL=postgresql+asyncpg://...`) — every cross-replica
+- **Shared PostgreSQL**, or the [Oracle process-failover pilot](oracle-ha.md) — every cross-replica
   coordination primitive lives in this database: `scheduler_leader` (leader lease),
   `bridge_ring_members` (ring membership + advertise endpoints), `http_bridge_sessions`
   (bridge session ownership), `cache_invalidation` (settings/selection cache bus),
@@ -43,7 +43,11 @@ database-arbitrated on SQLite through the same conditional lease update used for
 is not bypassed. Multi-process SQLite is still unsupported because concurrent writers risk
 `database is locked` failures and network filesystems add corruption risk. Do not use
 `uvicorn --workers N` or share one SQLite file between containers; scaling out means moving to
-PostgreSQL.
+PostgreSQL or the Oracle pilot.
+
+Oracle's pilot uses one worker per instance and preserves explicit process-failover/client-retry
+boundaries. The [Oracle operations context](oracle-ha.md) explains the shared secrets, sixteen/
+twenty-four-session pool budget, lease/retry behavior and feasibility of later stream continuation.
 
 ## Why the encryption-key fingerprint sentinel
 

@@ -70,6 +70,7 @@ nav:
   - Deployment:
       - Docker: deployment/docker.md
       - Kubernetes: deployment/kubernetes.md
+      - Oracle failover pilot: deployment/oracle-ha.md
       - Remote Access: deployment/remote.md
   - Reference:
       - Settings: reference/settings.md

@@ -4,7 +4,7 @@ SQLite is the default database backend and needs no configuration. PostgreSQL is
 
 ## Oracle Autonomous Database
 
-Experimental single-instance Oracle operation is available with the optional native Thin driver. Installation, dashboard settings, account import, API keys, proxy accounting/logging and restart have been exercised on OCI over the TP service. HA remains unverified.
+Experimental Oracle operation is available with the optional native Thin driver. Installation, dashboard settings, account import, API keys, proxy accounting/logging and restart have been exercised on OCI over the TP service. The [two-instance failover pilot](deployment/oracle-ha.md) adds a shared-schema topology with process-failure/client-retry acceptance; active streams can still be interrupted.
 
 Install the driver with `uv sync --frozen --extra oracle`, and supply an `oracle+oracledb://` URL and wallet options through a protected `CODEX_LB_DATABASE_URL` secret/environment file. Use a dedicated application schema with CREATE SESSION/TABLE/SEQUENCE, a tablespace quota and EXECUTE on SYS.DBMS_LOCK. Then run:
 
@@ -17,7 +17,7 @@ uv run --extra oracle codex-lb --host 127.0.0.1 --port 2455
 
 Oracle defaults to four connections and zero overflow per pool, eight application sessions in total. Explicit existing pool settings override these defaults. Previously unbounded identifier fields have an Oracle-specific limit of 1024 UTF-8 bytes; free-form text remains CLOB. SQLite/PostgreSQL behavior is unchanged.
 
-The read-only connection check and offline `oracle-schema --json` inventory do not establish application or HA readiness. For wallet configuration, migration permissions, storage limits, timeout behavior and the remaining HA scope, see the owning [Oracle database capability](https://github.com/maisi/codex-lb/tree/main/openspec/specs/oracle-database).
+The read-only connection check and offline `oracle-schema --json` inventory do not establish application or HA readiness. For wallet configuration, migration permissions, storage limits, timeout behavior and acceptance limits, see the owning [Oracle database capability](https://github.com/maisi/codex-lb/tree/main/openspec/specs/oracle-database).
 
 ## Data paths
 
