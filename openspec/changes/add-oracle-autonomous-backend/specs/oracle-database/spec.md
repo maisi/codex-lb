@@ -188,6 +188,16 @@ Oracle runtime SHALL preserve distinct empty-string and NULL values, timestamp m
 - **THEN** the application bounds cleanup and prevents reuse of an in-flight connection
 - **AND** subsequent requests can obtain a usable connection
 
+### Requirement: Oracle bridge maintenance preserves bounded ownership fences
+
+Oracle bridge retention and abandonment scans SHALL select and lock eligible operations in bounded batches using SQL supported by Oracle Free and Autonomous. Retention MUST delete at most the requested number of operations, MUST preserve nonterminal operations while their owning session has a live owner lease, and MUST recheck eligibility before deleting selected operations.
+
+#### Scenario: Old operations include a live nonterminal operation
+- **GIVEN** old terminal operations and an old nonterminal operation whose owner lease is live
+- **WHEN** Oracle retention processes a limited batch
+- **THEN** it deletes at most that many eligible operations
+- **AND** the live nonterminal operation remains until its owner becomes stale
+
 
 ### Requirement: Oracle defaults fit a single Free instance
 

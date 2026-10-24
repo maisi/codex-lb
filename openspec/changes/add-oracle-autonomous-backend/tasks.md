@@ -42,3 +42,4 @@
 - [x] 5.4 Port single-instance startup and application repository paths, including settings, accounts, keys, usage/logs, sticky routing and optional bridge paths; preserve SQLite/PostgreSQL contracts.
 - [x] 5.5 Verify startup, dashboard/API persistence, account/key operations, stubbed proxy request accounting, restart and shutdown on real Oracle with no changes to existing administrator schema/data.
 - [x] 5.6 Enable runtime only after the milestone verification passes; document single-instance scope and remaining HA tasks and update the PR with exact evidence.
+- [x] 5.7 Verify limited bridge retention/abandonment and cost-backfill row locking on Oracle Free as well as Autonomous, including live-owner protection and resume/idempotency, and resolve the Oracle CI failure.

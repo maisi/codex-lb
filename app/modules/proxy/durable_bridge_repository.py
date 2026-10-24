@@ -10,7 +10,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any, cast
 
-from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
+from sqlalchemy import Row, Select, and_, case, delete, exists, func, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -297,6 +297,17 @@ class DurableBridgeOperationPurgeBatchResult:
 class DurableBridgeRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    def _lock_operation_batch(self, statement: Select) -> Select:
+        if self._session.get_bind().dialect.name == "oracle":
+            # Oracle Free rejects FETCH FIRST ... FOR UPDATE (ORA-02014).
+            # Bound candidate IDs inside an independent subquery, then lock
+            # their operation/session join without a row-limiting clause.
+            # The original eligibility filters and later DELETE recheck stay
+            # in place, preserving a live owner's duplicate-suppression fence.
+            candidate_ids = statement.with_only_columns(HttpBridgeOperationRecord.operation_id).correlate(None)
+            statement = statement.limit(None).where(HttpBridgeOperationRecord.operation_id.in_(candidate_ids))
+        return statement.with_for_update()
 
     async def _commit_writer_section(self) -> None:
         async with sqlite_writer_section():
@@ -2145,7 +2156,7 @@ class DurableBridgeRepository:
                     )
                     .limit(page_size)
                 )
-                statement = statement.with_for_update()
+                statement = self._lock_operation_batch(statement)
                 selected = await self._session.execute(statement)
                 page = list(selected.all())
                 if not page:
@@ -2630,7 +2641,7 @@ class DurableBridgeRepository:
         )
         purgeable = or_(HttpBridgeOperationRecord.state.in_(terminal_states), stale_nonterminal)
         async with sqlite_writer_section():
-            selected = await self._session.execute(
+            statement = (
                 select(HttpBridgeOperationRecord)
                 .join(
                     HttpBridgeSessionRecord,
@@ -2639,8 +2650,8 @@ class DurableBridgeRepository:
                 .where(HttpBridgeOperationRecord.updated_at < cutoff, purgeable)
                 .order_by(HttpBridgeOperationRecord.updated_at.asc())
                 .limit(batch_size)
-                .with_for_update()
             )
+            selected = await self._session.execute(self._lock_operation_batch(statement))
             # The joined FOR UPDATE locks both the operation and owning
             # session on PostgreSQL, serializing retention deletion with
             # claim_session() on the same continuity row.
