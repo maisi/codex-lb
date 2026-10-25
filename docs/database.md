@@ -56,6 +56,14 @@ Before Oracle accepts new application writes, recovery can return to the stopped
 
 For the short operational checklist, use the [compact Docker migration runbook](https://github.com/maisi/codex-lb/blob/main/openspec/specs/oracle-database/docker-migration-runbook.md).
 
+To automate that checklist from the updated checkout, create your protected `.env.oracle` and run:
+
+```sh
+bash scripts/migrate-sqlite-to-oracle-docker.sh --env-file .env.oracle --build --apply
+```
+
+The script checks image/connectivity, stops `codex-lb`, saves a new private data-directory backup, and runs dry-run, transfer and schema check. It prints a separate application start command and never restarts an application on failure. Without `--apply` it only validates and requires a stopped source. Add `--network` and repeatable `--mount` options for the Oracle connection/wallet; `--help` covers custom paths and image/container names. Back up external keys/wallets separately. The following commands remain the manual alternative.
+
 Both Dockerfiles include the Oracle Thin driver. Until a release containing the transfer is published, build the image from the updated checkout; pulling an older `latest` image will not include the command. These examples assume the existing container is named `codex-lb` and uses `/var/lib/codex-lb/store.db`. Substitute your actual container name/path.
 
 ```sh

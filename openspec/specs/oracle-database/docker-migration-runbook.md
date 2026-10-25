@@ -4,6 +4,20 @@ Scope: one stopped installation, all application tables, and a fresh dedicated O
 
 Keep the existing data volume and encryption key. These examples assume container `codex-lb` and `/var/lib/codex-lb/store.db`. Keep all source/target application processes stopped during transfer. Add any required Docker network and read-only wallet mount to both `db()` and the application command below; `--volumes-from` inherits mounts only.
 
+## Automated host script
+
+Create the protected `.env.oracle` described below, then run from the updated checkout:
+
+```bash
+bash scripts/migrate-sqlite-to-oracle-docker.sh --env-file .env.oracle --build --apply
+```
+
+This checks the image/Oracle connection before downtime, stops `codex-lb`, backs up its complete data directory into a new private directory under `~/codex-lb-backups/`, runs dry-run/transfer/schema-check, and prints the application start command. The start command is not executed. No application is restarted after failures. Backups are retained, including incomplete copies when copying fails.
+
+Without `--apply` the script only validates and requires an already stopped source; `--dry-run` selects that mode explicitly. No source stop or backup occurs in this mode. `--build` is optional when the chosen image already contains the transfer. `--container`, `--image`, `--backup-dir`, `--data-dir`, `--source-sqlite` and `--source-key-file` adapt paths; the database must remain inside the backed-up data directory. Existing backup destinations are refused. Custom keys/wallets outside that directory need separate backups.
+
+Use `--network NETWORK` and repeatable `--mount 'type=bind,src=/absolute/wallet,dst=/wallet,readonly'` for connection requirements. These are forwarded to every helper and the printed start example. The script passes the environment file to Docker without sourcing it or printing its contents. It rejects missing data mounts and inherited application-code mounts that would hide the updated image. Stop other workers/orchestrators sharing the source/target; the wrapper cannot stop arbitrary deployments for you. `--help` lists options. The manual equivalent follows.
+
 ## 1. Prepare
 
 From this updated repository checkout, build the image. Create `.env.oracle` with your original runtime settings and the target `CODEX_LB_DATABASE_URL` (native `oracle+oracledb://` URL, encoded credentials, wallet options if needed). The target needs CREATE SESSION/TABLE/SEQUENCE, a tablespace quota and EXECUTE on SYS.DBMS_LOCK. Oracle must be reachable from Docker; `localhost` refers to the container itself.

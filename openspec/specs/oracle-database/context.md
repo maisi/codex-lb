@@ -66,6 +66,8 @@ The shared database is a dependency for both application hosts. Always Free's do
 
 For copy-and-run Docker commands, use the [compact migration runbook](docker-migration-runbook.md).
 
+The host-side `scripts/migrate-sqlite-to-oracle-docker.sh` orchestrates those commands. Default/explicit dry run requires a stopped source and changes no Oracle data; `--apply` checks image/connectivity, reserves a private backup, stops and copies the source directory, then invokes the existing dry run, transfer and schema check. `--build` is opt-in. All helpers share environment/network/mount arguments and bypass image startup. The script rejects missing source data mounts, inherited application-code mounts and existing backup targets. It retains partial backups on failure, never restarts an installation or retries transfer, and prints a quoted cutover example. External key/wallet backups and stopping other workers/orchestrators remain operator responsibilities.
+
 `codex-lb-db migrate-to-oracle` moves all current application tables from a stopped SQLite installation into a fresh dedicated Oracle schema. It includes accounts, API keys, dashboard users/settings, history, conversations and coordination records. SQLite migration ledgers and deliberately retired physical fields are not part of the Oracle application schema. The [requirements](spec.md) govern completeness, source preservation, pristine-target checks and verification.
 
 Stop all source and target processes, back up the complete source data directory, install the Oracle extra and configure a protected Oracle URL/wallet. Then, with the existing data directory accessible:
