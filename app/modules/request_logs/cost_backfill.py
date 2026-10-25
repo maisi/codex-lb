@@ -46,22 +46,26 @@ async def backfill_missing_costs(session: AsyncSession, *, after_id: int = 0, li
             await lock_fold_state(session)
             state = await session.get(AccountUsageRollupState, 1, populate_existing=True)
             assert state is not None
-            logs = (
-                await session.scalars(
-                    select(RequestLog)
-                    .where(
-                        RequestLog.id > after_id,
-                        RequestLog.cost_usd.is_(None),
-                        RequestLog.model_source_id.is_(None),
-                        or_(RequestLog.model_source_kind.is_(None), RequestLog.model_source_kind == "subscription"),
-                        RequestLog.input_tokens.is_not(None),
-                        or_(RequestLog.output_tokens.is_not(None), RequestLog.reasoning_tokens.is_not(None)),
-                    )
-                    .order_by(RequestLog.id)
-                    .limit(limit)
-                    .with_for_update()
+            statement = (
+                select(RequestLog)
+                .where(
+                    RequestLog.id > after_id,
+                    RequestLog.cost_usd.is_(None),
+                    RequestLog.model_source_id.is_(None),
+                    or_(RequestLog.model_source_kind.is_(None), RequestLog.model_source_kind == "subscription"),
+                    RequestLog.input_tokens.is_not(None),
+                    or_(RequestLog.output_tokens.is_not(None), RequestLog.reasoning_tokens.is_not(None)),
                 )
-            ).all()
+                .order_by(RequestLog.id)
+                .limit(limit)
+            )
+            if session.get_bind().dialect.name == "oracle":
+                # Oracle Free rejects FETCH FIRST on the locking SELECT. Bound
+                # IDs independently, then retain every eligibility predicate
+                # on the outer read before locking the selected log rows.
+                candidate_ids = statement.with_only_columns(RequestLog.id).correlate(None)
+                statement = statement.limit(None).where(RequestLog.id.in_(candidate_ids))
+            logs = (await session.scalars(statement.with_for_update())).all()
             updated = 0
             for log in logs:
                 cost = calculated_cost_from_log(cast(RequestLogLike, log))

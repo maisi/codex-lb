@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Insert
 
 from app.db.models import CapabilityLineageMarker
+from app.db.oracle_dml import oracle_upsert
 from app.db.session import sqlite_writer_section
 from app.modules.proxy.capability_lineage import (
     CapabilityLineageAlias,
@@ -63,7 +64,16 @@ class CapabilityLineageRepository:
             # Overlapping alias sets must lock rows in one global order on
             # PostgreSQL so concurrent reconnects cannot deadlock A->B/B->A.
             for marker_hash in sorted(marker_hashes):
-                await self._session.execute(self._upsert_statement(marker_hash))
+                if self._session.get_bind().dialect.name == "oracle":
+                    await oracle_upsert(
+                        self._session,
+                        CapabilityLineageMarker,
+                        keys=("marker_hash",),
+                        values={"marker_hash": marker_hash},
+                        update_values={"last_seen_at": func.now()},
+                    )
+                else:
+                    await self._session.execute(self._upsert_statement(marker_hash))
             await self._session.commit()
         return marker_hashes
 

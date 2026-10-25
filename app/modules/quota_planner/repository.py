@@ -7,9 +7,7 @@ from typing import cast as typing_cast
 
 from sqlalchemy import (
     ColumnElement,
-    Integer,
     and_,
-    cast,
     false,
     func,
     literal,
@@ -22,7 +20,9 @@ from sqlalchemy import (
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.utils.sql import bucket_epoch_expr
 from app.core.utils.time import to_utc_naive, utcnow
+from app.db.account_identity_lock import lock_postgresql_account_identities
 from app.db.models import (
     Account,
     QuotaPlannerDecision,
@@ -31,6 +31,7 @@ from app.db.models import (
     RequestDemandQuarterRollup,
     RequestLog,
 )
+from app.db.oracle_dml import oracle_insert_if_absent
 from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_time_rollup import QUARTER_SLOT_SECONDS, from_dimension
 from app.modules.accounts.usage_time_rollup_read import (
@@ -89,6 +90,8 @@ _SQLITE_NOW = "(strftime('%Y-%m-%d %H:%M:%f', 'now') || '000')"
 
 
 def _db_now_expr(dialect_name: str) -> ColumnElement[datetime]:
+    if dialect_name == "oracle":
+        return typing_cast(ColumnElement[datetime], literal_column("SYS_EXTRACT_UTC(SYSTIMESTAMP)"))
     if dialect_name == "postgresql":
         return typing_cast(ColumnElement[datetime], func.clock_timestamp())
     return typing_cast(ColumnElement[datetime], literal_column(_SQLITE_NOW))
@@ -96,6 +99,11 @@ def _db_now_expr(dialect_name: str) -> ColumnElement[datetime]:
 
 def _db_now_plus_seconds_expr(dialect_name: str, *, ttl_seconds: float) -> ColumnElement[datetime]:
     ttl_seconds = max(1.0, float(ttl_seconds))
+    if dialect_name == "oracle":
+        return typing_cast(
+            ColumnElement[datetime],
+            literal_column(f"(SYS_EXTRACT_UTC(SYSTIMESTAMP) + NUMTODSINTERVAL({ttl_seconds:.3f}, 'SECOND'))"),
+        )
     if dialect_name == "postgresql":
         return typing_cast(
             ColumnElement[datetime],
@@ -235,6 +243,15 @@ class QuotaPlannerRepository:
         # Idempotency-key upsert: concurrent writers (e.g. overlapping planner
         # leaders during a leadership handover) converge on the surviving row
         # instead of raising IntegrityError and aborting the planning tick.
+        if self._dialect_name() == "oracle":
+            await oracle_insert_if_absent(self._session, QuotaPlannerDecision, values)
+            await self._session.commit()
+            surviving = await self._session.scalar(
+                select(QuotaPlannerDecision).where(QuotaPlannerDecision.idempotency_key == idempotency_key)
+            )
+            if surviving is None:
+                raise RuntimeError("Oracle quota decision insert did not resolve its idempotency key")
+            return surviving
         if self._dialect_name() == "postgresql":
             insert_stmt = postgresql.insert(QuotaPlannerDecision).values(**values)
         else:
@@ -347,6 +364,8 @@ class QuotaPlannerRepository:
             # statement snapshot (and, on PostgreSQL, the advisory lock scope)
             # is not tied to earlier reads on this session.
             await self._session.commit()
+            if dialect_name == "oracle":
+                await lock_postgresql_account_identities(self._session, (_WARMUP_BUDGET_LOCK_KEY,))
             if dialect_name == "postgresql":
                 await self._session.execute(
                     text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
@@ -663,11 +682,7 @@ class QuotaPlannerRepository:
     @staticmethod
     def _raw_demand_bins_stmt(windows: list[RawWindow], bucket_seconds: int, dialect: str):
         """Legacy-grain GROUP BY over the raw ``request_logs`` tail."""
-        if dialect == "postgresql":
-            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
-        else:
-            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
-            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+        bucket_expr = bucket_epoch_expr(RequestLog.requested_at, dialect=dialect, bucket_seconds=bucket_seconds)
         bucket_col = bucket_expr.label("slot_epoch")
         request_kind = func.coalesce(RequestLog.request_kind, literal("real")).label("request_kind")
         stmt = (

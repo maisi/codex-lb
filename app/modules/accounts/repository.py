@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, delete, func, or_, select, text, update
+from sqlalchemy import case, delete, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
@@ -35,6 +35,7 @@ from app.db.models import (
     StickySessionKind,
     UsageHistory,
 )
+from app.db.oracle_dml import oracle_insert_if_absent
 from app.db.session import sqlite_writer_section
 from app.db.sqlite_lock_retry import retry_on_sqlite_lock
 from app.modules.accounts.usage_rollup import (
@@ -344,7 +345,7 @@ class AccountsRepository:
             # the identity-reconciliation branch is already mutually
             # exclusive on this dialect.
             await self._acquire_sqlite_merge_lock()
-        elif dialect_name == "postgresql":
+        elif dialect_name in {"postgresql", "oracle"}:
             # Upstream identity membership always serializes before email
             # locks and account row locks. This applies to ordinary imports as
             # well as explicit identity reconciliation because either can add,
@@ -446,7 +447,7 @@ class AccountsRepository:
     async def replace_reauthorized(self, account_id: str, account: Account) -> Account | None:
         """Replace credentials on the exact local row selected for reauthentication."""
         async with sqlite_writer_section():
-            if self._dialect_name() == "postgresql":
+            if self._dialect_name() in {"postgresql", "oracle"}:
                 existing = await self._lock_postgresql_account_identity_membership(
                     account_id,
                     account.chatgpt_account_id,
@@ -501,7 +502,7 @@ class AccountsRepository:
         dialect_name = self._dialect_name()
         if dialect_name == "sqlite":
             await self._acquire_sqlite_merge_lock()
-        elif dialect_name == "postgresql":
+        elif dialect_name in {"postgresql", "oracle"}:
             locked_identities = await self._lock_postgresql_upsert_identity_candidates(
                 account,
                 include_email=True,
@@ -824,7 +825,7 @@ class AccountsRepository:
                 # Guards permanent refresh-failure downgrades: a concurrent
                 # re-auth/import rotates the token ciphertext without touching
                 # status/reason/reset, and this write must lose that race.
-                stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
+                stmt = stmt.where(self._refresh_token_matches(expected_refresh_token_encrypted))
             result = await self._session.execute(stmt)
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):
@@ -889,19 +890,30 @@ class AccountsRepository:
             insert_fn = pg_insert
         elif dialect == "sqlite":
             insert_fn = sqlite_insert
+        elif dialect == "oracle":
+            insert_fn = None
         else:
             raise RuntimeError(f"Hard-sticky outage grace seeding sentinel unsupported for dialect={dialect!r}")
-        stamp_stmt = (
-            insert_fn(RuntimeSentinel)
-            .values(name=_HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL, value=utcnow().isoformat())
-            .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
-            .returning(RuntimeSentinel.name)
-        )
+        stamp_stmt = None
+        if insert_fn is not None:
+            stamp_stmt = (
+                insert_fn(RuntimeSentinel)
+                .values(name=_HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL, value=utcnow().isoformat())
+                .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
+                .returning(RuntimeSentinel.name)
+            )
 
         async def seed_once() -> int:
             async with sqlite_writer_section():
-                stamp_result = await self._session.execute(stamp_stmt)
-                stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
+                if stamp_stmt is None:
+                    stamped_by_this_boot = await oracle_insert_if_absent(
+                        self._session,
+                        RuntimeSentinel,
+                        {"name": _HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL, "value": utcnow().isoformat()},
+                    )
+                else:
+                    stamp_result = await self._session.execute(stamp_stmt)
+                    stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
                 if not stamped_by_this_boot:
                     await self._session.commit()
                     return 0
@@ -1065,7 +1077,7 @@ class AccountsRepository:
         wiped_token = encryptor.encrypt("")
         async with sqlite_writer_section():
             seat_stmt = select(Account.chatgpt_user_id, Account.id_token_encrypted).where(Account.id == account_id)
-            if self._dialect_name() == "postgresql":
+            if self._dialect_name() in {"postgresql", "oracle"}:
                 # Hold the row through the mark so the derived seat identity
                 # cannot go stale between this read and the update below.
                 seat_stmt = seat_stmt.with_for_update(key_share=True)
@@ -1120,7 +1132,7 @@ class AccountsRepository:
         only_pending: bool = False,
     ) -> bool:
         async with sqlite_writer_section():
-            if self._dialect_name() == "postgresql":
+            if self._dialect_name() in {"postgresql", "oracle"}:
                 # Identity membership precedes the fold-state lock so live
                 # settlement and deletion cannot form an identity/fold cycle.
                 locked_account = await self._lock_postgresql_account_identity_membership(account_id, None)
@@ -1177,7 +1189,7 @@ class AccountsRepository:
             # after this transaction, resurrecting the account's folded rows
             # the mirrors below just moved or removed.
             await lock_fold_state(self._session)
-            if self._dialect_name() == "postgresql":
+            if self._dialect_name() in {"postgresql", "oracle"}:
                 # Upgrade the account row to a full FOR UPDATE lock BEFORE the
                 # raw sweeps. FOR UPDATE conflicts with the KEY SHARE taken by
                 # concurrent request-log FK inserts, so every in-flight
@@ -1256,7 +1268,7 @@ class AccountsRepository:
         material at all).
         """
         async with sqlite_writer_section():
-            if self._dialect_name() == "postgresql":
+            if self._dialect_name() in {"postgresql", "oracle"}:
                 await self._lock_postgresql_account_identity_membership(account_id, chatgpt_account_id)
             values: dict[str, bytes | datetime | str] = {
                 "access_token_encrypted": access_token_encrypted,
@@ -1284,7 +1296,7 @@ class AccountsRepository:
                 # Compare-and-set on the exact ciphertext the caller read before
                 # the upstream exchange, so a concurrent rotation is never
                 # clobbered by a slower writer.
-                .where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
+                .where(self._refresh_token_matches(expected_refresh_token_encrypted))
                 .values(**values)
                 .returning(Account.id)
             )
@@ -1316,7 +1328,7 @@ class AccountsRepository:
         no-op existence check.
         """
         async with sqlite_writer_section():
-            if self._dialect_name() == "postgresql":
+            if self._dialect_name() in {"postgresql", "oracle"}:
                 await self._lock_postgresql_account_identity_membership(account_id, chatgpt_account_id)
             values: dict[str, str | datetime] = {}
             if plan_type is not None:
@@ -1547,7 +1559,20 @@ class AccountsRepository:
             # transaction, serializing concurrent writers.
             await self._session.execute(text("UPDATE accounts SET id = id WHERE 1 = 0"))
 
+    def _refresh_token_matches(self, ciphertext: bytes):
+        if self._dialect_name() == "oracle":
+            return (
+                func.dbms_lob.compare(
+                    Account.refresh_token_encrypted, literal(ciphertext, type_=Account.refresh_token_encrypted.type)
+                )
+                == 0
+            )
+        return Account.refresh_token_encrypted == ciphertext
+
     async def _acquire_postgresql_merge_lock(self, email: str) -> None:
+        if self._dialect_name() == "oracle":
+            await lock_postgresql_account_identities(self._session, (f"merge-email:{email}",))
+            return
         lock_key = advisory_lock_key("merge-email", email)
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
@@ -1555,6 +1580,9 @@ class AccountsRepository:
         )
 
     async def _acquire_postgresql_identity_lock(self, account_id: str) -> None:
+        if self._dialect_name() == "oracle":
+            await lock_postgresql_account_identities(self._session, (f"local-account:{account_id}",))
+            return
         lock_key = advisory_lock_key("account-id", account_id)
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),

@@ -6,6 +6,7 @@ from sqlalchemy import func, insert, literal, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.account_identity_lock import lock_postgresql_account_identities
 from app.db.models import AccountLimitWarmup
 from app.db.session import sqlite_writer_section
 
@@ -106,6 +107,25 @@ class LimitWarmupRepository:
         )
         try:
             async with sqlite_writer_section():
+                if self._dialect_name() == "oracle":
+                    await lock_postgresql_account_identities(self._session, [f"limit_warmup:{account_id}"])
+                    allowed = await self._session.scalar(select(literal(1)).where(*insert_conditions))
+                    if allowed is None:
+                        await self._session.commit()
+                        return None
+                    insert_stmt = (
+                        insert(AccountLimitWarmup)
+                        .values(
+                            account_id=account_id,
+                            window=window,
+                            reset_at=reset_at,
+                            transition_key=transition_key,
+                            status=status,
+                            model=model,
+                            attempted_at=attempted_at,
+                        )
+                        .returning(AccountLimitWarmup.id)
+                    )
                 if self._dialect_name() == "postgresql":
                     await self._session.execute(
                         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),

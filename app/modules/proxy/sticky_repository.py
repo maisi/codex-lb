@@ -13,6 +13,7 @@ from sqlalchemy.sql import Insert
 
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, StickySession, StickySessionKind
+from app.db.oracle_dml import oracle_insert_if_absent, oracle_upsert
 from app.db.session import sqlite_writer_section
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
@@ -311,6 +312,10 @@ class StickySessionsRepository:
         return result.scalar_one_or_none()
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+        if self._session.get_bind().dialect.name == "oracle":
+            row = await self._oracle_upsert(key, account_id, kind)
+            await self._session.commit()
+            return row
         # RETURNING collapses the previous upsert + re-select + refresh
         # (4 round trips) into one statement; this runs inline before the
         # first upstream byte on sticky requests, so round trips are TTFT.
@@ -328,6 +333,17 @@ class StickySessionsRepository:
     async def insert_if_absent(self, key: str, account_id: str, kind: StickySessionKind) -> str:
         """Insert immutable ownership and return the persisted owner."""
 
+        if self._session.get_bind().dialect.name == "oracle":
+            await oracle_insert_if_absent(
+                self._session, StickySession, {"key": key, "account_id": account_id, "kind": kind}
+            )
+            owner_id = await self._session.scalar(
+                select(StickySession.account_id).where(StickySession.key == key, StickySession.kind == kind)
+            )
+            if owner_id is None:
+                raise RuntimeError("StickySession immutable insert did not resolve an owner")
+            await self._session.commit()
+            return owner_id
         statement = self._build_insert_do_nothing_statement(key, account_id, kind).returning(StickySession.account_id)
         async with sqlite_writer_section():
             result = await self._session.execute(statement)
@@ -355,6 +371,17 @@ class StickySessionsRepository:
     ) -> StickySession:
         """Upsert one mapping and initialize its immutable seed atomically."""
 
+        if self._session.get_bind().dialect.name == "oracle":
+            try:
+                await oracle_insert_if_absent(
+                    self._session, StickySession, {"key": seed_key, "account_id": account_id, "kind": seed_kind}
+                )
+                row = await self._oracle_upsert(key, account_id, kind)
+                await self._session.commit()
+                return row
+            except BaseException:
+                await self._session.rollback()
+                raise
         # Keep these writes in one transaction. A process seed without the
         # initiating thread row is false placement evidence, while a thread
         # row without its seed makes the first admitted thread invisible to
@@ -470,6 +497,12 @@ class StickySessionsRepository:
         if expected_account_id is None:
             if restore_account_id is None:
                 return True
+            if self._session.get_bind().dialect.name == "oracle":
+                inserted = await oracle_insert_if_absent(
+                    self._session, StickySession, {"key": key, "account_id": restore_account_id, "kind": kind}
+                )
+                await self._session.commit()
+                return inserted
             statement = self._build_insert_do_nothing_statement(key, restore_account_id, kind).returning(
                 StickySession.key
             )
@@ -737,6 +770,28 @@ class StickySessionsRepository:
             deleted = len(deleted_result.scalars().all())
             await self._session.commit()
         return tombstoned + deleted
+
+    async def _oracle_upsert(self, key: str, account_id: str, kind: StickySessionKind) -> StickySession:
+        await oracle_upsert(
+            self._session,
+            StickySession,
+            keys=("key", "kind"),
+            values={"key": key, "kind": kind, "account_id": account_id},
+            update_values={
+                "account_id": account_id,
+                "updated_at": func.now(),
+                "continuity_abandoned_at": None,
+                "continuity_abandonment_scope": None,
+            },
+        )
+        row = await self._session.scalar(
+            select(StickySession)
+            .where(StickySession.key == key, StickySession.kind == kind)
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            raise RuntimeError("Oracle sticky upsert did not resolve an owner")
+        return row
 
     def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
         dialect = self._session.get_bind().dialect.name

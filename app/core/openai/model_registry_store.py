@@ -24,6 +24,7 @@ from app.core.openai.model_registry import (
 from app.core.types import JsonValue
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import ModelRegistrySnapshotRecord
+from app.db.oracle_dml import oracle_upsert
 from app.db.session import get_background_session
 from app.modules.proxy.account_cache import get_account_selection_cache
 
@@ -394,6 +395,10 @@ async def persist_registry_snapshot(
             .on_conflict_do_update(index_elements=[ModelRegistrySnapshotRecord.id], set_=update_values)
         )
         await session.execute(stmt)
+    elif dialect == "oracle":
+        await oracle_upsert(
+            session, ModelRegistrySnapshotRecord, keys=("id",), values=values, update_values=update_values
+        )
     else:
         existing = await session.scalar(
             select(ModelRegistrySnapshotRecord).where(ModelRegistrySnapshotRecord.id == _SNAPSHOT_ROW_ID)

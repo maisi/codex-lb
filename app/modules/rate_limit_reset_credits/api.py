@@ -269,7 +269,7 @@ async def serialize_reset_credit_redeem(
             await _acquire_postgresql_reset_credit_redeem_lock(session, account_id)
             yield
             return
-        if dialect == "sqlite":
+        if dialect in {"sqlite", "oracle"}:
             # A durable claim row is the sole serializer here so processes
             # sharing one SQLite file exclude each other, not just tasks in
             # this process. Crashed holders are recovered via lease expiry;

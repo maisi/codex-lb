@@ -10,6 +10,7 @@ from sqlalchemy import Float, Result, bindparam, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
+from app.core.scheduling.oracle_leader_lease import acquire_oracle_leader_lease, renew_oracle_leader_lease
 from app.db.models import SchedulerLeader
 from app.db.session import get_background_session
 from app.db.sqlite_lock_retry import is_sqlite_lock_error, sqlite_error_name
@@ -243,11 +244,15 @@ class LeaderElection:
         loop = asyncio.get_running_loop()
         try:
             async with get_background_session() as session:
-                acquire_sql = _SQLITE_ACQUIRE_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_ACQUIRE_SQL
-                result = await session.execute(
-                    acquire_sql,
-                    {"leader_id": self._leader_id, "ttl": ttl},
-                )
+                if _dialect_name(session) == "oracle":
+                    remaining = await acquire_oracle_leader_lease(session, leader_id=self._leader_id, ttl=ttl)
+                else:
+                    acquire_sql = _SQLITE_ACQUIRE_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_ACQUIRE_SQL
+                    result = await session.execute(
+                        acquire_sql,
+                        {"leader_id": self._leader_id, "ttl": ttl},
+                    )
+                    remaining = _returned_remaining(result)
                 # The statement RETURNS the lease still remaining, measured on
                 # the database's OWN clock (``expires_at`` minus ``db_now`` in
                 # the same statement), or nothing when another replica owns the
@@ -260,7 +265,6 @@ class LeaderElection:
                 # anchoring after ``commit()`` would push it past the true DB
                 # expiry by the commit round-trip. Reading the DB-remaining after
                 # a post-statement instant avoids both.
-                remaining = _returned_remaining(result)
                 acquired_at = loop.time()
                 if remaining is None:
                     # No RETURNING row is an AUTHORITATIVE non-owner result:
@@ -343,11 +347,15 @@ class LeaderElection:
             # rows instead of resurrecting a row whose ``expires_at`` has already
             # passed but no follower has yet claimed. A no-match RETURNS no row
             # and falls through to the lease-loss demotion below.
-            renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
-            result = await session.execute(
-                renew_sql,
-                {"leader_id": self._leader_id, "ttl": ttl},
-            )
+            if _dialect_name(session) == "oracle":
+                remaining = await renew_oracle_leader_lease(session, leader_id=self._leader_id, ttl=ttl)
+            else:
+                renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
+                result = await session.execute(
+                    renew_sql,
+                    {"leader_id": self._leader_id, "ttl": ttl},
+                )
+                remaining = _returned_remaining(result)
             # The statement RETURNS the renewed lease's remaining (on the
             # database's OWN clock) or nothing. Read it BEFORE the commit: a
             # no-match means another replica now owns the lease (or the row had
@@ -355,7 +363,6 @@ class LeaderElection:
             # (functionally no-op) commit then succeeds. Capture the monotonic
             # instant right AFTER the statement returns to anchor the renewed
             # deadline against the DB-remaining below.
-            remaining = _returned_remaining(result)
             renew_anchor = loop.time()
             if remaining is None:
                 # Demote on the authoritative lease loss BEFORE committing, so a
@@ -935,15 +942,19 @@ class LeaderElection:
                 # Guard the renewal on the lease still being unexpired at the
                 # database's execution-time clock so a shutdown/drain renewal can
                 # never resurrect a row whose ``expires_at`` has already passed.
-                renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
-                result = await session.execute(
-                    renew_sql,
-                    {"leader_id": self._leader_id, "ttl": ttl},
-                )
+                if _dialect_name(session) == "oracle":
+                    remaining = await renew_oracle_leader_lease(session, leader_id=self._leader_id, ttl=ttl)
+                else:
+                    renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
+                    result = await session.execute(
+                        renew_sql,
+                        {"leader_id": self._leader_id, "ttl": ttl},
+                    )
+                    remaining = _returned_remaining(result)
                 # A RETURNING row means the guarded UPDATE extended the row; no
                 # row means it was expired/taken over (a harmless no-op here).
                 # The drain path holds no locally tracked deadline to re-anchor.
-                renewed = _returned_remaining(result) is not None
+                renewed = remaining is not None
                 await session.commit()
                 return renewed
         except Exception as exc:

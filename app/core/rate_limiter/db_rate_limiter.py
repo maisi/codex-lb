@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import delete, func, insert, literal, select, text
+from sqlalchemy import CursorResult, delete, func, insert, literal, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DashboardRateLimitError
+from app.db.account_identity_lock import lock_postgresql_account_identities
 from app.db.models import RateLimitAttempt
 
 #: How long a recorded attempt is kept before the periodic sweep deletes it.
@@ -74,7 +76,9 @@ class DatabaseRateLimiter:
         safe across processes sharing the same database file.
         """
         dialect_name = session.get_bind().dialect.name
-        if dialect_name == "postgresql":
+        if dialect_name == "oracle":
+            await lock_postgresql_account_identities(session, (f"rate-limit:{self.type}:{key}",))
+        elif dialect_name == "postgresql":
             lock_key = f"{self.type}:{key}"
             await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": lock_key})
 
@@ -84,29 +88,30 @@ class DatabaseRateLimiter:
         type_column = RateLimitAttempt.__table__.c.type
         attempted_at_column = RateLimitAttempt.__table__.c.attempted_at
 
-        raw_result = await session.execute(
-            insert(RateLimitAttempt)
-            .from_select(
-                [key_column.name, type_column.name, attempted_at_column.name],
-                select(
-                    literal(key, type_=key_column.type),
-                    literal(self.type, type_=type_column.type),
-                    literal(now, type_=attempted_at_column.type),
-                ).where(
-                    select(func.count())
-                    .select_from(RateLimitAttempt)
-                    .where(
-                        RateLimitAttempt.key == key,
-                        RateLimitAttempt.type == self.type,
-                        RateLimitAttempt.attempted_at >= window_start,
-                    )
-                    .scalar_subquery()
-                    < self.max_attempts
-                ),
-            )
-            .returning(attempted_at_column)
+        statement = insert(RateLimitAttempt).from_select(
+            [key_column.name, type_column.name, attempted_at_column.name],
+            select(
+                literal(key, type_=key_column.type),
+                literal(self.type, type_=type_column.type),
+                literal(now, type_=attempted_at_column.type),
+            ).where(
+                select(func.count())
+                .select_from(RateLimitAttempt)
+                .where(
+                    RateLimitAttempt.key == key,
+                    RateLimitAttempt.type == self.type,
+                    RateLimitAttempt.attempted_at >= window_start,
+                )
+                .scalar_subquery()
+                < self.max_attempts
+            ),
         )
-        inserted = raw_result.scalar_one_or_none() is not None
+        if dialect_name == "oracle":
+            raw_result = await session.execute(statement.execution_options(preserve_rowcount=True))
+            inserted = cast(CursorResult[Any], raw_result).rowcount > 0
+        else:
+            raw_result = await session.execute(statement.returning(attempted_at_column))
+            inserted = raw_result.scalar_one_or_none() is not None
         await session.commit()
 
         if not inserted:
@@ -140,7 +145,9 @@ class DatabaseRateLimiter:
         lock_key = f"{self.type}:{key}"
 
         dialect_name = session.get_bind().dialect.name
-        if dialect_name == "postgresql":
+        if dialect_name == "oracle":
+            await lock_postgresql_account_identities(session, (f"rate-limit:{self.type}:{key}",))
+        elif dialect_name == "postgresql":
             await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": lock_key})
 
         session.add(RateLimitAttempt(key=key, type=self.type, attempted_at=now))

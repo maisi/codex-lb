@@ -63,7 +63,7 @@ def _insert_ignore(connection: Connection, table: Table, rows: list[dict[str, ob
     existing = {row[0] for row in connection.execute(select(table.c.id)).all()}
     missing = [row for row in rows if row["id"] not in existing]
     if missing:
-        connection.execute(table.insert().values(missing))
+        connection.execute(table.insert(), missing)
 
 
 def seed_preset_dashboard_roles(connection: Connection, table: Table = _ROLES_TABLE) -> None:

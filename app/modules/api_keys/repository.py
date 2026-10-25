@@ -6,11 +6,12 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import BigInteger, Integer, case, cast, delete, func, insert, literal, or_, select, text, true, update
+from sqlalchemy import BigInteger, case, cast, delete, func, insert, literal, or_, select, text, true, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, raiseload, selectinload
 
+from app.core.utils.sql import bucket_epoch_expr
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -31,6 +32,7 @@ from app.db.models import (
     RequestLog,
     RequestUsageHourlyRollup,
 )
+from app.db.oracle_dml import oracle_upsert
 from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read_api_key_rollup_state
 from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, to_dimension
@@ -874,11 +876,21 @@ class ApiKeysRepository:
             )
             await self._session.execute(stmt)
             return
-        await self._session.execute(
-            update(ApiKeyUsageReservationItem)
-            .where(ApiKeyUsageReservationItem.reservation_id == reservation_id)
-            .where(ApiKeyUsageReservationItem.limit_id == item.limit_id)
-            .values(actual_delta=actual_delta)
+        if dialect_name != "oracle":
+            raise RuntimeError(f"Reservation item upsert unsupported for dialect={dialect_name!r}")
+        await oracle_upsert(
+            self._session,
+            ApiKeyUsageReservationItem,
+            keys=("reservation_id", "limit_id"),
+            values={
+                "reservation_id": reservation_id,
+                "limit_id": item.limit_id,
+                "limit_type": item.limit_type.value,
+                "reserved_delta": item.reserved_delta,
+                "expected_reset_at": item.expected_reset_at,
+                "actual_delta": actual_delta,
+            },
+            update_values={"actual_delta": actual_delta, "updated_at": utcnow()},
         )
 
     async def settle_usage_reservation(
@@ -1095,13 +1107,7 @@ class ApiKeysRepository:
         if raw_windows:
             bind = self._session.get_bind()
             dialect = bind.dialect.name if bind else "sqlite"
-            if dialect == "postgresql":
-                bucket_expr = (
-                    func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
-                )
-            else:
-                epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
-                bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+            bucket_expr = bucket_epoch_expr(RequestLog.requested_at, dialect=dialect, bucket_seconds=bucket_seconds)
             bucket_col = bucket_expr.label("bucket_epoch")
 
             stmt = (
