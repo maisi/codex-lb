@@ -62,7 +62,45 @@ The pilot topology is a health-aware load balancer, two separately addressable s
 
 The shared database is a dependency for both application hosts. Always Free's documented storage budget is 20 GB, so log/usage retention matters. Autonomous Data Guard and point-in-time restore to a selected historical backup/timestamp are unavailable on Always Free; plan external exports and recovery. See [official Free limits](https://docs.oracle.com/en-us/iaas/autonomous-database-serverless/doc/autonomous-always-free.html).
 
+## Complete offline SQLite transfer
+
+For copy-and-run Docker commands, use the [compact migration runbook](docker-migration-runbook.md).
+
+The host-side `scripts/migrate-sqlite-to-oracle-docker.sh` orchestrates those commands. Default/explicit dry run requires a stopped source and changes no Oracle data; `--apply` checks image/connectivity, reserves a private backup, stops and copies the source directory, then invokes the existing dry run, transfer and schema check. `--build` is opt-in. All helpers share environment/network/mount arguments and bypass image startup. The script rejects missing source data mounts, inherited application-code mounts and existing backup targets. It retains partial backups on failure, never restarts an installation or retries transfer, and prints a quoted cutover example. External key/wallet backups and stopping other workers/orchestrators remain operator responsibilities.
+
+`codex-lb-db migrate-to-oracle` moves all current application tables from a stopped SQLite installation into a fresh dedicated Oracle schema. It includes accounts, API keys, dashboard users/settings, history, conversations and coordination records. SQLite migration ledgers and deliberately retired physical fields are not part of the Oracle application schema. The [requirements](spec.md) govern completeness, source preservation, pristine-target checks and verification.
+
+Stop all source and target processes, back up the complete source data directory, install the Oracle extra and configure a protected Oracle URL/wallet. Then, with the existing data directory accessible:
+
+```sh
+uv run --extra oracle codex-lb-db migrate-to-oracle \
+  --source-sqlite /var/lib/codex-lb/store.db --dry-run
+uv run --extra oracle codex-lb-db migrate-to-oracle \
+  --source-sqlite /var/lib/codex-lb/store.db
+uv run --extra oracle codex-lb-db check
+```
+
+The target comes from `CODEX_LB_DATABASE_URL` or the existing global `--db-url` option. The key defaults to the source database's sibling `encryption.key`; a separately configured key uses `--source-key-file`. The tool never generates a replacement key or edits runtime configuration. Reuse the same data directory/key/archive volume when starting Oracle, or separately copy that complete directory when relocating hosts. Filesystem archives are not stored in Oracle.
+
+The source stays fenced against application startup, schema migrations and independent writers. A private SQLite backup is upgraded through its own migration history before validation and transfer; the original remains unchanged. Preflight checks integrity, foreign keys, schema compatibility, every encrypted field and Oracle value limits. Dry run performs source preflight and read-only target inspection without installing schema or advancing sequences.
+
+The target must be empty or contain only exact baseline seed values, apart from generated seed timestamps. Schema installation uses the existing Oracle lineage. Sequence advancement happens before copying because Oracle DDL commits implicitly. Exclusive table locks then fence one data transaction containing seed removal, bounded typed inserts, self-reference restoration, and complete row-count/digest verification. The existing migration-lock timeout governs target mutex waits; `--batch-size` bounds rows per batch (default 500, maximum 10000).
+
+Copy or verification failure before commit restores pristine target rows; installed schema and harmless sequence gaps can remain. An interrupted commit can have an unknown outcome and is never automatically replayed. Inspect the destination before retrying. Returning to the unchanged SQLite source after Oracle accepts new writes would discard those new writes, so retain the backup until application acceptance completes.
+
+Regression coverage populates all 68 application tables and exercises source immutability, old-schema snapshot upgrades, cycles, ciphertext/empty/NULL/CLOB/timestamp fidelity, wrong keys, oversized values, used-target rejection, rollback/retry and order-independent checksums. The optional destructive `test_oracle_transfer.py` runs through the existing Oracle CI glob against `CODEX_LB_TEST_ORACLE_BASELINE_URL`, including generated IDs after import. Local implementation verification did not have that disposable Oracle URL and therefore does not establish a live migration acceptance result.
+
 ## Developer verification
+
+### Docker transfer packaging
+
+Both Docker dependency stages install the locked `oracle` extra, including native Thin driver wheels for the images' Python 3.14. Runtime images remain installer-free. Build a new image from the updated checkout until a containing release is published; an older `latest` cannot supply this new CLI.
+
+For a stopped container named `codex-lb`, preserve its mounts with `--volumes-from codex-lb` and run `--entrypoint python codex-lb:oracle -m app.db.migrate migrate-to-oracle --source-sqlite /var/lib/codex-lb/store.db --dry-run`, then repeat without `--dry-run`. This bypasses startup migrations. Supply the Oracle URL and preserved runtime configuration through a protected environment file; volume inheritance does not inherit networks or environment. Add the required container network and read-only wallet mount for every migration/check/application command. Keep the old container and complete data backup through acceptance. The detailed backup and startup commands are rendered in the database guide.
+
+Packaging verification inspected both frozen dependency commands, the locked driver's Python 3.14 wheel availability and direct CLI help. Docker daemon access was unavailable locally; these changes do not claim a locally built/tested image.
+
+### Test schema isolation
 
 `make test-oracle` uses disposable test schemas. `CODEX_LB_TEST_ORACLE_URL` covers primitives and repository paths; `CODEX_LB_TEST_ORACLE_BASELINE_URL` isolates destructive fresh/interrupted/drift tests; `CODEX_LB_TEST_ORACLE_RUNTIME_URL` isolates the real application subprocess; `CODEX_LB_TEST_ORACLE_HA_URL` isolates real-process failover with native HAProxy. Each user requires the installation permissions above. Runtime/repository probes refuse pre-existing tables and remove only their owned application objects; the HA harness also refuses pre-existing views and sequences. Baseline tests explicitly reset their dedicated schema.
 
