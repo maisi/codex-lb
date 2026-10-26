@@ -109,3 +109,76 @@ def test_real_oracle_transfer_retains_values_ledger_and_sequence_highwater(
             transfer_sqlite_to_oracle(_URL, source_sqlite=source, progress=lambda _: None)
     finally:
         sqlite.dispose()
+
+
+async def test_real_oracle_interrupted_transfer_fences_startup_and_restarts(
+    oracle_target: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    import app.db.oracle_transfer as transfer
+    from app.db.oracle_connection import create_oracle_async_engine
+    from app.db.oracle_transfer_fence import (
+        IncompleteOracleTransferError,
+        has_incomplete_transfer,
+        verify_no_incomplete_oracle_transfer,
+    )
+
+    source = tmp_path / "store.db"
+    key_file = tmp_path / "encryption.key"
+    key_file.write_bytes(Fernet.generate_key())
+    encrypted = Fernet(key_file.read_bytes()).encrypt(b"original account token")
+    run_upgrade(f"sqlite:///{source}", bootstrap_legacy=False)
+    sqlite = create_engine(f"sqlite:///{source}")
+    try:
+        with sqlite.begin() as connection:
+            connection.execute(
+                insert(Account).values(
+                    id="original",
+                    email="owner@example.test",
+                    plan_type="plus",
+                    last_refresh=datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc),
+                    access_token_encrypted=encrypted,
+                    refresh_token_encrypted=encrypted,
+                    id_token_encrypted=encrypted,
+                )
+            )
+            for offset in range(5):
+                connection.execute(insert(AuditLog).values(id=9100 + offset, action=f"row-{offset}"))
+    finally:
+        sqlite.dispose()
+
+    def sabotaged_engine(url: str) -> Engine:
+        engine = create_oracle_sync_engine(url)
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def fail_audit_copy(_connection, _cursor, statement, *_args) -> None:
+            if statement.startswith("INSERT INTO audit_logs"):
+                raise RuntimeError("injected failure after earlier committed batches")
+
+        return engine
+
+    monkeypatch.setattr(transfer, "create_oracle_sync_engine", sabotaged_engine)
+    with pytest.raises(OracleTransferError, match="incomplete"):
+        transfer_sqlite_to_oracle(_URL, source_sqlite=source, batch_size=2, progress=lambda _: None)
+    monkeypatch.undo()
+    with oracle_target.connect() as connection:
+        assert has_incomplete_transfer(connection)
+        assert connection.scalar(select(Account.id)) == "original"
+
+    async_engine = create_oracle_async_engine(_URL, pool_size=1, max_overflow=0)
+    try:
+        with pytest.raises(IncompleteOracleTransferError):
+            await verify_no_incomplete_oracle_transfer(async_sessionmaker(async_engine), database_url=_URL)
+        dry_run = transfer_sqlite_to_oracle(_URL, source_sqlite=source, dry_run=True, progress=lambda _: None)
+        assert dry_run.target_incomplete_transfer is True
+        report = transfer_sqlite_to_oracle(_URL, source_sqlite=source, batch_size=2, progress=lambda _: None)
+        assert report.target_incomplete_transfer is True
+        await verify_no_incomplete_oracle_transfer(async_sessionmaker(async_engine), database_url=_URL)
+    finally:
+        await async_engine.dispose()
+    with oracle_target.connect() as connection:
+        assert not has_incomplete_transfer(connection)
+        assert connection.scalar(select(Account.access_token_encrypted)) == encrypted
+        assert sorted(connection.scalars(select(AuditLog.id).where(AuditLog.id >= 9100))) == list(range(9100, 9105))
