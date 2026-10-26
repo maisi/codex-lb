@@ -123,6 +123,12 @@ class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
     def on_headers_complete(self) -> None:
         if self._paused_on_ignorable_upgrade():
             return
+        # Uvicorn only recognizes the exact tuple (b"connection", b"close")
+        # when writing a response. The parser already understands mixed-case,
+        # token-list and repeated Connection fields; preserve its close decision
+        # so a probe sending "Close" receives EOF instead of a stuck socket.
+        if not self._active_parser().should_keep_alive() and (b"connection", b"close") not in self.headers:
+            self.headers.append((b"connection", b"close"))
         super().on_headers_complete()
 
     def on_body(self, body: bytes) -> None:
