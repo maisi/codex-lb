@@ -9,4 +9,4 @@
 
 - [x] 2.1 Unit-test committed partial state, the startup fence, restart to an exact copy, dry-run reporting and the unchanged used-target rejection.
 - [x] 2.2 Real-Oracle test: injected mid-transfer failure leaves a fenced target, rerun completes and removes the marker.
-- [ ] 2.3 Run focused tests, lint/types and strict OpenSpec validation; update runbook/context; record production re-run evidence in `verification.md`.
+- [x] 2.3 Run focused tests, lint/types and strict OpenSpec validation; update runbook/context; record production re-run evidence in `verification.md`.
