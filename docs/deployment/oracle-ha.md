@@ -47,6 +47,19 @@ Readiness checks use `/health/ready`, including database readiness and drain sta
 
 The affinity cookie improves continuity when clients retain it. Database-backed ownership and direct peer forwarding remain necessary because clients may omit cookies. `retries 0` prevents HAProxy from replaying an uncertain POST. Keep that behavior, allow SSE/WebSocket streaming through the TLS ingress, and deny public access to `/internal/*`. Scrape metrics directly from each instance rather than through the VIP.
 
+### OCI Load Balancer
+
+An OCI Load Balancer can take HAProxy's place. Configure the equivalent behavior explicitly:
+
+- **Listener:** use an HTTP listener (or HTTPS terminating TLS at the load balancer), not TCP, so health checks, cookie persistence and forwarded headers apply. The HTTP listener's idle timeout defaults to 60 seconds and closes a quiet SSE or WebSocket stream; raise it above the longest silent gap you expect, up to the two hours used in the HAProxy example.
+- **Backend set health check:** HTTP `GET /health/ready`, expected status `200`. The default 10-second interval with three retries can take about 30 seconds to remove a dead or draining instance, which matches the default drain budget. Shorten it (for example a 1–2 second interval with two retries) or raise `CODEX_LB_SHUTDOWN_DRAIN_TIMEOUT_SECONDS`.
+- **Session persistence:** enable load-balancer cookie persistence on the backend set. It replaces the HAProxy affinity cookie; database ownership and peer forwarding still cover clients that drop it.
+- **Client addresses:** the HTTP listener adds `X-Forwarded-For`. To use it for firewall and dashboard decisions, set `CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS=true` and `CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS` to the load balancer subnet only. Start instances with the `codex-lb` launcher, which keeps Uvicorn's own proxy-header rewriting off; do not run Uvicorn with `--proxy-headers` and `FORWARDED_ALLOW_IPS=*`.
+- **`/internal/*`:** load balancer rule sets cannot deny by path. Drain/stop/status accept only loopback callers and bridge routes require a signature derived from the shared key, so they are not exposed through the load balancer. If you add an edge block (for example an OCI WAF rule), match the URL-decoded path.
+- **Network:** security lists or network security groups must allow the load balancer subnet to reach both instances on `2455` and the instances to reach each other on `2455`. Advertise each instance's private VCN address, never the load balancer address.
+- **Retries:** confirm the load balancer does not replay a POST that reached a backend; the client remains responsible for retries.
+- **Replacement:** add the new backend and wait until the load balancer reports it healthy, then set `drain` on the old backend (or start the instance's `/internal/drain/start` locally, which fails its readiness check), wait for `in_flight` to reach zero, and remove it.
+
 ## Recovery and replacement
 
 | Event | Expected boundary |
@@ -83,7 +96,7 @@ This is a connection budget, not a throughput guarantee. The Free database remai
 
 ## Reproduce acceptance
 
-Install native HAProxy and provide a separate, empty schema in the protected `CODEX_LB_TEST_ORACLE_HA_URL` test environment variable. This target must be disposable: the test installs application objects and removes its own objects afterward. It refuses an existing table, view or sequence before application initialization. Then run:
+Install native HAProxy, make `ha-a.localhost`, `ha-b.localhost` and `ha-c.localhost` resolve to `127.0.0.1` (for example through `/etc/hosts`; the instances advertise these replica-specific names to each other), and provide a separate, empty schema in the protected `CODEX_LB_TEST_ORACLE_HA_URL` test environment variable. This target must be disposable: the test installs application objects and removes its own objects afterward. It refuses an existing table, view or sequence before application initialization. Then run:
 
 ```sh
 uv run --extra oracle pytest -q -s tests/integration/test_oracle_ha.py

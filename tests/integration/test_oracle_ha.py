@@ -177,6 +177,26 @@ async def _exercise_stale_owner_fence(old: HttpBridgeSessionRecord) -> None:
         await engine.dispose()
 
 
+def _await_line(lines: Iterator[str], marker: str, label: str) -> None:
+    # A blocking stream read cannot be bounded by eventually(); report a
+    # stalled or truncated stream under its step label instead.
+    try:
+        for line in lines:
+            if marker in line:
+                return
+    except httpx.ReadTimeout as exc:
+        raise AssertionError(f"Timed out waiting for {label}") from exc
+    raise AssertionError(f"Stream ended before {label}")
+
+
+def _choose(client: httpx.Client, gateway: Child, instance: str) -> None:
+    def selected() -> bool:
+        client.cookies.clear()
+        return _json(client.get(gateway.url + "/__ha__/state"))["instance"] == instance
+
+    eventually(f"gateway selects {instance}", selected)
+
+
 def _warm_pools(cluster: Cluster, nodes: tuple[Child, ...], hold: str) -> int:
     def warm(node: Child) -> dict[str, int]:
         with httpx.Client(trust_env=False, timeout=45) as client:
@@ -198,6 +218,10 @@ def _warm_pools(cluster: Cluster, nodes: tuple[Child, ...], hold: str) -> int:
             cluster.release(f"pools-{hold}")
         counts = [call.result(timeout=45) for call in calls]
         assert all(value == {"request": 4, "background": 4} for value in counts)
+    # Holding every slot can fail readiness probes; let each process (and the
+    # gateway's checks) recover before later steps route through it.
+    for node in nodes:
+        cluster.wait_ready(node, "/health/ready")
     return sum(sum(value.values()) for value in counts)
 
 
@@ -349,11 +373,7 @@ def _exercise_failover(cluster: Cluster, engine: Engine) -> None:
 
         # HAProxy's ordinary affinity cookie pins this stream to the known
         # leader so one SIGKILL proves both serving-process and leader loss.
-        def choose_a() -> bool:
-            client.cookies.clear()
-            return _json(client.get(gateway.url + "/__ha__/state"))["instance"] == "ha-a"
-
-        eventually("gateway selects ha-a", choose_a)
+        _choose(client, gateway, "ha-a")
         with client.stream(
             "POST",
             gateway.url + "/backend-api/codex/responses",
@@ -363,7 +383,7 @@ def _exercise_failover(cluster: Cluster, engine: Engine) -> None:
             assert response.status_code == 200
             assert response.headers["x-ha-test-backend"] == "ha-a"
             lines = response.iter_lines()
-            eventually("first streamed event", lambda: '"response.created"' in next(lines))
+            _await_line(lines, '"response.created"', "first streamed event")
             killed_at = time.monotonic()
             node_a.kill()
             try:
@@ -467,11 +487,7 @@ def _exercise_failover(cluster: Cluster, engine: Engine) -> None:
         timings["overlap_application_sessions"] = _warm_pools(cluster, (restarted, node_b, replacement), "overlap")
         assert timings["overlap_application_sessions"] == 24
 
-        def choose_b() -> bool:
-            client.cookies.clear()
-            return _json(client.get(gateway.url + "/__ha__/state"))["instance"] == "ha-b"
-
-        eventually("gateway selects draining process", choose_b)
+        _choose(client, gateway, "ha-b")
         with client.stream(
             "POST",
             gateway.url + "/backend-api/codex/responses",
@@ -480,7 +496,7 @@ def _exercise_failover(cluster: Cluster, engine: Engine) -> None:
         ) as response:
             assert response.status_code == 200 and response.headers["x-ha-test-backend"] == "ha-b"
             lines = response.iter_lines()
-            eventually("accepted drain stream", lambda: '"response.created"' in next(lines))
+            _await_line(lines, '"response.created"', "accepted drain stream")
             _json(client.post(node_b.url + "/internal/drain/start"))
             assert client.get(node_b.url + "/health/ready").status_code == 503
             eventually(

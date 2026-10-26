@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import signal
 import socket
@@ -36,9 +37,24 @@ def require_empty_schema(engine: Engine) -> None:
 
 
 def free_port() -> int:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+    # Ports are chosen before their processes start (HAProxy needs ha-c up
+    # front). Stay below the kernel's ephemeral range so outbound Oracle and
+    # health-check sockets cannot claim a reserved port in the meantime.
+    low = 32768
+    try:
+        low = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        pass
+    candidates = list(range(10000, max(low, 10200)))
+    random.shuffle(candidates)
+    for port in candidates[:200]:
+        with socket.socket() as listener:
+            try:
+                listener.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("No free non-ephemeral port for the Oracle HA acceptance processes.")
 
 
 def eventually(label: str, check: Callable[[], T], *, timeout: float = 30) -> T:
@@ -87,7 +103,6 @@ class Cluster:
     directory: Path
     database_url: str = field(repr=False)
     children: list[Child] = field(default_factory=list)
-    nodes: dict[str, Child] = field(default_factory=dict)
     secrets: list[str] = field(default_factory=list, repr=False)
     ports: dict[str, int] = field(default_factory=dict)
 
@@ -179,7 +194,6 @@ class Cluster:
             env,
             port=self.ports[name],
         )
-        self.nodes[name] = child
         self.wait_ready(child, "/health/ready", timeout=150)
         return child
 

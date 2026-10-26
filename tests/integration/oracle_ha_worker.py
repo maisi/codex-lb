@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import uvicorn
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from sqlalchemy.pool import QueuePool
 
@@ -80,8 +80,9 @@ def upstream_app(directory: Path) -> FastAPI:
                 payload = await socket.receive_json()
                 async for event in events(payload, connection=str(socket.client)):
                     await socket.send_json(event)
-        except Exception:
-            # Peer termination is expected when an application is SIGKILLed.
+        except (WebSocketDisconnect, OSError):
+            # Peer termination is expected when an application is SIGKILLed;
+            # anything else propagates to this worker's log for diagnosis.
             return
 
     @app.post("/oauth/token")

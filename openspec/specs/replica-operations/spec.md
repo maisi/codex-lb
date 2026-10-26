@@ -14,15 +14,16 @@ Running more than one application replica SHALL require a shared PostgreSQL data
 - **AND** each replica has a unique bridge instance id and reachable advertise URL
 - **AND** both replicas mount the same encryption key
 - **WHEN** both replicas start
-- **THEN** exactly one owns the scheduler lease
+- **THEN** exactly one replica acquires the scheduler leader lease and runs singleton schedulers
 - **AND** hard-continuity requests reaching a non-owner are forwarded to the owner
 
 #### Scenario: Leader election left at its default preserves the singleton guarantee
 - **GIVEN** two replicas sharing one supported database
 - **AND** leader election is left enabled
 - **WHEN** both replicas start
-- **THEN** singleton work is protected by one database leader lease
-- **AND** explicitly disabling leader election would make each replica act as leader and is unsupported for this topology
+- **THEN** exactly one replica acquires the lease and runs singleton schedulers
+- **AND** the operator observes no duplicate upstream polling (usage refresh, automations, retention)
+- **AND** explicitly disabling leader election would make each replica act as leader, run singleton schedulers N-fold, and is unsupported for this topology
 
 ### Requirement: SQLite deployments are single-process
 
