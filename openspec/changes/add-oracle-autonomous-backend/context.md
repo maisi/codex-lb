@@ -39,6 +39,10 @@ A five-second native call limit was too short for initial Autonomous Free LOB wr
 
 ## Remaining scope
 
-The current milestone is one application instance and fresh Oracle installation. Two-instance host-loss/failover, lease takeover across full application instances, duplicate-refresh prevention during host failure and measured peak connection budgets are deferred. Existing SQLite/PostgreSQL data migration to Oracle is not automatic. Broader long-history/report/retention parity and workload capacity testing remain useful follow-up coverage.
+The current milestone is one application instance and fresh Oracle installation. Two-instance host-loss/failover, lease takeover across full application instances, duplicate-refresh prevention during host failure and measured peak connection budgets are deferred. The separately archived transfer change adds explicit complete offline SQLite-to-Oracle migration and its Docker wrapper; PostgreSQL data transfer remains deferred. Broader long-history/report/retention parity and workload capacity testing remain useful follow-up coverage.
 
 The active change remains unarchived because its original HA checklist is incomplete. Stable operation guidance lives in [the capability context](../../specs/oracle-database/context.md) and [the rendered database guide](../../../docs/database.md).
+
+## Merge security follow-up (2026-10-26)
+
+The current-head Docker image built successfully, but the Trivy gate identified critical Brotli decoder advisory GHSA-9v8h-qqgm-4m35 in locked version 1.2.0. The dependency floor and frozen artifacts now require 1.2.1; no other dependency version changed. Existing request-decompression and Docker-security tests passed (34 tests), and repository-wide Ruff lint/format passed. Final-head GitHub CI, including the unchanged Trivy severity gate and real Oracle workflow, remains the merge authority.
