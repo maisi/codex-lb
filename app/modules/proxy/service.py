@@ -1998,6 +1998,7 @@ class ProxyService(
                         allow_usage_exhaustion_error=not required_preferred_account,
                         api_key_id=api_key_id,
                         api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
+                        request_id=request_id,
                     )
                     if preferred_selection.account is not None:
                         logger.info(
@@ -2062,6 +2063,7 @@ class ProxyService(
                     api_key_id=api_key_id,
                     api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
                     routing_tunables=routing_tunables,
+                    request_id=request_id,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(

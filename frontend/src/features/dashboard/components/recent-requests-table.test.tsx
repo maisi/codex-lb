@@ -48,6 +48,12 @@ vi.mock("@/features/conversation-archive/components/request-archive-panel", () =
   ),
 }));
 
+vi.mock("@/features/dashboard/components/request-routing-panel", () => ({
+  RequestRoutingPanel: ({ requestId }: { requestId: string }) => (
+    <div data-testid="request-routing-panel">Routing for {requestId}</div>
+  ),
+}));
+
 const PAGINATION_PROPS = {
   total: 1,
   limit: 25,
@@ -706,6 +712,19 @@ describe("RecentRequestsTable", () => {
     expect(within(dialog).queryByText("Client IP")).not.toBeInTheDocument();
     expect(within(dialog).queryByText("Conversation ID")).not.toBeInTheDocument();
     expect(within(dialog).queryByTestId("request-archive-panel")).not.toBeInTheDocument();
+  });
+
+  it("shows the routing decision only to principals who may see account identity", () => {
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[LAYOUT_REQUEST]} />);
+    expect(within(openRequestDetails()).getByTestId("request-routing-panel")).toHaveTextContent(
+      "Routing for req-layout",
+    );
+  });
+
+  it("hides the routing decision from guests", () => {
+    useAuthStore.setState({ role: "guest", permissions: ["read"], canWrite: false });
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[LAYOUT_REQUEST]} />);
+    expect(within(openRequestDetails()).queryByTestId("request-routing-panel")).not.toBeInTheDocument();
   });
 
   it("shows warmup marker only for warmup rows", () => {
