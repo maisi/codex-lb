@@ -10,6 +10,7 @@ from sqlalchemy import BigInteger, case, cast, delete, func, insert, literal, or
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, raiseload, selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.utils.sql import bucket_epoch_expr
 from app.core.utils.time import utcnow
@@ -1047,7 +1048,7 @@ class ApiKeysRepository:
         since: datetime,
         until: datetime,
     ) -> list[ApiKeyAccountCost]:
-        deleted_expr = func.coalesce(RequestLog.deleted_at.is_not(None), False)
+        deleted_expr = _deleted_flag(RequestLog.deleted_at)
         stmt = (
             select(
                 RequestLog.account_id,
@@ -1173,7 +1174,7 @@ class ApiKeysRepository:
             func.coalesce(func.sum(filtered_logs.c.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(filtered_logs.c.cost_usd), 0.0).label("total_cost_usd"),
         ).cte("usage_totals")
-        deleted_expr = func.coalesce(filtered_logs.c.deleted_at.is_not(None), False)
+        deleted_expr = _deleted_flag(filtered_logs.c.deleted_at)
         usage_grouped = (
             select(
                 filtered_logs.c.account_id.label("account_id"),
@@ -1210,6 +1211,17 @@ class ApiKeysRepository:
             total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
             account_costs=self._build_account_costs(rows),
         )
+
+
+def _deleted_flag(deleted_at: ColumnElement[datetime | None]) -> ColumnElement[int]:
+    """1 for a soft-deleted log row, else 0.
+
+    A bare ``deleted_at IS NOT NULL`` is a BOOLEAN expression, which Oracle only
+    accepts where a condition is expected; selecting or grouping by it (or
+    coalescing it with a bound ``False``, which binds as NUMBER) fails with
+    ORA-00932. An integer CASE is portable across SQLite, PostgreSQL and Oracle.
+    """
+    return case((deleted_at.is_not(None), 1), else_=0)
 
 
 def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int, cost_microdollars: int) -> int:
