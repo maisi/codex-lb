@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import BigInteger, case, cast, delete, func, insert, literal, or_, select, text, true, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only, raiseload, selectinload
+from sqlalchemy.orm import InstrumentedAttribute, load_only, raiseload, selectinload
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.utils.sql import bucket_epoch_expr
@@ -1213,7 +1213,9 @@ class ApiKeysRepository:
         )
 
 
-def _deleted_flag(deleted_at: ColumnElement[datetime | None]) -> ColumnElement[int]:
+def _deleted_flag(
+    deleted_at: ColumnElement[datetime | None] | InstrumentedAttribute[datetime | None],
+) -> ColumnElement[int]:
     """1 for a soft-deleted log row, else 0.
 
     A bare ``deleted_at IS NOT NULL`` is a BOOLEAN expression, which Oracle only
