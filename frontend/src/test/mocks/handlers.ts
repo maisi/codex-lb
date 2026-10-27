@@ -971,6 +971,10 @@ export const handlers = [
     );
   }),
 
+  http.get("/api/request-logs/:requestId/routing", ({ params }) =>
+    HttpResponse.json({ requestId: String(params.requestId), attempts: [] }),
+  ),
+
   http.get("/api/conversations", ({ request }) => {
     const url = new URL(request.url);
     const search = (url.searchParams.get("search") || "").trim().toLowerCase();

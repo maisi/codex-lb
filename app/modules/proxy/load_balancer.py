@@ -60,6 +60,7 @@ from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
+from app.modules.proxy import routing_trace
 from app.modules.proxy._load_balancer.error_rate import (
     record_outcome_locked,
 )
@@ -627,50 +628,77 @@ class LoadBalancer:
         api_key_stream_fair_share_threshold_pct: int = 0,
         dashboard_settings: object | None = None,
         routing_tunables: RoutingTunables | None = None,
+        request_id: str | None = None,
     ) -> AccountSelection:
-        return await self._select_account(
-            sticky_key,
-            dashboard_settings=dashboard_settings,
-            routing_tunables=routing_tunables,
-            sticky_kind=sticky_kind,
-            reallocate_sticky=reallocate_sticky,
-            sticky_source=sticky_source,
-            legacy_sticky_key=legacy_sticky_key,
-            legacy_continuity_source=legacy_continuity_source,
-            sticky_seed_key=sticky_seed_key,
-            sticky_seed_kind=sticky_seed_kind,
-            spill_bare_session_on_account_cap=spill_bare_session_on_account_cap,
-            abandon_unavailable_legacy_owner=abandon_unavailable_legacy_owner,
-            require_unambiguous_account=require_unambiguous_account,
-            sticky_max_age_seconds=sticky_max_age_seconds,
-            prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
-            prefer_earlier_reset_window=prefer_earlier_reset_window,
-            routing_strategy=routing_strategy,
-            relative_availability_power=relative_availability_power,
-            relative_availability_top_k=relative_availability_top_k,
-            model=model,
-            service_tier=service_tier,
-            additional_limit_name=additional_limit_name,
-            account_ids=account_ids,
-            required_account_id=required_account_id,
-            required_account_is_ownership_constraint=required_account_is_ownership_constraint,
-            required_continuity_owner=required_continuity_owner,
-            exclude_account_ids=exclude_account_ids,
-            require_security_work_authorized=require_security_work_authorized,
-            budget_threshold_pct=budget_threshold_pct,
-            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-            routing_costs_by_account_id=routing_costs_by_account_id,
-            account_priority=account_priority,
-            lease_kind=lease_kind,
-            estimated_lease_tokens=estimated_lease_tokens,
-            stream_reserve_slots=stream_reserve_slots,
-            traffic_class=traffic_class,
-            concurrency_caps=concurrency_caps,
-            redact_sensitive_details=redact_sensitive_details,
-            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-            api_key_id=api_key_id,
-            api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
-        )
+        with routing_trace.capture() as trace_draft:
+            selection = await self._select_account(
+                sticky_key,
+                dashboard_settings=dashboard_settings,
+                routing_tunables=routing_tunables,
+                sticky_kind=sticky_kind,
+                reallocate_sticky=reallocate_sticky,
+                sticky_source=sticky_source,
+                legacy_sticky_key=legacy_sticky_key,
+                legacy_continuity_source=legacy_continuity_source,
+                sticky_seed_key=sticky_seed_key,
+                sticky_seed_kind=sticky_seed_kind,
+                spill_bare_session_on_account_cap=spill_bare_session_on_account_cap,
+                abandon_unavailable_legacy_owner=abandon_unavailable_legacy_owner,
+                require_unambiguous_account=require_unambiguous_account,
+                sticky_max_age_seconds=sticky_max_age_seconds,
+                prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
+                routing_strategy=routing_strategy,
+                relative_availability_power=relative_availability_power,
+                relative_availability_top_k=relative_availability_top_k,
+                model=model,
+                service_tier=service_tier,
+                additional_limit_name=additional_limit_name,
+                account_ids=account_ids,
+                required_account_id=required_account_id,
+                required_account_is_ownership_constraint=required_account_is_ownership_constraint,
+                required_continuity_owner=required_continuity_owner,
+                exclude_account_ids=exclude_account_ids,
+                require_security_work_authorized=require_security_work_authorized,
+                budget_threshold_pct=budget_threshold_pct,
+                secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                routing_costs_by_account_id=routing_costs_by_account_id,
+                account_priority=account_priority,
+                lease_kind=lease_kind,
+                estimated_lease_tokens=estimated_lease_tokens,
+                stream_reserve_slots=stream_reserve_slots,
+                traffic_class=traffic_class,
+                concurrency_caps=concurrency_caps,
+                redact_sensitive_details=redact_sensitive_details,
+                allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                api_key_id=api_key_id,
+                api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
+            )
+        if request_id is not None:
+            # Diagnostics only: a failure here must never fail the request.
+            try:
+                store = routing_trace.get_routing_trace_store()
+                routing_trace.record_selection(
+                    routing_trace.build_trace(
+                        trace_draft,
+                        request_id=request_id,
+                        attempt=store.next_attempt(request_id),
+                        api_key_id=api_key_id,
+                        model=model,
+                        routing_strategy=routing_strategy,
+                        sticky_kind=sticky_kind.value if sticky_kind is not None else None,
+                        account_priority=account_priority,
+                        budget_threshold_pct=budget_threshold_pct,
+                        excluded_account_ids=frozenset(exclude_account_ids or ()),
+                        required_account_id=required_account_id,
+                        selected_account_id=selection.account.id if selection.account is not None else None,
+                        error_code=selection.error_code,
+                    ),
+                    redact_account_ids=redact_sensitive_details,
+                )
+            except Exception:
+                logger.warning("Proxy account selection trace failed request_id=%s", request_id, exc_info=True)
+        return selection
 
     async def _select_account(
         self,

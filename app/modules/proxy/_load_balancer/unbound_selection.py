@@ -16,7 +16,11 @@ from app.core.balancer import (
     TrafficClass,
 )
 from app.db.models import Account, AccountStatus
-from app.modules.proxy._load_balancer.overload_backoff import filter_overload_backoff_candidates
+from app.modules.proxy import routing_trace
+from app.modules.proxy._load_balancer.overload_backoff import (
+    filter_overload_backoff_candidates,
+    overload_backoff_active,
+)
 from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     StickySelectionOwner,
@@ -195,6 +199,16 @@ async def run_unbound_selection_path(
                     traffic_class=traffic_class,
                     now=selection_now,
                 )
+            routing_trace.note_pool(
+                states,
+                selection_states,
+                now=selection_now,
+                overloaded_account_ids=[
+                    state.account_id
+                    for state in selection_states
+                    if overload_backoff_active(owner._runtime.get(state.account_id), selection_now)
+                ],
+            )
             if fair_share_denial is not None:
                 # Gate and acquire share this lock section, so the denial is
                 # atomic — no commit-phase re-check is needed on this path.

@@ -28,6 +28,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy import routing_trace
 from app.modules.proxy._load_balancer.overload_backoff import (
     filter_overload_backoff_candidates,
     isolation_substitute_seed,
@@ -701,6 +702,21 @@ async def run_sticky_selection_path(
                     stream_reserve_slots=0,
                 )
                 selection_states = response_create_states or selection_states
+            pool_now = owner._clock.time()
+            routing_trace.note_pool(
+                states,
+                selection_states,
+                now=pool_now,
+                sticky_owner_account_id=(
+                    sticky_existing_account_id if isinstance(sticky_existing_account_id, str) else None
+                ),
+                hard_sticky=hard_sticky,
+                overloaded_account_ids=[
+                    state.account_id
+                    for state in selection_states
+                    if overload_backoff_active(owner._runtime.get(state.account_id), pool_now)
+                ],
+            )
             # Cap spillover is request-local: the mapping is preserved so the
             # session returns to its owner once the cap clears. Overload
             # isolation is request-local for the same reason (see
@@ -1740,6 +1756,12 @@ async def _select_with_stickiness(
                 else:
                     overload_reroute_pool = None
 
+            routing_trace.note_owner_flags(
+                budget_pressured=budget_pressured,
+                rate_limit_far_away=rate_limit_far_away,
+                burn_first_reallocate=burn_first_reallocate,
+                overload_reroute=overload_reroute is not None,
+            )
             if overload_reroute is not None:
                 # Skips the pinned-owner return and the rate-limit grace
                 # retry below; the mutation block honors
@@ -2305,6 +2327,7 @@ def _select_account_preferring_budget_safe(
             allow_usage_exhaustion_error=False,
         )
         if recovery_probe.account is not None:
+            routing_trace.note_decided_by("recovery_probe")
             return recovery_probe
     state_budget_threshold = (
         (
@@ -2352,6 +2375,7 @@ def _select_account_preferring_budget_safe(
             anchor = _serving_rank_anchor(state_list)
         if anchor is not None:
             serving_rank = account_priority.get(anchor.account_id)
+            routing_trace.note_serving_rank(serving_rank)
             # Unranked accounts share ``None`` and so form the last tier together.
             tier = [state for state in state_list if account_priority.get(state.account_id) == serving_rank]
             tiered = _select_account_preferring_budget_safe(
@@ -2384,6 +2408,7 @@ def _select_account_preferring_budget_safe(
             for state in state_list
             if state.routing_policy != ROUTING_POLICY_PRESERVE and not state_budget_threshold(state)
         ]
+        routing_trace.note_decided_by("drain_strategy")
         return select_account(
             budget_safe_states or state_list,
             prefer_earlier_reset=prefer_earlier_reset,
@@ -2423,6 +2448,7 @@ def _select_account_preferring_budget_safe(
             selection_seed=selection_seed,
         )
         if burn_first.account is not None:
+            routing_trace.note_decided_by("burn_first")
             return burn_first
 
     preferred_states = [
@@ -2449,10 +2475,12 @@ def _select_account_preferring_budget_safe(
             usage_exhaustion_states=usage_exhaustion_states,
             selection_seed=selection_seed,
         )
+        routing_trace.note_decided_by("within_budget")
         if preferred.account is not None:
             return preferred
         if len(preferred_states) == len(state_list):
             return preferred
+    routing_trace.note_decided_by("over_budget_or_preserve")
     if routing_strategy == "usage_weighted" and state_list:
         return select_account(
             state_list,

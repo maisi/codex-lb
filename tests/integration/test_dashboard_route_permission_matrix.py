@@ -67,6 +67,7 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("GET", "/api/dashboard/overview"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/dashboard/projections"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/models"): PermissionRequirement(Permission.DASHBOARD_READ),
+    ("GET", "/api/request-logs/{request_id}/routing"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
     ("GET", "/api/usage/summary"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/usage/history"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/usage/window"): PermissionRequirement(Permission.ACCOUNTS_READ),

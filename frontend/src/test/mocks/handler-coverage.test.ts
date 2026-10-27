@@ -30,6 +30,7 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/dashboard/projections",
 	"GET /api/request-logs",
 	"GET /api/request-logs/options",
+	"GET /api/request-logs/:requestId/routing",
 	// conversations
 	"GET /api/conversations",
 	"GET /api/conversations/:conversationId",

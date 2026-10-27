@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +18,7 @@ from app.modules.dashboard.timeframes import (
     resolve_conversation_timeframe,
     resolve_request_log_timeframe,
 )
+from app.modules.proxy.routing_trace import get_routing_trace_store
 from app.modules.request_logs.schemas import (
     ConversationDetailsResponse,
     ConversationsResponse,
@@ -24,6 +26,8 @@ from app.modules.request_logs.schemas import (
     RequestLogFilterOptionsResponse,
     RequestLogModelOption,
     RequestLogsResponse,
+    RequestRoutingResponse,
+    RoutingAttemptResponse,
 )
 from app.modules.request_logs.service import RequestLogModelOption as ServiceRequestLogModelOption
 
@@ -121,6 +125,21 @@ async def list_request_logs(
         total=page.total,
         has_more=page.has_more,
         conversation=page.conversation,
+    )
+
+
+@router.get(
+    "/{request_id}/routing",
+    response_model=RequestRoutingResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE))],
+)
+async def get_request_routing(request_id: str) -> RequestRoutingResponse:
+    # Same gate as account identity in the request list: the trace names the
+    # accounts that were considered and the one that served the request.
+    attempts = get_routing_trace_store().get(request_id)
+    return RequestRoutingResponse(
+        request_id=request_id,
+        attempts=[RoutingAttemptResponse.model_validate(asdict(attempt)) for attempt in attempts],
     )
 
 
