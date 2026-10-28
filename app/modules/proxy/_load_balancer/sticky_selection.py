@@ -60,6 +60,10 @@ from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
 logger = logging.getLogger("app.modules.proxy.load_balancer")
 
 _STICKY_GRACE_PERIOD_SECONDS = 10.0
+# Upstream prompt-cache prefixes typically survive 5-10 minutes of inactivity,
+# so a soft owner idle at least this long has no warm cache left to protect and
+# its conversation can return to the key's best rank without a cache penalty.
+PROMPT_CACHE_COLD_AFTER_SECONDS = 600.0
 _STICKY_EXISTING_UNSET = object()
 _RECOVERABLE_STATUSES = frozenset(
     {
@@ -285,6 +289,7 @@ class StickySelectionOwner(Protocol):
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
         sticky_refresh_skip_deadline: datetime | None = None,
+        sticky_owner_last_used_at: datetime | None = None,
         redact_sensitive_details: bool = False,
     ) -> _StickySelectionOutcome: ...
 
@@ -491,6 +496,7 @@ async def run_sticky_selection_path(
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
     sticky_continuity_abandoned = False
     sticky_refresh_skip_deadline: datetime | None = None
+    sticky_owner_last_used_at: datetime | None = None
     # A thread row whose process seed exists but is still unowned must keep
     # its retention write: that write doubles as the seed-initialization
     # carrier (see the ``initialize_seed_key`` argument at the persist site
@@ -549,6 +555,8 @@ async def run_sticky_selection_path(
                 if isinstance(observed_refresh_skip_deadline, datetime) and not seed_initialization_pending
                 else None
             )
+            observed_last_used_at = sticky_owner_lookup.last_used_at
+            sticky_owner_last_used_at = observed_last_used_at if isinstance(observed_last_used_at, datetime) else None
             sticky_abandoned_account_id = sticky_owner_lookup.abandoned_account_id
             if sticky_owner_lookup.continuity_abandoned is True and isinstance(
                 sticky_abandoned_account_id,
@@ -565,6 +573,7 @@ async def run_sticky_selection_path(
                 # The freshness observation belongs to the namespaced row,
                 # not the raw legacy owner that now shadows it.
                 sticky_refresh_skip_deadline = None
+                sticky_owner_last_used_at = None
         async with owner._runtime_lock:
             states, account_map = owner._prepare_sticky_selection_states(
                 selection_inputs,
@@ -940,6 +949,7 @@ async def run_sticky_selection_path(
                         allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                         usage_exhaustion_states=states,
                         sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
+                        sticky_owner_last_used_at=sticky_owner_last_used_at,
                         redact_sensitive_details=redact_sensitive_details,
                     )
                     result = sticky_outcome.selection
@@ -1451,6 +1461,7 @@ async def _select_with_stickiness(
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
+    sticky_owner_last_used_at: datetime | None = None,
     overload_backoff_runtime: Mapping[str, RuntimeState] | None = None,
     clock: Clock,
     redact_sensitive_details: bool = False,
@@ -1756,16 +1767,68 @@ async def _select_with_stickiness(
                 else:
                     overload_reroute_pool = None
 
+            # A healthy owner below the budget threshold normally keeps its
+            # conversation for prompt-cache warmth, whatever its rank. Two
+            # cases release it to the account a new conversation would get:
+            # a ``preserve`` owner is fallback-only, so it gives the
+            # conversation back as soon as a non-preserve account can serve;
+            # and once the cache has gone cold the move costs nothing, so the
+            # conversation returns to the key's best available rank.
+            preserve_release = False
+            rank_return = False
+            if persist_fallback and routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
+                owner_is_preserve = pinned.routing_policy == ROUTING_POLICY_PRESERVE
+                owner_cache_cold = (
+                    bool(account_priority)
+                    and sticky_owner_last_used_at is not None
+                    and now - sticky_owner_last_used_at.replace(tzinfo=timezone.utc).timestamp()
+                    >= PROMPT_CACHE_COLD_AFTER_SECONDS
+                )
+                if owner_is_preserve or owner_cache_cold:
+                    # What a new conversation would get. Only its rank and
+                    # policy matter, so the pick is seeded: that skips the
+                    # recovery-probe admission (a probe must not re-home a
+                    # conversation) and leaves the trace to the real pick.
+                    with routing_trace.suspended():
+                        fresh = _select_account_preferring_budget_safe(
+                            states,
+                            selection_seed=sticky_key,
+                            prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            prefer_earlier_reset_window=prefer_earlier_reset_window,
+                            routing_strategy=routing_strategy,
+                            account_priority=account_priority,
+                            relative_availability_power=relative_availability_power,
+                            relative_availability_top_k=relative_availability_top_k,
+                            deterministic_probe=True,
+                            budget_threshold_pct=budget_threshold_pct,
+                            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                            traffic_class=traffic_class,
+                            ignore_standard_quota=ignore_standard_quota,
+                            routing_costs_by_account_id=routing_costs_by_account_id,
+                            allow_usage_exhaustion_error=False,
+                        ).account
+                    if fresh is not None and fresh.account_id != pinned.account_id:
+                        preserve_release = owner_is_preserve and fresh.routing_policy != ROUTING_POLICY_PRESERVE
+                        rank_return = owner_cache_cold and _rank_of(account_priority, fresh.account_id) < _rank_of(
+                            account_priority, pinned.account_id
+                        )
+
             routing_trace.note_owner_flags(
                 budget_pressured=budget_pressured,
                 rate_limit_far_away=rate_limit_far_away,
                 burn_first_reallocate=burn_first_reallocate,
                 overload_reroute=overload_reroute is not None,
+                preserve_release=preserve_release,
+                rank_return=rank_return,
             )
             if overload_reroute is not None:
                 # Skips the pinned-owner return and the rate-limit grace
                 # retry below; the mutation block honors
                 # ``overload_reroute_request_local`` and keeps the mapping.
+                reallocate_sticky = True
+            elif preserve_release or rank_return:
+                # Rebind like a budget reallocation: drop the mapping and
+                # persist the account the key's ranking picks below.
                 reallocate_sticky = True
             elif not ((budget_pressured or rate_limit_far_away) and burn_first_reallocate):
                 pinned_result = select_account(
@@ -2275,6 +2338,12 @@ def _state_above_sticky_budget_threshold(
     return (used_percent is not None and used_percent > budget_threshold_pct) or (
         secondary_used_percent is not None and secondary_used_percent > secondary_threshold
     )
+
+
+def _rank_of(account_priority: Mapping[str, int] | None, account_id: str) -> float:
+    """An account's key rank; unranked accounts come after every ranked one."""
+    rank = account_priority.get(account_id) if account_priority else None
+    return float("inf") if rank is None else rank
 
 
 def _select_account_preferring_budget_safe(

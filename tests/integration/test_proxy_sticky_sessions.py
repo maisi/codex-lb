@@ -3088,6 +3088,30 @@ async def test_sticky_lookup_refresh_skippable_only_for_fresh_unmarked_rows(db_s
 
 
 @pytest.mark.asyncio
+async def test_sticky_lookup_reports_last_use_only_for_live_ttl_owners(db_setup):
+    """last_used_at is the live row's updated_at on TTL-based kinds; durable
+    lookups carry none because a kept owner does not rewrite their row."""
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _create_account("acc_last_use")
+    key = "key_last_use"
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(key, "acc_last_use", kind=StickySessionKind.PROMPT_CACHE)
+
+    await _backdate_sticky_row(key, StickySessionKind.PROMPT_CACHE, age_seconds=700.0)
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        live = await repo.get_account_id_and_abandonment(key, kind=StickySessionKind.PROMPT_CACHE, max_age_seconds=1800)
+        durable = await repo.get_account_id_and_abandonment(key, kind=StickySessionKind.PROMPT_CACHE)
+
+    assert live.account_id == "acc_last_use"
+    assert isinstance(live.last_used_at, datetime)
+    assert 690 <= (utcnow() - live.last_used_at).total_seconds() <= 760
+    assert durable.account_id == "acc_last_use"
+    assert durable.last_used_at is None
+
+
+@pytest.mark.asyncio
 async def test_sticky_upsert_concurrent_same_key_semantics(db_setup):
     """Concurrent upserts on one (key, kind) must each observe their own
     write in RETURNING, keep exactly one row, and settle on one of the

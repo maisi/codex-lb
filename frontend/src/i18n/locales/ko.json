@@ -872,6 +872,8 @@
   "dashboard.requestRouting.ownerFlag.budget_pressured": "예산 임계값 초과",
   "dashboard.requestRouting.ownerFlag.burn_first_reallocate": "burn-first 계정을 사용할 수 있음",
   "dashboard.requestRouting.ownerFlag.overload_reroute": "업스트림 과부하로 재라우팅됨",
+  "dashboard.requestRouting.ownerFlag.preserve_release": "preserve 계정이 대화를 넘겨줌",
+  "dashboard.requestRouting.ownerFlag.rank_return": "프롬프트 캐시가 식어 키의 상위 순위로 복귀",
   "dashboard.requestRouting.ownerFlag.rate_limit_far_away": "한동안 속도 제한됨",
   "dashboard.requestRouting.ownerFlagsLabel": "대화 계정: {{flags}}",
   "dashboard.requestRouting.policy.burn_first": "Burn first",

@@ -872,6 +872,8 @@
   "dashboard.requestRouting.ownerFlag.budget_pressured": "超过预算阈值",
   "dashboard.requestRouting.ownerFlag.burn_first_reallocate": "有可用的 burn-first 账号",
   "dashboard.requestRouting.ownerFlag.overload_reroute": "因上游过载而改道",
+  "dashboard.requestRouting.ownerFlag.preserve_release": "preserve 账户交还了会话",
+  "dashboard.requestRouting.ownerFlag.rank_return": "提示缓存已冷，回到密钥的更高优先级",
   "dashboard.requestRouting.ownerFlag.rate_limit_far_away": "被限流一段时间",
   "dashboard.requestRouting.ownerFlagsLabel": "会话账号：{{flags}}",
   "dashboard.requestRouting.policy.burn_first": "Burn first",

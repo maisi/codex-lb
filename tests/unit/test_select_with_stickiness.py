@@ -18,6 +18,7 @@ import pytest
 from app.core.balancer import AccountState, RoutingCost, RoutingCostsByAccount, RoutingStrategy
 from app.core.clock import REAL_CLOCK, Clock
 from app.db.models import Account, AccountStatus, StickySessionKind
+from app.modules.proxy import routing_trace
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     _sticky_refresh_write_skippable,
@@ -86,6 +87,8 @@ async def _invoke_stickiness(
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
+    account_priority: dict[str, int] | None = None,
+    sticky_owner_last_used_at: datetime | None = None,
     clock: Clock = REAL_CLOCK,
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
@@ -119,6 +122,8 @@ async def _invoke_stickiness(
         routing_costs_by_account_id=routing_costs_by_account_id,
         sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
         sticky_existing_account_id=sticky_existing_account_id,
+        account_priority=account_priority,
+        sticky_owner_last_used_at=sticky_owner_last_used_at,
     )
     # Mirror the production persist site (run_sticky_selection_path): a pure
     # same-owner freshness rewrite is omitted only after revalidating its
@@ -1398,7 +1403,7 @@ async def test_sticky_seed_still_wins_when_no_priority_is_configured():
 
 @pytest.mark.asyncio
 async def test_existing_thread_owner_still_outranks_priority():
-    """Continuity beats rank: an owned thread is never re-homed."""
+    """Continuity beats rank while the owner may still hold a warm prompt cache."""
     states = [_active("first", used_percent=5.0), _active("second", used_percent=90.0)]
 
     selection = await _invoke_with_seed_and_priority(
@@ -1440,3 +1445,175 @@ async def test_new_thread_follows_rank_over_account_preserve():
 
     assert selection.account is not None
     assert selection.account.account_id == "first"
+
+
+# ---------------------------------------------------------------------------
+# Soft owners yield to preserve semantics and, once cold, to the key's rank
+# ---------------------------------------------------------------------------
+
+
+def _last_used(minutes_ago: float) -> datetime:
+    return datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(minutes=minutes_ago)
+
+
+@pytest.mark.asyncio
+async def test_preserve_owner_releases_its_conversation_to_a_normal_account():
+    states = [_active("fallback", routing_policy="preserve"), _active("regular")]
+    repo = _make_sticky_repo("fallback")
+
+    with routing_trace.capture() as draft:
+        selection = await _invoke_stickiness(
+            states, "thread", repo, sticky_existing_account_id="fallback", sticky_owner_last_used_at=_last_used(0.1)
+        )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "regular"
+    repo.upsert.assert_called_once_with("thread", "regular", kind=StickySessionKind.PROMPT_CACHE)
+    assert draft.owner_flags["preserve_release"] is True
+    assert draft.owner_flags["rank_return"] is False
+
+
+@pytest.mark.asyncio
+async def test_preserve_owner_keeps_its_conversation_when_it_holds_the_best_rank():
+    states = [_active("fallback", routing_policy="preserve"), _active("regular")]
+    repo = _make_sticky_repo("fallback")
+
+    selection = await _invoke_stickiness(
+        states,
+        "thread",
+        repo,
+        sticky_existing_account_id="fallback",
+        account_priority={"fallback": 0, "regular": 1},
+        sticky_owner_last_used_at=_last_used(30),
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "fallback"
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preserve_owner_keeps_its_conversation_while_nothing_else_can_serve():
+    states = [_active("fallback", routing_policy="preserve"), _rate_limited("regular", reset_at=time.time() + 3600)]
+    repo = _make_sticky_repo("fallback")
+
+    selection = await _invoke_stickiness(states, "thread", repo, sticky_existing_account_id="fallback")
+
+    assert selection.account is not None
+    assert selection.account.account_id == "fallback"
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_production_case_preserve_owner_on_second_tier_returns_to_burn_first_tier():
+    # Key 08a0... on 2026-10-28: tiers [[d717, 9d24], [eeab]], eeab preserve.
+    states = [
+        _active("d717", used_percent=0.0, secondary_used_percent=14.0, routing_policy="burn_first"),
+        _active("9d24", used_percent=0.0, secondary_used_percent=14.0, routing_policy="burn_first"),
+        _active("eeab", used_percent=5.0, secondary_used_percent=11.0, routing_policy="preserve"),
+    ]
+    repo = _make_sticky_repo("eeab")
+
+    selection = await _invoke_stickiness(
+        states,
+        "thread",
+        repo,
+        sticky_existing_account_id="eeab",
+        account_priority={"d717": 0, "9d24": 0, "eeab": 1},
+        sticky_owner_last_used_at=_last_used(0.2),
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id in {"d717", "9d24"}
+
+
+@pytest.mark.asyncio
+async def test_cold_owner_returns_its_conversation_to_the_better_rank():
+    states = [_active("first", used_percent=40.0), _active("second", used_percent=5.0)]
+    repo = _make_sticky_repo("second")
+
+    with routing_trace.capture() as draft:
+        selection = await _invoke_stickiness(
+            states,
+            "thread",
+            repo,
+            sticky_existing_account_id="second",
+            account_priority={"first": 0, "second": 1},
+            sticky_owner_last_used_at=_last_used(11),
+        )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "first"
+    repo.upsert.assert_called_once_with("thread", "first", kind=StickySessionKind.PROMPT_CACHE)
+    assert draft.owner_flags["rank_return"] is True
+    assert draft.owner_flags["preserve_release"] is False
+
+
+@pytest.mark.asyncio
+async def test_warm_owner_on_a_worse_rank_keeps_its_conversation():
+    states = [_active("first", used_percent=40.0), _active("second", used_percent=5.0)]
+    repo = _make_sticky_repo("second")
+
+    selection = await _invoke_stickiness(
+        states,
+        "thread",
+        repo,
+        sticky_existing_account_id="second",
+        account_priority={"first": 0, "second": 1},
+        sticky_owner_last_used_at=_last_used(2),
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "second"
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cold_owner_without_key_ranks_keeps_its_conversation():
+    states = [_active("first", used_percent=40.0), _active("second", used_percent=5.0)]
+    repo = _make_sticky_repo("second")
+
+    selection = await _invoke_stickiness(
+        states, "thread", repo, sticky_existing_account_id="second", sticky_owner_last_used_at=_last_used(20)
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "second"
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cold_owner_keeps_its_conversation_when_the_better_rank_cannot_serve():
+    states = [_rate_limited("first", reset_at=time.time() + 3600), _active("second", used_percent=5.0)]
+    repo = _make_sticky_repo("second")
+
+    selection = await _invoke_stickiness(
+        states,
+        "thread",
+        repo,
+        sticky_existing_account_id="second",
+        account_priority={"first": 0, "second": 1},
+        sticky_owner_last_used_at=_last_used(20),
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "second"
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cold_owner_with_unknown_last_use_keeps_its_conversation():
+    """Durable kinds carry no last use; without it the owner counts as warm."""
+    states = [_active("first", used_percent=40.0), _active("second", used_percent=5.0)]
+    repo = _make_sticky_repo("second")
+
+    selection = await _invoke_stickiness(
+        states,
+        "thread",
+        repo,
+        sticky_existing_account_id="second",
+        account_priority={"first": 0, "second": 1},
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "second"

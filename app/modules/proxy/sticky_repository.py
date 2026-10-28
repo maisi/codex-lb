@@ -81,6 +81,11 @@ class StickyOwnerLookup:
     # the deadline against the clock immediately before omitting the write,
     # and must never skip a write that changes the owner account.
     refresh_skip_deadline: datetime | None = None
+    # Naive-UTC ``updated_at`` of a live owner on a TTL-based kind. Every turn
+    # that keeps the owner rewrites it (coalesced within the refresh-skip
+    # window), so it is the conversation's last use; selection reads it to tell
+    # a cold prompt cache from a warm one.
+    last_used_at: datetime | None = None
 
 
 def _continuity_is_abandoned_for_source(
@@ -114,6 +119,7 @@ def _owner_lookup_from_row(
     *,
     continuity_source: _ContinuitySource | None,
     refresh_skip_deadline: datetime | None = None,
+    last_used_at: datetime | None = None,
 ) -> StickyOwnerLookup:
     if _continuity_is_abandoned_for_source(
         row.continuity_abandoned_at,
@@ -133,6 +139,7 @@ def _owner_lookup_from_row(
         account_id=row.account_id,
         continuity_abandoned=False,
         refresh_skip_deadline=refresh_skip_deadline,
+        last_used_at=last_used_at,
     )
 
 
@@ -219,6 +226,7 @@ class StickySessionsRepository:
                     now=now,
                     max_age_seconds=max_age_seconds,
                 ),
+                last_used_at=observed_updated_at,
             )
 
         # Release the read snapshot before attempting a SQLite write upgrade.
