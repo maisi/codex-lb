@@ -24,6 +24,10 @@ context; the existing routing guide links to its owning spec and context.
   routed-stream release, and multi-replica regression tests pass.
 - 50 frontend tests pass across routing settings and request routing details;
   the 45 settings tests were rerun after the final localized help-copy changes.
+- Two Playwright screenshot scenarios pass and render synthetic before/after
+  routing snapshots with 100%/100% versus observed 8%/15% quota. Captures are
+  stored under docs/screenshots/routing-quota-pressure-{before,after}.jpg;
+  their generator passes ESLint. The PR embeds both images for visual review.
 - Weighted-draw tests cover both capacity-weighted and relative-availability
   selection, composition with existing error-rate weights, zero load weights,
   and the documented per-million-token normalization. Existing quota-threshold

@@ -192,6 +192,50 @@ test("dashboard — dark", async ({ page }) => {
   await capture(page, { file: "dashboard-dark.jpg", theme: "dark", route: "/dashboard" });
 });
 
+// Synthetic snapshots of the same quota observations under a concurrent lease.
+// The before fixture reproduces the old token/credit saturation; the after
+// fixture records observed usage without local load added to either window.
+for (const phase of ["before", "after"] as const) {
+  test(`routing quota pressure — ${phase}`, async ({ page }) => {
+    const before = phase === "before";
+    const candidate = (accountId: string, rank: number, routingPolicy: string, primary: number | null, secondary: number) => ({
+      accountId, rank, routingPolicy, primaryUsedPercent: primary, secondaryUsedPercent: secondary,
+      status: "active", health: "healthy", overBudgetThreshold: primary !== null && primary > 90,
+      eligible: true, overloadBackoff: false, unavailableReason: null,
+    });
+    const file = `routing-quota-pressure-${phase}.jpg`;
+    await capture(page, {
+      file, theme: "dark", route: "/dashboard",
+      beforeScreenshot: async (currentPage) => {
+        await currentPage.route("**/api/request-logs/*/routing", (route) => fulfill(route, {
+          requestId: "req_01",
+          attempts: [{
+            attempt: 1, recordedAt: "2026-10-28T13:29:48Z", apiKeyId: "key_example",
+            model: "gpt-6.1-sol", routingStrategy: "capacity_weighted", stickyKind: null,
+            stickyOwnerAccountId: null, outcome: "new_selection", selectedAccountId: before ? "acc_03" : "acc_02",
+            servingRank: before ? 1 : 0, decidedBy: before ? "over_budget_or_preserve" : "burn_first",
+            ownerFlags: {}, budgetThresholdPct: 90, keyRanksAccounts: true,
+            excludedAccountIds: [], rankedAccountsNotOffered: [], errorCode: null,
+            candidates: [
+              candidate("acc_01", 0, "normal", before ? 100 : 85, before ? 100 : 27),
+              candidate("acc_02", 0, "burn_first", before ? 100 : 8, before ? 100 : 15),
+              candidate("acc_03", 1, "preserve", null, 17),
+            ],
+          }],
+        }));
+        await currentPage.getByRole("button", { name: /view details/i }).first().click();
+        const panel = currentPage.getByRole("region", { name: "Routing decision" });
+        await expect(panel).toBeVisible();
+        await expect(panel).toContainText(before ? "100%" : "8%");
+        await panel.scrollIntoViewIfNeeded();
+      },
+    });
+    await page.getByRole("region", { name: "Routing decision" }).screenshot({
+      path: path.join(SCREENSHOT_DIR, file), type: "jpeg", quality: 90,
+    });
+  });
+}
+
 test("dashboard conversations — desktop", async ({ page }) => {
   await capture(page, {
     file: "dashboard-conversations.jpg",
