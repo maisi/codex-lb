@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.models import Base
 from app.db.oracle_baseline import load_oracle_baseline, oracle_schema_drift
+from app.db.oracle_transfer_fence import has_incomplete_transfer
 
 
 class OracleTransferError(RuntimeError):
@@ -73,7 +74,9 @@ def prepare_target(database_url: str, connection: Connection, *, dry_run: bool) 
         state = inspect_migration_state(database_url)
         if not state.has_alembic_version_table or state.needs_upgrade or state.is_ahead:
             raise OracleTransferError("Initialized Oracle target must have its own migration ledger at head")
-        assert_pristine_target(connection)
+        # An interrupted transfer's committed batches are restarted, never accepted as pristine data.
+        if not has_incomplete_transfer(connection):
+            assert_pristine_target(connection)
     except SQLAlchemyError:
         raise OracleTransferError("Could not inspect Oracle transfer target") from None
 

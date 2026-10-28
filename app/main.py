@@ -77,6 +77,7 @@ from app.core.usage.metadata_scheduler import build_metadata_refresh_scheduler
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
+from app.db.oracle_transfer_fence import verify_no_incomplete_oracle_transfer
 from app.db.session import (
     SessionLocal,
     close_db,
@@ -521,6 +522,7 @@ async def lifespan(app: FastAPI):
     bridge_endpoint_base_url = settings.http_responses_session_bridge_advertise_base_url
     await init_db()
     init_background_db()
+    await verify_no_incomplete_oracle_transfer()
     await verify_encryption_key_fingerprint()
     _auto_bootstrap_token = await ensure_auto_bootstrap_token()
     if _auto_bootstrap_token:

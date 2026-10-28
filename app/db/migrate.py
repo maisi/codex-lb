@@ -1314,6 +1314,7 @@ def main() -> None:
         print(f"oracle_transfer={'dry_run' if report.dry_run else 'complete'}")
         print(f"tables={len(report.tables)} rows={sum(table.rows for table in report.tables)}")
         print(f"target_preparation_required={str(report.needs_target_preparation).lower()}")
+        print(f"target_incomplete_transfer={str(report.target_incomplete_transfer).lower()}")
         print("cutover_requires=existing_encryption_key_and_data_directory_including_archives")
         return
 

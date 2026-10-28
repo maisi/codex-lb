@@ -16,15 +16,31 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import LargeBinary, Table, and_, bindparam, create_engine, inspect, select, update
+from sqlalchemy import (
+    Column,
+    ColumnElement,
+    LargeBinary,
+    Table,
+    and_,
+    bindparam,
+    create_engine,
+    delete,
+    insert,
+    inspect,
+    or_,
+    select,
+    true,
+    update,
+)
 from sqlalchemy.dialects import oracle
 from sqlalchemy.engine import Connection, Engine
 
 from app.core.config.settings import get_settings
 from app.db.migration_lock import migration_lock
-from app.db.models import Base
+from app.db.models import Base, RuntimeSentinel
 from app.db.oracle_connection import create_oracle_sync_engine
 from app.db.oracle_preflight import _oracle_url
+from app.db.oracle_transfer_fence import INCOMPLETE_TRANSFER_SENTINEL, has_incomplete_transfer
 from app.db.oracle_transfer_target import (
     OracleTransferError,
     advance_sequences,
@@ -51,6 +67,7 @@ class OracleTransferReport:
     tables: tuple[TableTransferReport, ...]
     dry_run: bool
     needs_target_preparation: bool
+    target_incomplete_transfer: bool
 
 
 def _canonical(value: Any) -> Any:
@@ -93,7 +110,7 @@ def _table_report(
         and storage.length is not None
     }
     count = total = 0
-    with connection.execute(select(table)) as result:
+    with connection.execute(select(table).where(_transferable(table))) as result:
         for batch in result.mappings().partitions(batch_size):
             for row in batch:
                 if cipher is not None:
@@ -199,19 +216,51 @@ def _check_key_fingerprint(connection: Connection, fingerprint: str) -> None:
         raise OracleTransferError("The selected encryption key does not match the source key fingerprint.")
 
 
+def _transferable(table: Table) -> ColumnElement[bool]:
+    # The fence marker belongs to the target's transfer state, never to copied data.
+    if table.name == RuntimeSentinel.__tablename__:
+        return table.c.name != INCOMPLETE_TRANSFER_SENTINEL
+    return true()
+
+
+def _self_columns(table: Table) -> tuple[Column[Any], ...]:
+    return tuple(column for column in table.columns if any(fk.column.table is table for fk in column.foreign_keys))
+
+
+def _clear_in_batches(
+    target: Connection,
+    table: Table,
+    condition: ColumnElement[bool],
+    batch_size: int,
+    *,
+    values: dict[str, None] | None = None,
+) -> None:
+    """Delete (or null ``values`` in) matching rows, committing each primary-key batch."""
+    primary_key = tuple(table.primary_key.columns)
+    match = and_(*(column == bindparam(f"transfer_pk_{column.name}") for column in primary_key))
+    statement = delete(table).where(match) if values is None else update(table).where(match).values(values)
+    query = select(*primary_key).where(condition).limit(batch_size)
+    while keys := target.execute(query).all():
+        target.execute(
+            statement,
+            [{f"transfer_pk_{column.name}": key[index] for index, column in enumerate(primary_key)} for key in keys],
+        )
+        target.commit()
+
+
 def _copy_table(source: Connection, target: Connection, table: Table, batch_size: int) -> None:
-    self_columns = tuple(
-        column for column in table.columns if any(fk.column.table is table for fk in column.foreign_keys)
-    )
+    self_columns = _self_columns(table)
     if any(not column.nullable for column in self_columns):
         raise OracleTransferError(f"Cannot safely transfer non-nullable self references in {table.name}.")
-    with source.execute(select(table)) as result:
+    with source.execute(select(table).where(_transferable(table))) as result:
         for batch in result.mappings().partitions(batch_size):
             values = [dict(row) for row in batch]
             for row in values:
                 for column in self_columns:
                     row[column.name] = None
             target.execute(table.insert(), values)
+            # One committed transaction per batch bounds Oracle undo by batch_size.
+            target.commit()
     if not self_columns:
         return
     primary_key = tuple(table.primary_key.columns)
@@ -233,6 +282,7 @@ def _copy_table(source: Connection, target: Connection, table: Table, batch_size
                     for row in batch
                 ],
             )
+            target.commit()
 
 
 def _transfer_rows(
@@ -243,18 +293,37 @@ def _transfer_rows(
     progress: Callable[[str], None],
 ) -> None:
     tables = tuple(Base.metadata.sorted_tables)
-    # Break self-references before reverse-dependency seed deletion as well.
+    # Clears baseline seeds, or every committed batch of an interrupted attempt.
+    # Self-references are broken first so reverse-dependency deletes succeed.
     for table in reversed(tables):
-        self_columns = [col for col in table.columns if any(fk.column.table is table for fk in col.foreign_keys)]
-        if self_columns:
-            target.execute(table.update().values({col.name: None for col in self_columns}))
-        target.execute(table.delete())
+        if self_columns := _self_columns(table):
+            referencing = or_(*(column.is_not(None) for column in self_columns))
+            _clear_in_batches(
+                target, table, referencing, batch_size, values={column.name: None for column in self_columns}
+            )
+        _clear_in_batches(target, table, _transferable(table), batch_size)
     for table, expected in zip(tables, reports, strict=True):
         _copy_table(source, target, table, batch_size)
         actual = _table_report(target, table, batch_size)
         if actual != expected:
             raise OracleTransferError(f"Complete row verification failed for {table.name}; transfer rolled back.")
         progress(f"verified table={table.name} rows={actual.rows}")
+
+
+_FENCED_FAILURE = (
+    "Oracle transfer is incomplete: committed batches remain and application startup is refused until a "
+    "transfer completes. Keep the SQLite source stopped and repeat migrate-to-oracle; it restarts from a "
+    "cleared target. The SQLite source remains authoritative."
+)
+
+
+def _fence_target(target: Connection) -> None:
+    """Commit the startup fence in the transaction that proved no other writer and a usable target."""
+    lock_target_tables(target)
+    if not has_incomplete_transfer(target):
+        assert_pristine_target(target)
+        target.execute(insert(RuntimeSentinel).values(name=INCOMPLETE_TRANSFER_SENTINEL, value="migrate-to-oracle"))
+    target.commit()
 
 
 def transfer_sqlite_to_oracle(
@@ -292,19 +361,28 @@ def transfer_sqlite_to_oracle(
                             with target_engine.connect() as target:
                                 needs_preparation = not inspect(target).get_table_names()
                                 prepare_target(database_url, target, dry_run=dry_run)
+                                incomplete = not needs_preparation and has_incomplete_transfer(target)
                         if dry_run:
-                            return OracleTransferReport(reports, True, needs_preparation)
+                            return OracleTransferReport(reports, True, needs_preparation, incomplete)
                         run_upgrade(database_url, bootstrap_legacy=False)
                         with migration_lock(database_url, timeout_seconds=lock_timeout):
                             with target_engine.connect() as target:
                                 prepare_target(database_url, target, dry_run=False)
                                 advance_sequences(source, target)
                                 target.commit()
-                                with target.begin():
-                                    lock_target_tables(target)
-                                    assert_pristine_target(target)
+                                _fence_target(target)
+                                try:
                                     _transfer_rows(source, target, reports, batch_size, progress)
-                        return OracleTransferReport(reports, False, needs_preparation)
+                                    target.execute(
+                                        delete(RuntimeSentinel).where(
+                                            RuntimeSentinel.name == INCOMPLETE_TRANSFER_SENTINEL
+                                        )
+                                    )
+                                    target.commit()
+                                except Exception as exc:
+                                    detail = f"{exc} " if isinstance(exc, OracleTransferError) else ""
+                                    raise OracleTransferError(detail + _FENCED_FAILURE) from None
+                        return OracleTransferReport(reports, False, needs_preparation, incomplete)
                     finally:
                         target_engine.dispose()
             finally:

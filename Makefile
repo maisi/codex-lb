@@ -196,7 +196,11 @@ test-postgres:
 test-oracle:
 	@test -n "$$CODEX_LB_TEST_ORACLE_URL" || (echo "Set CODEX_LB_TEST_ORACLE_URL to an owned Oracle test schema." >&2; exit 1)
 	uv sync --dev --frozen --extra oracle
-	PYTHONFAULTHANDLER=1 uv run --extra oracle pytest $(PYTEST_ARGS) -rx tests/integration/test_oracle*.py
+	PYTHONFAULTHANDLER=1 uv run --extra oracle pytest $(PYTEST_ARGS) -rx \
+	  $(filter-out tests/integration/test_oracle_ha.py,$(wildcard tests/integration/test_oracle*.py))
+	# Signal timeout lets the owned-process/schema fixtures run their cleanup.
+	PYTHONFAULTHANDLER=1 uv run --extra oracle pytest $(PYTEST_ARGS) -rx \
+	  --timeout-method=signal -o faulthandler_timeout=0 tests/integration/test_oracle_ha.py
 
 migration-check:
 	uv sync --dev --frozen

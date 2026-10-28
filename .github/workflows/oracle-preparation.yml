@@ -1,4 +1,4 @@
-name: Oracle single-instance validation
+name: Oracle runtime and failover validation
 
 on:
   workflow_dispatch:
@@ -15,6 +15,8 @@ on:
       - app/core/utils/sql.py
       - app/core/rate_limiter/**
       - tests/integration/test_oracle*.py
+      - tests/integration/oracle_*.py
+      - deploy/oracle-ha/**
       - tests/unit/test_oracle*.py
       - pyproject.toml
       - uv.lock
@@ -29,7 +31,7 @@ concurrency:
 
 jobs:
   oracle-preparation:
-    name: Oracle Free runtime smoke
+    name: Oracle Free runtime and two-instance failover
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
@@ -58,6 +60,11 @@ jobs:
           python-version: "3.13"
           enable-cache: true
           prune-cache: true
+      - name: Install the real-process failover load balancer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends haproxy
+          printf '%s\n' '127.0.0.1 ha-a.localhost ha-b.localhost ha-c.localhost' | sudo tee -a /etc/hosts
       - name: Grant the test schema access to the migration lock package
         run: |
           docker exec -i "${{ job.services.oracle.id }}" sqlplus -s / as sysdba <<'SQL'
@@ -70,6 +77,9 @@ jobs:
           CREATE USER codex_runtime IDENTIFIED BY codex_runtime_test_only QUOTA UNLIMITED ON USERS;
           GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE TO codex_runtime;
           GRANT EXECUTE ON SYS.DBMS_LOCK TO codex_runtime;
+          CREATE USER codex_ha IDENTIFIED BY codex_ha_test_only DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
+          GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE TO codex_ha;
+          GRANT EXECUTE ON SYS.DBMS_LOCK TO codex_ha;
           EXIT;
           SQL
       - name: Test Oracle installation and runtime on isolated schemas
@@ -77,4 +87,5 @@ jobs:
           CODEX_LB_TEST_ORACLE_URL: oracle+oracledb://codex_test:codex_test@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
           CODEX_LB_TEST_ORACLE_BASELINE_URL: oracle+oracledb://codex_baseline:codex_baseline_test_only@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
           CODEX_LB_TEST_ORACLE_RUNTIME_URL: oracle+oracledb://codex_runtime:codex_runtime_test_only@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
+          CODEX_LB_TEST_ORACLE_HA_URL: oracle+oracledb://codex_ha:codex_ha_test_only@127.0.0.1:${{ job.services.oracle.ports['1521'] }}/?service_name=FREEPDB1
         run: make test-oracle

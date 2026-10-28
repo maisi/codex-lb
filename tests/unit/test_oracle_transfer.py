@@ -21,6 +21,12 @@ import app.db.oracle_transfer as transfer
 from app.db.migration_lock import migration_lock
 from app.db.models import Base
 from app.db.oracle_baseline import load_oracle_baseline
+from app.db.oracle_transfer_fence import (
+    INCOMPLETE_TRANSFER_SENTINEL,
+    IncompleteOracleTransferError,
+    has_incomplete_transfer,
+    verify_no_incomplete_oracle_transfer,
+)
 from app.db.oracle_transfer_target import OracleTransferError, assert_pristine_target
 from app.db.sqlite_utils import acquire_sqlite_runstate_lock, release_sqlite_runstate_lock
 
@@ -139,7 +145,8 @@ def target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Engine]:
 
     def prepare(database_url: str, connection: Connection, *, dry_run: bool) -> None:
         del database_url, dry_run
-        assert_pristine_target(connection)
+        if not has_incomplete_transfer(connection):
+            assert_pristine_target(connection)
 
     monkeypatch.setattr(transfer, "create_oracle_sync_engine", lambda _url: engine)
     monkeypatch.setattr(transfer, "migration_lock", lock)
@@ -255,10 +262,23 @@ def test_unsafe_source_is_rejected_before_target_access(
             release_sqlite_runstate_lock(held)
 
 
-@pytest.mark.parametrize("failure", ["insert", "verification"])
-def test_partial_transfer_rolls_back_all_rows(source: Path, target: Engine, failure: str) -> None:
-    before = _contents(target)
+def _source_contents(source: Path) -> dict[str, list[tuple[Any, ...]]]:
+    engine = _sqlite_engine(source)
+    try:
+        return _contents(engine)
+    finally:
+        engine.dispose()
 
+
+def _has_marker(engine: Engine) -> bool:
+    with engine.connect() as connection:
+        return has_incomplete_transfer(connection)
+
+
+@pytest.mark.parametrize("failure", ["insert", "verification"])
+def test_interrupted_transfer_is_fenced_and_restarts_from_cleared_target(
+    source: Path, target: Engine, failure: str
+) -> None:
     def sabotage(connection, _cursor, statement, _parameters, _context, _executemany) -> None:
         if statement.startswith("INSERT INTO audit_logs"):
             if failure == "insert":
@@ -266,13 +286,77 @@ def test_partial_transfer_rolls_back_all_rows(source: Path, target: Engine, fail
             connection.exec_driver_sql("UPDATE audit_logs SET details = 'corrupted'")
 
     event.listen(target, "after_cursor_execute", sabotage)
-    with pytest.raises(OracleTransferError) as error:
+    with pytest.raises(OracleTransferError, match="incomplete") as error:
         transfer.transfer_sqlite_to_oracle(_TARGET_URL, source_sqlite=source, batch_size=1, progress=lambda _: None)
-    assert "credential" not in str(error.value)
-    assert _contents(target) == before
     event.remove(target, "after_cursor_execute", sabotage)
-    report = transfer.transfer_sqlite_to_oracle(_TARGET_URL, source_sqlite=source, progress=lambda _: None)
+    assert "credential" not in str(error.value)
+    assert _has_marker(target)
+    partial = _contents(target)
+    assert partial["accounts"], "earlier tables stay committed behind the fence"
+
+    dry_run = transfer.transfer_sqlite_to_oracle(
+        _TARGET_URL, source_sqlite=source, dry_run=True, progress=lambda _: None
+    )
+    assert dry_run.target_incomplete_transfer is True
+    assert _contents(target) == partial
+
+    report = transfer.transfer_sqlite_to_oracle(
+        _TARGET_URL, source_sqlite=source, batch_size=2, progress=lambda _: None
+    )
     assert report.dry_run is False
+    assert report.target_incomplete_transfer is True
+    assert not _has_marker(target)
+    assert _contents(target) == _source_contents(source)
+
+
+def test_every_target_transaction_changes_at_most_one_batch(source: Path, target: Engine) -> None:
+    batch_size = 2
+    statements = rows = most_statements = most_rows = 0
+
+    def count(_connection, _cursor, statement, parameters, _context, executemany) -> None:
+        nonlocal statements, rows, most_statements, most_rows
+        if statement.lstrip().split()[0].upper() in {"INSERT", "UPDATE", "DELETE"}:
+            statements += 1
+            rows += len(parameters) if executemany else 1
+            most_statements, most_rows = max(most_statements, statements), max(most_rows, rows)
+
+    def reset(_connection) -> None:
+        nonlocal statements, rows
+        statements = rows = 0
+
+    event.listen(target, "after_cursor_execute", count)
+    event.listen(target, "commit", reset)
+    try:
+        transfer.transfer_sqlite_to_oracle(
+            _TARGET_URL, source_sqlite=source, batch_size=batch_size, progress=lambda _: None
+        )
+    finally:
+        event.remove(target, "after_cursor_execute", count)
+        event.remove(target, "commit", reset)
+    assert most_statements == 1
+    assert most_rows <= batch_size
+    assert not _has_marker(target)
+
+
+async def test_startup_refuses_only_a_marked_oracle_database(tmp_path: Path) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'marked.db'}")
+    sentinels = Base.metadata.tables["runtime_sentinels"]
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+            await connection.execute(sentinels.insert().values(name=INCOMPLETE_TRANSFER_SENTINEL, value="x"))
+        sessions = async_sessionmaker(engine)
+        # Other backends are never checked and open no session.
+        await verify_no_incomplete_oracle_transfer(sessions, database_url="sqlite+aiosqlite:///store.db")
+        with pytest.raises(IncompleteOracleTransferError, match="migrate-to-oracle"):
+            await verify_no_incomplete_oracle_transfer(sessions, database_url=_TARGET_URL)
+        async with engine.begin() as connection:
+            await connection.execute(sentinels.delete())
+        await verify_no_incomplete_oracle_transfer(sessions, database_url=_TARGET_URL)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.parametrize("used", ["application_row", "changed_seed"])
