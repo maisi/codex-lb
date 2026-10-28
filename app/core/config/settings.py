@@ -556,6 +556,7 @@ class Settings(BaseSettings):
     # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_account_error_rate_weighting_enabled: bool = True
     # T3 → dashboard (deprecated env alias, remove next minor)
+    # Dimensionless draw-weight pressure per million reserved tokens.
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
     # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)

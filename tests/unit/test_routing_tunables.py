@@ -157,10 +157,10 @@ def test_state_pressure_uses_the_snapshot_penalty_not_the_environment(monkeypatc
         now=now,
         routing_tunables=RoutingTunables(inflight_penalty_pct=10.0),
     )
-    # Four in-flight requests on a 20 % baseline: 2.5 % each from the
-    # environment, 10 % each from the dashboard snapshot.
-    assert environment_state.used_percent == pytest.approx(30.0)
-    assert dashboard_state.used_percent == pytest.approx(60.0)
+    # Four leases discount draws using the resolved knob, without changing quota.
+    assert environment_state.used_percent == dashboard_state.used_percent == 20.0
+    assert environment_state.selection_weight_multiplier == pytest.approx(1.0 / 1.1)
+    assert dashboard_state.selection_weight_multiplier == pytest.approx(1.0 / 1.4)
 
 
 @pytest.mark.asyncio

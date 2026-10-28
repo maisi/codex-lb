@@ -148,8 +148,8 @@ class AccountState:
     ignore_standard_quota: bool = False
     # Multiplier applied to this candidate's draw weight by the weighted
     # strategies (``capacity_weighted``, ``relative_availability``); ``1.0`` is
-    # neutral. The balancer derives it from the account's recent upstream
-    # error rate. Deterministic strategies ignore it.
+    # neutral. The balancer composes local lease pressure, recent upstream
+    # errors, and latency signals here. Deterministic strategies ignore it.
     selection_weight_multiplier: float = 1.0
 
 
