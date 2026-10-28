@@ -36,8 +36,12 @@ eligible to serve the request.
 
 #### Scenario: Priority does not re-home a pinned conversation
 
-- **WHEN** a request is pinned to a continuity owner
+- **WHEN** a request is pinned to a hard continuity owner, or to a
+  non-`preserve` soft owner whose conversation was used within the last 600
+  seconds
 - **THEN** selection resolves to that owner regardless of rank
+- **AND** a `preserve` soft owner, or one idle for longer, yields as
+  `sticky-session-operations` describes
 
 #### Scenario: Recovery admission is not starved by priority
 

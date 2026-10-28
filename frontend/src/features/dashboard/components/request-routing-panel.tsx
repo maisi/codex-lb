@@ -9,7 +9,14 @@ import type { RoutingAttempt, RoutingCandidate } from "@/features/dashboard/sche
 import { cn } from "@/lib/utils";
 import { formatPercentNullable } from "@/utils/formatters";
 
-const OWNER_FLAGS = ["budget_pressured", "rate_limit_far_away", "burn_first_reallocate", "overload_reroute"] as const;
+const OWNER_FLAGS = [
+  "budget_pressured",
+  "rate_limit_far_away",
+  "burn_first_reallocate",
+  "overload_reroute",
+  "preserve_release",
+  "rank_return",
+] as const;
 
 function compareCandidates(left: RoutingCandidate, right: RoutingCandidate): number {
   const leftRank = left.rank ?? Number.MAX_SAFE_INTEGER;

@@ -33,6 +33,12 @@ The order of a key's assigned accounts is its selection priority. The proxy uses
 serve and moves down one rank once it cannot: rate-limited, out of quota, paused, or above the sticky primary
 threshold. A key's order outranks each account's routing policy (`burn_first`, `preserve`).
 
+An ongoing conversation keeps its account while that account still holds a warm prompt cache, even if a
+better-ranked account is free again. It returns to the key's best available rank once it has been idle for 10
+minutes (the cache is cold by then, so the move costs nothing), and it leaves a `preserve` account as soon as a
+non-`preserve` account can serve it. Hard continuation (`previous_response_id`, turn state, bridge sessions) always
+stays on its owner. The request details' **Routing decision** names either move.
+
 To let several accounts carry a key together, link an account to the one above it (the link button next to it in the
 priority list). Linked accounts share a rank: the routing strategy balances between them, and their routing policy
 decides which goes first. Through the API, send `assignedAccountTiers` (for example `[["acc-a", "acc-b"], ["acc-c"]]`)

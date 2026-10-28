@@ -147,4 +147,30 @@ describe("RequestRoutingPanel", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Conversation account: above the budget threshold")).toBeInTheDocument();
   });
+
+  it("names a preserve hand-back and a cold-cache return to the key's rank", async () => {
+    server.use(
+      http.get("/api/request-logs/:requestId/routing", () =>
+        HttpResponse.json({
+          requestId: "req_returned",
+          attempts: [
+            {
+              ...tierFailover.attempts[0],
+              outcome: "moved_from_owner",
+              stickyOwnerAccountId: "acc_primary",
+              ownerFlags: { preserve_release: true, rank_return: true, burn_first_reallocate: false },
+            },
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(<RequestRoutingPanel requestId="req_returned" />);
+
+    expect(
+      await screen.findByText(
+        "Conversation account: preserve account handed the conversation back, prompt cache cold, returned to the key's better rank",
+      ),
+    ).toBeInTheDocument();
+  });
 });

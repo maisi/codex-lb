@@ -106,6 +106,16 @@ def capture() -> Iterator[_Draft]:
         _ACTIVE.reset(token)
 
 
+@contextmanager
+def suspended() -> Iterator[None]:
+    """Run a what-if selection without leaving notes on the current draft."""
+    token = _ACTIVE.set(None)
+    try:
+        yield
+    finally:
+        _ACTIVE.reset(token)
+
+
 def note_pool(
     states: Iterable[AccountState],
     selectable: Iterable[AccountState],

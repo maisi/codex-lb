@@ -751,3 +751,59 @@ async def test_load_balancer_fill_first_cycles_through_accounts(db_setup):
     third = await balancer.select_account(routing_strategy="fill_first")
     assert third.account is not None
     assert third.account.id == accounts[1].id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("idle_minutes", "expected"), [(11, "acc_rank_first"), (2, "acc_rank_second")])
+async def test_prompt_cache_owner_returns_to_the_better_rank_only_once_cold(db_setup, idle_minutes, expected):
+    from sqlalchemy import update
+
+    from app.db.models import StickySession, StickySessionKind
+
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        for account_id, used in (("acc_rank_first", 40.0), ("acc_rank_second", 5.0)):
+            await accounts_repo.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt(f"access-{account_id}"),
+                    refresh_token_encrypted=encryptor.encrypt(f"refresh-{account_id}"),
+                    id_token_encrypted=encryptor.encrypt(f"id-{account_id}"),
+                    last_refresh=now,
+                    status=AccountStatus.ACTIVE,
+                    deactivation_reason=None,
+                )
+            )
+            await usage_repo.add_entry(
+                account_id=account_id, used_percent=used, window="primary", window_minutes=300, recorded_at=now
+            )
+        await StickySessionsRepository(session).upsert(
+            "thread-rank", "acc_rank_second", kind=StickySessionKind.PROMPT_CACHE
+        )
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key == "thread-rank")
+            .values(updated_at=now - timedelta(minutes=idle_minutes))
+        )
+        await session.commit()
+
+    selection = await LoadBalancer(_repo_factory).select_account(
+        "thread-rank",
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_max_age_seconds=1800,
+        routing_strategy="usage_weighted",
+        account_priority={"acc_rank_first": 0, "acc_rank_second": 1},
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == expected
+    async with SessionLocal() as session:
+        owner = await StickySessionsRepository(session).get_account_id(
+            "thread-rank", kind=StickySessionKind.PROMPT_CACHE
+        )
+    assert owner == expected

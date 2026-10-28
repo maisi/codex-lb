@@ -1811,6 +1811,7 @@ class LoadBalancer:
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
         sticky_refresh_skip_deadline: datetime | None = None,
+        sticky_owner_last_used_at: datetime | None = None,
         redact_sensitive_details: bool = False,
     ) -> _StickySelectionOutcome:
         return await _run_select_with_stickiness(
@@ -1839,6 +1840,7 @@ class LoadBalancer:
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
             usage_exhaustion_states=usage_exhaustion_states,
             sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
+            sticky_owner_last_used_at=sticky_owner_last_used_at,
             overload_backoff_runtime=self._runtime,
             clock=self._clock,
             redact_sensitive_details=redact_sensitive_details,
