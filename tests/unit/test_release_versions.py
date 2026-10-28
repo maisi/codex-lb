@@ -105,7 +105,48 @@ def test_release_metadata_make_latest_outputs() -> None:
     assert "make_latest=false" in beta.stdout
 
 
-@pytest.mark.parametrize("bad", ["1.19", "v1.19.0", "1.19.0-beta", "1.19.0-beta.0", "1.19.0-dev.1"])
+def test_parse_post_release_beta_version() -> None:
+    post = parse_tag("v1.25.0-beta.9.post1")
+
+    assert post.version == "1.25.0-beta.9.post1"
+    assert post.base == "1.25.0"
+    assert post.channel == "beta"
+    assert post.serial == 9
+    assert post.post == 1
+    assert post.tag == "v1.25.0-beta.9.post1"
+    assert post.pypi_version == "1.25.0b9.post1"
+    assert post.is_prerelease
+
+
+def test_release_metadata_for_post_release_tag() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.release_metadata", "--tag", "v1.25.0-beta.9.post1"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    assert "version=1.25.0-beta.9.post1" in result.stdout
+    assert "channel=beta" in result.stdout
+    assert "is_prerelease=true" in result.stdout
+    assert "pypi_version=1.25.0b9.post1" in result.stdout
+    assert "make_latest=false" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "1.19",
+        "v1.19.0",
+        "1.19.0-beta",
+        "1.19.0-beta.0",
+        "1.19.0-dev.1",
+        "1.19.0.post1",
+        "1.19.0-beta.1.post0",
+        "1.19.0-beta.1.1",
+        "1.19.0-beta.1-1",
+    ],
+)
 def test_parse_version_rejects_non_release_spellings(bad: str) -> None:
     with pytest.raises(ValueError):
         parse_version(bad)
@@ -129,6 +170,18 @@ def test_assert_project_versions_accepts_pep440_uv_lock_prerelease(tmp_path: Pat
     )
 
     assert_project_versions(tmp_path, "1.20.0-beta.3")
+
+
+def test_assert_project_versions_accepts_pep440_uv_lock_post_release(tmp_path: Path) -> None:
+    write_minimal_release_files(tmp_path, "1.25.0-beta.9.post1")
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "codex-lb"\nversion = "1.25.0b9.post1"\nsource = { editable = "." }\n',
+        encoding="utf-8",
+    )
+
+    assert_project_versions(tmp_path, "1.25.0-beta.9.post1")
+    with pytest.raises(ValueError):
+        assert_project_versions(tmp_path, "1.25.0-beta.9")
 
 
 @pytest.mark.parametrize(
@@ -177,6 +230,23 @@ def test_next_beta_number_uses_existing_tags(tmp_path: Path) -> None:
     assert latest is not None
     assert latest.tag == "v1.19.0-beta.3"
     assert next_beta_number(tmp_path, "1.19.0") == 4
+
+
+def test_latest_beta_tag_orders_post_releases_between_betas(tmp_path: Path) -> None:
+    write_minimal_release_files(tmp_path)
+    init_git_repo(tmp_path)
+    for tag in ("v1.25.0-beta.9", "v1.25.0-beta.9.post2", "v1.25.0-beta.9.post1", "v1.25.0-beta.8"):
+        subprocess.run(["git", "tag", tag], cwd=tmp_path, check=True)
+
+    latest = latest_beta_tag(tmp_path, "1.25.0")
+    assert latest is not None
+    assert latest.tag == "v1.25.0-beta.9.post2"
+    assert next_beta_number(tmp_path, "1.25.0") == 10
+
+    subprocess.run(["git", "tag", "v1.25.0-beta.10"], cwd=tmp_path, check=True)
+    latest = latest_beta_tag(tmp_path, "1.25.0")
+    assert latest is not None
+    assert latest.tag == "v1.25.0-beta.10"
 
 
 def test_tag_targets_head_detects_covered_beta_merge(tmp_path: Path) -> None:
@@ -241,6 +311,22 @@ def test_releasable_commits_since_keeps_post_beta_feature_commit(tmp_path: Path)
     assert "- feat(proxy): add upstream proxy controls (" in format_beta_changelog(tmp_path, "v1.20.0-beta.2")
 
 
+def test_beta_changelog_keeps_one_line_per_commit(tmp_path: Path) -> None:
+    write_minimal_release_files(tmp_path, "1.20.0-beta.2")
+    init_git_repo(tmp_path)
+    subprocess.run(["git", "tag", "v1.20.0-beta.2"], cwd=tmp_path, check=True)
+
+    for subject in ("feat: first", "fix: second", "perf: third"):
+        append_readme(tmp_path, subject)
+        commit_all(tmp_path, subject)
+
+    commits = releasable_commits_since(tmp_path, "v1.20.0-beta.2")
+    assert all(len(commit.sha) == 40 and commit.sha.isalnum() for commit in commits)
+    lines = format_beta_changelog(tmp_path, "v1.20.0-beta.2").splitlines()
+    assert [line.rsplit(" (", 1)[0] for line in lines] == ["- feat: first", "- fix: second", "- perf: third"]
+    assert all(line.endswith(")") and len(line.rsplit(" (", 1)[1]) == 8 for line in lines)
+
+
 def test_prepare_beta_release_skips_ci_only_commit_after_latest_beta(tmp_path: Path) -> None:
     write_minimal_release_files(tmp_path, "1.20.0-beta.2")
     init_git_repo(tmp_path)
@@ -301,3 +387,71 @@ def test_prepare_beta_release_creates_next_beta_for_feature_commit(tmp_path: Pat
     assert "previous_tag=v1.20.0-beta.2" in result.stdout
     assert_project_versions(tmp_path, "1.20.0-beta.3")
     assert "feat(proxy): add upstream proxy controls" in changelog_path.read_text(encoding="utf-8")
+
+
+def test_prepare_beta_release_creates_fork_post_release(tmp_path: Path) -> None:
+    write_minimal_release_files(tmp_path, "1.25.0-beta.9")
+    init_git_repo(tmp_path)
+    subprocess.run(["git", "tag", "v1.25.0-beta.9"], cwd=tmp_path, check=True)
+
+    append_readme(tmp_path, "fork feature")
+    commit_all(tmp_path, "feat(proxy): explain each request's account choice")
+    changelog_path = tmp_path / "beta-changelog.md"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.prepare_beta_release",
+            "--root",
+            str(tmp_path),
+            "--base-version",
+            "1.25.0",
+            "--beta-number",
+            "9",
+            "--post-number",
+            "1",
+            "--changelog-path",
+            str(changelog_path),
+        ],
+        check=True,
+        cwd=Path(__file__).resolve().parents[2],
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    assert "version=1.25.0-beta.9.post1" in result.stdout
+    assert "tag=v1.25.0-beta.9.post1" in result.stdout
+    assert "pypi_version=1.25.0b9.post1" in result.stdout
+    assert "branch=release/beta-1.25.0-beta.9.post1" in result.stdout
+    assert "previous_tag=v1.25.0-beta.9" in result.stdout
+    assert_project_versions(tmp_path, "1.25.0-beta.9.post1")
+    assert "feat(proxy): explain each request's account choice" in changelog_path.read_text(encoding="utf-8")
+
+
+def test_prepare_beta_release_post_number_requires_beta_number(tmp_path: Path) -> None:
+    write_minimal_release_files(tmp_path, "1.25.0-beta.9")
+    init_git_repo(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.prepare_beta_release",
+            "--root",
+            str(tmp_path),
+            "--base-version",
+            "1.25.0",
+            "--post-number",
+            "1",
+        ],
+        check=False,
+        cwd=Path(__file__).resolve().parents[2],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode != 0
+    assert "--post-number requires --beta-number" in result.stderr
+    assert_project_versions(tmp_path, "1.25.0-beta.9")

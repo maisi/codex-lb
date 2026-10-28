@@ -15,11 +15,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-_VERSION_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)(?:-(?P<channel>alpha|beta|rc)\.(?P<serial>[1-9]\d*))?$")
-_TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.[1-9]\d*)?)$")
+# Fork releases extend a beta with ``.postM`` (``1.25.0-beta.9.post1``): it sorts
+# between ``beta.9`` and ``beta.10`` in both semver and PEP 440, so it never
+# collides with upstream's next beta.
+_VERSION_RE = re.compile(
+    r"^(?P<base>\d+\.\d+\.\d+)"
+    r"(?:-(?P<channel>alpha|beta|rc)\.(?P<serial>[1-9]\d*)(?:\.post(?P<post>[1-9]\d*))?)?$"
+)
+_TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.[1-9]\d*(?:\.post[1-9]\d*)?)?)$")
 _CONVENTIONAL_SUBJECT_RE = re.compile(r"^(?P<type>[a-z][a-z0-9-]*)(?:\([^)]+\))?(?P<breaking>!)?: (?P<description>.+)$")
 _RELEASABLE_CONVENTIONAL_TYPES = frozenset({"deps", "feat", "fix", "perf", "revert"})
-_PEP440_PRERELEASE_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)(?P<channel>a|b|rc)(?P<serial>[1-9]\d*)$")
+_PEP440_PRERELEASE_RE = re.compile(
+    r"^(?P<base>\d+\.\d+\.\d+)(?P<channel>a|b|rc)(?P<serial>[1-9]\d*)(?:\.post(?P<post>[1-9]\d*))?$"
+)
 _PEP440_CHANNELS = {
     "a": "alpha",
     "b": "beta",
@@ -40,6 +48,7 @@ class ReleaseVersion:
     base: str
     channel: str
     serial: int | None
+    post: int | None = None
 
     @property
     def is_prerelease(self) -> bool:
@@ -53,30 +62,32 @@ class ReleaseVersion:
     def pypi_version(self) -> str:
         """Return the normalized PEP 440 spelling expected in PyPI output."""
 
+        post = f".post{self.post}" if self.post is not None else ""
         if self.channel == "stable":
             return self.version
         if self.channel == "alpha":
-            return f"{self.base}a{self.serial}"
+            return f"{self.base}a{self.serial}{post}"
         if self.channel == "beta":
-            return f"{self.base}b{self.serial}"
+            return f"{self.base}b{self.serial}{post}"
         if self.channel == "rc":
-            return f"{self.base}rc{self.serial}"
+            return f"{self.base}rc{self.serial}{post}"
         raise AssertionError(f"unexpected release channel: {self.channel}")
 
 
 def parse_version(version: str) -> ReleaseVersion:
     match = _VERSION_RE.fullmatch(version)
     if not match:
-        raise ValueError(f"invalid release version {version!r}; expected X.Y.Z or X.Y.Z-(alpha|beta|rc).N")
+        raise ValueError(f"invalid release version {version!r}; expected X.Y.Z or X.Y.Z-(alpha|beta|rc).N[.postM]")
     channel = match.group("channel") or "stable"
     serial = int(match.group("serial")) if match.group("serial") else None
-    return ReleaseVersion(version=version, base=match.group("base"), channel=channel, serial=serial)
+    post = int(match.group("post")) if match.group("post") else None
+    return ReleaseVersion(version=version, base=match.group("base"), channel=channel, serial=serial, post=post)
 
 
 def parse_tag(tag: str) -> ReleaseVersion:
     match = _TAG_RE.fullmatch(tag)
     if not match:
-        raise ValueError(f"invalid release tag {tag!r}; expected vX.Y.Z or vX.Y.Z-(alpha|beta|rc).N")
+        raise ValueError(f"invalid release tag {tag!r}; expected vX.Y.Z or vX.Y.Z-(alpha|beta|rc).N[.postM]")
     return parse_version(match.group("version"))
 
 
@@ -196,7 +207,8 @@ def canonical_release_version(value: str) -> str:
     if match is None:
         return value
     channel = _PEP440_CHANNELS[match.group("channel")]
-    return f"{match.group('base')}-{channel}.{match.group('serial')}"
+    post = f".post{match.group('post')}" if match.group("post") else ""
+    return f"{match.group('base')}-{channel}.{match.group('serial')}{post}"
 
 
 def canonical_release_version_for_file(name: str, value: str) -> str:
@@ -255,7 +267,9 @@ def commit_messages_since(root: Path, ref: str) -> list[CommitMessage]:
     for record in proc.stdout.rstrip("\x1e\n").split("\x1e"):
         if not record.strip():
             continue
-        parts = record.split("\x00", 2)
+        # git log terminates each record with a newline, so every record after
+        # the first starts with one.
+        parts = record.lstrip("\n").split("\x00", 2)
         if len(parts) != 3:
             raise ValueError(f"unexpected git log record while reading commits since {ref!r}")
         sha, subject, body = parts
@@ -320,7 +334,7 @@ def latest_beta_tag(root: Path, base_version: str) -> ReleaseVersion | None:
             continue
         if parsed.base != base_version or parsed.channel != "beta" or parsed.serial is None:
             continue
-        if latest is None or parsed.serial > (latest.serial or 0):
+        if latest is None or (parsed.serial, parsed.post or 0) > (latest.serial or 0, latest.post or 0):
             latest = parsed
     return latest
 

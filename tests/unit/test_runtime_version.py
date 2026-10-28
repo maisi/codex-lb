@@ -77,6 +77,21 @@ async def test_runtime_version_compares_prerelease_identifiers() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("latest_tag", "update_available"),
+    [("v1.25.0-beta.9", False), ("v1.25.0-beta.10", True), ("v1.25.0", True), ("v1.24.0", False)],
+)
+async def test_runtime_version_orders_fork_post_release_between_betas(latest_tag: str, update_available: bool) -> None:
+    service = RuntimeVersionService(current_version="1.25.0-beta.9.post1", ttl_seconds=60)
+    session = _mock_session(_mock_response(json_data={"tag_name": latest_tag}))
+
+    with patch("app.modules.runtime.service.aiohttp.ClientSession", return_value=session):
+        status = await service.get_version_status()
+
+    assert status.update_available is update_available
+
+
+@pytest.mark.asyncio
 async def test_runtime_version_degrades_silently_on_github_failure() -> None:
     service = RuntimeVersionService(current_version="1.19.0", ttl_seconds=60)
     session = _mock_session(_mock_response(status=503, json_data=None))
