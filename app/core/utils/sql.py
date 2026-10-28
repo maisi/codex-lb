@@ -11,8 +11,14 @@ from sqlalchemy.sql.elements import ColumnElement
 
 
 def oracle_epoch_expr(timestamp: ColumnExpressionArgument[datetime]) -> ColumnElement[Any]:
-    """Whole UTC seconds since the Unix epoch for an Oracle timestamp."""
-    return (cast(timestamp, Date) - literal_column("DATE '1970-01-01'")) * 86400
+    """Whole UTC seconds since the Unix epoch for an Oracle timestamp.
+
+    The DATE cast truncates to whole seconds, but the day difference is a
+    decimal NUMBER: 08:00 is 1/3 day, so ``* 86400`` lands a hair below the
+    hour and a later FLOOR puts the hour's first second into the previous
+    bucket. ROUND restores the exact integer the cast already guarantees.
+    """
+    return func.round((cast(timestamp, Date) - literal_column("DATE '1970-01-01'")) * 86400)
 
 
 def bucket_epoch_expr(
