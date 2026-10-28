@@ -30,7 +30,10 @@ from app.db.models import (
     LimitType,
     LimitWindow,
     OAuthDeviceFlowSlot,
+    RequestConversationHourlyRollup,
     RequestLog,
+    RequestReportHourlyRollup,
+    RequestUsageHourlyRollup,
     StickySessionKind,
     UsageHistory,
 )
@@ -553,3 +556,46 @@ async def test_oracle_cost_backfill_bounds_eligible_rows_resumes_and_is_idempote
     for name in ("external-source", "unknown-price", "missing-input", "external-kind", "missing-output"):
         assert final_costs[name] is None
     assert final_costs["already-priced"] == 0.0
+
+
+async def test_oracle_folds_keep_an_hours_first_second_in_that_hour(oracle_runtime: AsyncEngine) -> None:
+    # Production wedge: one key at 07:30 and in the first second after 08:00.
+    # 08:00 is 1/3 day, so the DATE-difference epoch sat a hair below the hour
+    # and the 08:00 slice re-inserted the already folded 07:00 bucket.
+    from app.modules.accounts.usage_time_rollup import _fold_next_conversation_slice, _fold_next_hourly_slice
+    from app.modules.reports.rollup import fold_next_report_slice
+
+    factory = async_sessionmaker(oracle_runtime, expire_on_commit=False)
+    async with factory() as session:
+        session.add_all(
+            RequestLog(
+                request_id=f"fold-{at:%H%M%S}",
+                requested_at=at,
+                model="gpt-6-astra",
+                status="success",
+                request_kind="normal",
+                conversation_id="oracle-fold-conversation",
+                input_tokens=10,
+                output_tokens=1,
+            )
+            for at in (datetime(2026, 10, 28, 7, 30), datetime(2026, 10, 28, 8, 0, 0, 400_000))
+        )
+        await session.commit()
+
+    for target in (datetime(2026, 10, 28, 8), datetime(2026, 10, 28, 9)):
+        async with factory() as session:
+            await _fold_next_hourly_slice(session, target)
+        async with factory() as session:
+            await _fold_next_conversation_slice(session, target)
+        async with factory() as session:
+            await fold_next_report_slice(session, target)
+
+    seven, eight = 1793170800, 1793174400
+    async with factory() as session:
+        for table in (RequestUsageHourlyRollup, RequestConversationHourlyRollup, RequestReportHourlyRollup):
+            buckets = dict(
+                (await session.execute(select(table.bucket_epoch, table.request_count).order_by(table.bucket_epoch)))
+                .tuples()
+                .all()
+            )
+            assert buckets == {seven: 1, eight: 1}, table.__tablename__
