@@ -33,7 +33,7 @@ Open a request in **Dashboard → Recent requests → View details** to see its 
 
 ![Routing decision in the request details](screenshots/request-routing-decision.png)
 
-The panel needs `accounts:write`, the same permission that shows account identity in the request list; the data comes from `GET /api/request-logs/{request_id}/routing`. Decisions are kept in memory on the replica that served the request, for the most recent 2,000 requests; they are gone after a restart and are never written to the database. Each decision is also logged once as `Proxy account selection trace request_id=… trace={…}` (account ids redacted when the privacy policy asks for it), so older decisions can be read from the logs. See the [routing trace contract](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/proxy-runtime-observability/spec.md).
+The panel needs `accounts:write`, the same permission that shows account identity in the request list; the data comes from `GET /api/request-logs/{request_id}/routing`, keyed by the proxy request id (the request list's `archiveRequestId`; streamed requests log the upstream `resp_…` id as `requestId`). Decisions are kept in memory on the replica that served the request, for the most recent 2,000 requests; they are gone after a restart and are never written to the database. Each decision is also logged once as `Proxy account selection trace request_id=… trace={…}` (account ids redacted when the privacy policy asks for it), so older decisions can be read from the logs. See the [routing trace contract](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/proxy-runtime-observability/spec.md).
 
 ## Routing, quotas, and eligibility explainer
 

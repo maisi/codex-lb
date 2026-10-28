@@ -714,7 +714,11 @@ export function RecentRequestsTable({
               ) : null}
             </div>
 
-            {canReadRouting ? <RequestRoutingPanel requestId={selectedRequest?.requestId} /> : null}
+            {canReadRouting ? (
+              // Selection traces are keyed by the proxy request id; streamed rows log the
+              // upstream response id as requestId and keep the proxy id as archiveRequestId.
+              <RequestRoutingPanel requestId={selectedRequest?.archiveRequestId ?? selectedRequest?.requestId} />
+            ) : null}
 
             {canReadConversations ? (
               <RequestArchivePanel

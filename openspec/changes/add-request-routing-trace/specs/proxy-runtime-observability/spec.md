@@ -17,9 +17,13 @@ the request.
 
 Traces SHALL be kept only in a bounded per-process memory store and SHALL be
 logged once per selection, with account identifiers redacted when the request's
-privacy policy redacts sensitive details. `GET /api/request-logs/{request_id}/routing`
-SHALL return the traces recorded for that request id, oldest first, and an empty
-list when none are kept, and SHALL require the `accounts:write` permission.
+privacy policy redacts sensitive details. Traces SHALL be keyed by the proxy
+request id the selection ran under. `GET /api/request-logs/{request_id}/routing`
+SHALL return the traces recorded for that proxy request id, oldest first, and an
+empty list when none are kept, and SHALL require the `accounts:write` permission.
+The dashboard SHALL look a request up by its request log's archive request id
+when one is recorded and by its request id otherwise, because streamed requests
+log the upstream response id as the request id.
 
 #### Scenario: A tier failover is explained
 
@@ -37,6 +41,13 @@ list when none are kept, and SHALL require the `accounts:write` permission.
 - **THEN** the trace reports serving rank 1
 - **AND** marks account B as eligible and over the budget threshold
 - **AND** marks account A as unavailable because it is rate-limited
+
+#### Scenario: A streamed request's decision is found from the request list
+
+- **GIVEN** a streamed request whose log row has request id `resp_123` and
+  archive request id `proxy-req-1`
+- **WHEN** an operator opens the request's details in the dashboard
+- **THEN** the dashboard requests the routing traces of `proxy-req-1`
 
 #### Scenario: Unknown requests return no traces
 
