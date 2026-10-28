@@ -178,3 +178,25 @@ short windows, or evaluated for a quota the plan does not have.
 Settlement is discarded if newer replica-local runtime activity arrives while
 that snapshot is loading, preventing an older probe success from clearing a
 later failure.
+
+## Quota observations and local load
+
+Normalized upstream 5h and long-window percentages describe consumed quota.
+They feed quota thresholds and routing traces without local lease pressure.
+The account cards show the complementary remaining percentages, potentially
+from a newer usage observation than a historical request trace.
+
+Local load separately discounts weighted draws by dividing the existing
+error-rate multiplier by `1 + inflight_count * inflight_penalty_pct / 100 +
+leased_tokens / 1000000 * lease_token_weight`. Fleet latency weighting still
+composes downstream. Million-token normalization is a heuristic load unit;
+subscription credits do not supply a token exchange rate. For an account at
+8% and 15% used, one 160000-token stream at default weights divides its draw
+weight by 1.185 while quota stays 8% and 15%. Releasing the lease restores the
+prior weight. Unknown windows stay unknown.
+
+This replaces the earlier token-count/credit-capacity calculation, which could
+clip both windows to 100% and cause false priority-tier fallback. Operators
+with customized token weights should assess the corrected per-million-token
+unit on rollout. Concurrency caps, explicit upstream blocks, and lease
+settlement remain the admission and ownership controls.

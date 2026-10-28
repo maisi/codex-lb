@@ -320,28 +320,26 @@ def _state_from_account(
     inflight_pressure_pct = (
         runtime.inflight_response_creates + runtime.inflight_streams
     ) * tunables.inflight_penalty_pct
-    leased_token_pressure_pct = 0.0
     long_window_key = "secondary"
     if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
         long_window_key = "monthly"
     capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
-    if capacity_credits > 0.0 and runtime.leased_tokens > 0:
-        leased_token_pressure_pct = runtime.leased_tokens * tunables.lease_token_weight / capacity_credits * 100.0
-    pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
-    effective_used_percent = None if used_percent is None else min(100.0, used_percent + pressure_pct)
-    effective_secondary_used_percent = None if secondary_used is None else min(100.0, secondary_used + pressure_pct)
+    # Tokens and subscription credits have no fixed exchange rate. Keep local
+    # load out of quota evidence and threshold checks; discount weighted draws
+    # using a dimensionless token estimate normalized per million tokens.
+    load_pressure = inflight_pressure_pct / 100.0 + runtime.leased_tokens / 1_000_000.0 * tunables.lease_token_weight
     usage_exhaustion_evidence_status = status in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED)
 
     return AccountState(
         account_id=account.id,
         status=status,
-        used_percent=effective_used_percent,
+        used_percent=used_percent,
         reset_at=reset_at,
         primary_reset_at=primary_reset,
         primary_window_minutes=primary_window_minutes,
         blocked_at=next_blocked_at,
         cooldown_until=runtime.cooldown_until,
-        secondary_used_percent=effective_secondary_used_percent,
+        secondary_used_percent=secondary_used,
         secondary_reset_at=secondary_reset,
         last_error_at=runtime.last_error_at,
         last_selected_at=runtime.last_selected_at,
@@ -359,7 +357,8 @@ def _state_from_account(
         routing_policy=routing_policy,
         selection_weight_multiplier=error_rate_weight_multiplier(
             runtime, now, policy=ErrorRateWeightingPolicy(enabled=tunables.error_rate_weighting_enabled)
-        ),
+        )
+        / (1.0 + load_pressure),
     )
 
 

@@ -3617,16 +3617,17 @@ affinity for requests that carry continuation state.
 
 The sticky reallocation threshold controls SHALL name the quota window they
 apply to, SHALL state that the value is percent used, and SHALL show the
-quota-arithmetic remaining percent for a valid threshold value, qualified so
-it is not presented as the exact account-page remaining figure (routing adds
-temporary in-flight pressure on top of reported usage).
+quota-arithmetic remaining percent for a valid threshold value. The explanation
+SHALL distinguish observed quota usage from local load weighting: in-flight
+work MUST NOT be described as additional consumed quota or as independently
+triggering a quota threshold.
 
 #### Scenario: Threshold unit hint
 
 - **GIVEN** the sticky secondary threshold input holds the valid value `70`
 - **WHEN** the routing settings section renders
 - **THEN** a hint shows `70% used` alongside `30% remaining` in quota terms
-- **AND** the quota-window explainer states that in-flight work counts as temporary extra usage
+- **AND** the quota-window explainer states that in-flight work affects weighted selection independently of quota usage
 
 #### Scenario: Quota window explainer
 

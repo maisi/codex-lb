@@ -2326,11 +2326,12 @@ def test_state_from_account_keeps_raw_usage_evidence_separate_from_pressure(monk
         runtime=RuntimeState(inflight_streams=1),
     )
 
-    assert state.used_percent == 100.0
+    assert state.used_percent == 98.0
     assert state.priority_used_percent == 98.0
+    assert state.selection_weight_multiplier < 1.0
 
 
-def test_state_from_account_preserves_pressure_for_active_routing(monkeypatch):
+def test_state_from_account_load_discounts_weight_without_triggering_quota_threshold(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 300)
     monkeypatch.setattr("time.time", lambda: now)
@@ -2349,9 +2350,74 @@ def test_state_from_account_preserves_pressure_for_active_routing(monkeypatch):
     )
 
     assert state.status == AccountStatus.ACTIVE
-    assert state.used_percent == 96.5
+    assert state.used_percent == 94.0
     assert state.priority_used_percent is None
-    assert _state_above_sticky_budget_threshold(state, 95.0) is True
+    assert state.selection_weight_multiplier == pytest.approx(1.0 / 1.025)
+    assert _state_above_sticky_budget_threshold(state, 95.0) is False
+
+
+@pytest.mark.parametrize("primary_used", [8.0, None])
+@pytest.mark.parametrize("token_weight", [0.0, 1.0, 2.0])
+def test_reserved_tokens_discount_weight_without_polluting_quota(primary_used, token_weight):
+    now = time.time()
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=(
+            _make_test_usage(window="primary", used_percent=primary_used, reset_at=int(now + 3600))
+            if primary_used is not None
+            else None
+        ),
+        secondary_entry=_make_test_usage(window="secondary", used_percent=15.0, reset_at=int(now + 7200)),
+        runtime=RuntimeState(inflight_streams=1, leased_tokens=160_000.0),
+        now=now,
+        routing_tunables=RoutingTunables(inflight_penalty_pct=2.5, lease_token_weight=token_weight),
+    )
+
+    assert state.used_percent == primary_used
+    assert state.secondary_used_percent == 15.0
+    assert state.selection_weight_multiplier == pytest.approx(1.0 / (1.025 + 0.16 * token_weight))
+    assert _state_above_sticky_budget_threshold(state, 90.0) is False
+
+
+@pytest.mark.parametrize("routing_strategy", ["capacity_weighted", "relative_availability"])
+@pytest.mark.parametrize("load_enabled", [True, False])
+def test_weighted_draw_composes_load_with_error_weight_without_changing_quota(
+    monkeypatch, routing_strategy, load_enabled
+):
+    now = 1_700_000_000.0
+    states = []
+    for account_id, busy in (("busy", True), ("idle", False)):
+        states.append(
+            _state_from_account(
+                account=_make_test_account(account_id=account_id),
+                primary_entry=_make_test_usage(window="primary", used_percent=8.0, reset_at=int(now + 3600)),
+                secondary_entry=_make_test_usage(window="secondary", used_percent=15.0, reset_at=int(now + 7200)),
+                runtime=RuntimeState(
+                    inflight_streams=1 if busy else 0,
+                    leased_tokens=160_000.0 if busy else 0.0,
+                    outcome_buckets={int(now // 60): [8, 2]},
+                ),
+                now=now,
+                routing_tunables=RoutingTunables(
+                    inflight_penalty_pct=2.5 if load_enabled else 0.0,
+                    lease_token_weight=1.0 if load_enabled else 0.0,
+                ),
+            )
+        )
+    weights_by_account = {}
+
+    def draw(population, weights, *, k):
+        assert k == 1
+        weights_by_account.update((state.account_id, weight) for state, weight in zip(population, weights, strict=True))
+        return [population[0]]
+
+    monkeypatch.setattr(random, "choices", draw)
+    assert select_account(states, now=now, routing_strategy=routing_strategy).account is not None
+    assert states[0].selection_weight_multiplier == pytest.approx(0.8 / (1.185 if load_enabled else 1.0))
+    assert weights_by_account["busy"] / weights_by_account["idle"] == pytest.approx(
+        1.0 / (1.185 if load_enabled else 1.0)
+    )
+    assert [(state.used_percent, state.secondary_used_percent) for state in states] == [(8.0, 15.0), (8.0, 15.0)]
 
 
 def test_state_from_account_clears_stale_advisory_account_reset_for_active_account(monkeypatch):

@@ -879,6 +879,9 @@ describe("RoutingSettings", () => {
       screen.getByText(/Primary quota is the short 5-hour usage window/i),
     ).toBeInTheDocument();
     expect(
+      screen.getByText(/In-flight work affects weighted account selection separately/i),
+    ).toHaveTextContent("does not change quota usage or trigger quota thresholds");
+    expect(
       screen.getByText(/5-hour \(primary\) window has been used/i),
     ).toBeInTheDocument();
     expect(
