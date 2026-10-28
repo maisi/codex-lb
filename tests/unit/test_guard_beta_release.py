@@ -485,6 +485,55 @@ def test_pr_guard_accepts_validated_canonical_beta_pr(tmp_path: Path) -> None:
     assert "Beta release PR guard passed" in result.stdout
 
 
+def test_pr_guard_accepts_validated_post_release_pr_with_pep440_uv_lock(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo_with_beta_commit(repo, version="1.25.0-beta.9.post1")
+    (repo / "uv.lock").write_text(
+        '[[package]]\nname = "codex-lb"\nversion = "1.25.0b9.post1"\nsource = { editable = "." }\n',
+        encoding="utf-8",
+    )
+    git(repo, "commit", "-am", "chore(release): sync uv.lock with the release version")
+    sha = git(repo, "rev-parse", "HEAD")
+    branch = "release/beta-1.25.0-beta.9.post1"
+    event = event_file(tmp_path, head_ref=branch, head_sha=sha, body=validation_body(sha))
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD~2",
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"Beta release PR guard passed for {branch}" in result.stdout
+
+
+def test_pr_guard_rejects_post_release_metadata_from_plain_beta_branch(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = init_repo_with_beta_commit(repo, version="1.25.0-beta.9.post1")
+    event = event_file(tmp_path, head_ref="release/beta-1.25.0-beta.9", head_sha=sha, body=validation_body(sha))
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD~1",
+        "--head-ref",
+        "release/beta-1.25.0-beta.9",
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 1
+    assert "Expected head branch: release/beta-1.25.0-beta.9.post1" in result.stderr
+
+
 def test_pr_guard_rejects_forked_canonical_beta_branch(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -541,6 +590,27 @@ def test_publish_guard_accepts_validated_merged_canonical_beta_pr(tmp_path: Path
 
     assert result.returncode == 0, result.stderr
     assert "Beta publish guard passed" in result.stdout
+
+
+def test_publish_guard_accepts_validated_merged_post_release_pr(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = init_repo_with_beta_commit(repo, version="1.25.0-beta.9.post1")
+    branch = "release/beta-1.25.0-beta.9.post1"
+    event = event_file(
+        tmp_path,
+        head_ref=branch,
+        head_sha=sha,
+        body=validation_body(sha),
+        merged=True,
+        head_repo="maisi/codex-lb",
+        base_repo="maisi/codex-lb",
+    )
+
+    result = run_guard(Path(__file__).resolve().parents[2], repo, "--mode", "publish", "--event-path", str(event))
+
+    assert result.returncode == 0, result.stderr
+    assert f"Beta publish guard passed for {branch}" in result.stdout
 
 
 def test_publish_guard_rejects_forked_canonical_beta_branch(tmp_path: Path) -> None:

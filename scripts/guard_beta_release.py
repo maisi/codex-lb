@@ -46,7 +46,9 @@ _LIVE_SMOKE_ACCEPTED_LABELS = (
 )
 
 _SHA_RE = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
-_PEP440_PRERELEASE_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)(?P<channel>a|b|rc)(?P<serial>[1-9]\d*)$")
+_PEP440_PRERELEASE_RE = re.compile(
+    r"^(?P<base>\d+\.\d+\.\d+)(?P<channel>a|b|rc)(?P<serial>[1-9]\d*)(?:\.post(?P<post>[1-9]\d*))?$"
+)
 _PEP440_CHANNELS = {
     "a": "alpha",
     "b": "beta",
@@ -197,7 +199,8 @@ def _canonical_release_version(value: str) -> str:
     if match is None:
         return value
     channel = _PEP440_CHANNELS[match.group("channel")]
-    return f"{match.group('base')}-{channel}.{match.group('serial')}"
+    post = f".post{match.group('post')}" if match.group("post") else ""
+    return f"{match.group('base')}-{channel}.{match.group('serial')}{post}"
 
 
 def _canonical_release_version_for_file(name: str, value: str) -> str:

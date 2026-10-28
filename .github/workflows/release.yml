@@ -117,6 +117,9 @@ jobs:
   publish-to-pypi:
     name: Publish to PyPI
     needs: [build]
+    # The PyPI project belongs to the upstream repository's trusted publisher;
+    # forks publish Docker, Helm and the GitHub release only.
+    if: ${{ github.event.repository.fork != true }}
     runs-on: ubuntu-24.04
 
     permissions:
@@ -264,6 +267,14 @@ jobs:
   create-github-release:
     name: Create GitHub Release
     needs: [publish-to-pypi, docker-image, helm-chart, release-metadata]
+    # Runs when PyPI was skipped in a fork; any failed or cancelled job still blocks it.
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.docker-image.result == 'success' &&
+        needs.helm-chart.result == 'success' &&
+        (needs.publish-to-pypi.result == 'success' || needs.publish-to-pypi.result == 'skipped')
+      }}
     runs-on: ubuntu-24.04
 
     permissions:
@@ -356,21 +367,27 @@ jobs:
           TAG_NAME: ${{ steps.prev_tag.outputs.tag_name }}
           IS_PRERELEASE: ${{ needs.release-metadata.outputs.is_prerelease }}
           PYPI_VERSION: ${{ needs.release-metadata.outputs.pypi_version }}
+          PYPI_PUBLISHED: ${{ needs.publish-to-pypi.result == 'success' }}
         run: |
           set -euo pipefail
           TAG_VERSION="${TAG_NAME#v}"
+          CHARTS="oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
           {
             echo
             echo "## Install / Run"
             echo '```bash'
             if [ "${IS_PRERELEASE}" = "true" ]; then
-              echo "uvx --from \"codex-lb==${PYPI_VERSION}\" codex-lb"
+              if [ "${PYPI_PUBLISHED}" = "true" ]; then
+                echo "uvx --from \"codex-lb==${PYPI_VERSION}\" codex-lb"
+              fi
               echo "docker pull ghcr.io/${GITHUB_REPOSITORY}:${TAG_VERSION}"
-              echo "helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb --version ${TAG_VERSION} --devel"
+              echo "helm install codex-lb ${CHARTS}/codex-lb --version ${TAG_VERSION} --devel"
             else
-              echo 'uvx codex-lb'
+              if [ "${PYPI_PUBLISHED}" = "true" ]; then
+                echo 'uvx codex-lb'
+              fi
               echo "docker pull ghcr.io/${GITHUB_REPOSITORY}:${TAG_VERSION}"
-              echo "helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb --version ${TAG_VERSION}"
+              echo "helm install codex-lb ${CHARTS}/codex-lb --version ${TAG_VERSION}"
             fi
             echo '```'
           } >> release_notes.md

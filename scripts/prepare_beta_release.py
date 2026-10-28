@@ -35,6 +35,12 @@ def main() -> int:
         help="beta serial number (defaults to highest existing beta tag + 1)",
     )
     parser.add_argument(
+        "--post-number",
+        type=int,
+        default=0,
+        help="fork post-release of --beta-number (X.Y.Z-beta.N.postM); requires --beta-number",
+    )
+    parser.add_argument(
         "--changelog-path",
         default="",
         help="optional path to write the beta PR changelog markdown",
@@ -46,6 +52,10 @@ def main() -> int:
     base = parse_version(base_version)
     if base.is_prerelease:
         raise SystemExit(f"--base-version must be stable, got {base.version!r}")
+    if args.post_number < 0:
+        raise SystemExit("--post-number must be >= 1")
+    if args.post_number and not args.beta_number:
+        raise SystemExit("--post-number requires --beta-number")
 
     latest_beta = latest_beta_tag(root, base.version)
     previous_tag = latest_beta.tag if latest_beta is not None else latest_stable_tag(root)
@@ -72,6 +82,8 @@ def main() -> int:
         raise SystemExit("--beta-number must be >= 1")
 
     version = f"{base.version}-beta.{beta_number}"
+    if args.post_number:
+        version += f".post{args.post_number}"
     release = parse_version(version)
     update_project_versions(root, release.version)
 
