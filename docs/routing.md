@@ -27,6 +27,14 @@ Each row keeps its existing meaning: direct streams can emit attempt rows; compa
 
 The columns follow existing request-log retention and never store raw keys or prompts. See the [affinity observation contract](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/proxy-runtime-observability/spec.md) and [query example and privacy notes](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/proxy-runtime-observability/context.md#affinity-decisions-in-request-logs).
 
+## Why a request got its account
+
+Open a request in **Dashboard → Recent requests → View details** to see its **Routing decision**: whether the conversation kept its account, moved off it, or picked a new one, which API key priority rank served it, and which selector pass decided (burn-first, below the budget threshold, everything over the threshold or `preserve`, recovery probe). A table lists every account that was considered with its key rank, routing policy, 5h and 7d usage, and why it could not serve (rate-limited, cooling down, at its concurrency limit, not the conversation's account, …). Accounts the key ranks but that were not offered at all (paused, model not supported, outside the key's scope) are listed separately.
+
+![Routing decision in the request details](screenshots/request-routing-decision.png)
+
+The panel needs `accounts:write`, the same permission that shows account identity in the request list; the data comes from `GET /api/request-logs/{request_id}/routing`. Decisions are kept in memory on the replica that served the request, for the most recent 2,000 requests; they are gone after a restart and are never written to the database. Each decision is also logged once as `Proxy account selection trace request_id=… trace={…}` (account ids redacted when the privacy policy asks for it), so older decisions can be read from the logs. See the [routing trace contract](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/proxy-runtime-observability/spec.md).
+
 ## Routing, quotas, and eligibility explainer
 
 ### Account eligibility vs displayed status

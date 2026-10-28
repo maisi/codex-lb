@@ -143,3 +143,45 @@ class ConversationDetailsResponse(DashboardModel):
     total_elapsed_time: int
     dominant_useragent_group: str | None = None
     model_stats: list[ConversationModelStat] = Field(default_factory=list)
+
+
+class RoutingCandidateResponse(DashboardModel):
+    account_id: str
+    rank: int | None = None
+    routing_policy: str
+    status: str
+    health: str
+    primary_used_percent: float | None = None
+    secondary_used_percent: float | None = None
+    over_budget_threshold: bool
+    eligible: bool
+    overload_backoff: bool
+    unavailable_reason: str | None = None
+
+
+class RoutingAttemptResponse(DashboardModel):
+    attempt: int
+    recorded_at: datetime
+    api_key_id: str | None = None
+    model: str | None = None
+    routing_strategy: str
+    sticky_kind: str | None = None
+    sticky_owner_account_id: str | None = None
+    outcome: str
+    selected_account_id: str | None = None
+    serving_rank: int | None = None
+    decided_by: str | None = None
+    owner_flags: dict[str, bool] = Field(default_factory=dict)
+    budget_threshold_pct: float
+    key_ranks_accounts: bool
+    excluded_account_ids: list[str] = Field(default_factory=list)
+    ranked_accounts_not_offered: list[str] = Field(default_factory=list)
+    candidates: list[RoutingCandidateResponse] = Field(default_factory=list)
+    error_code: str | None = None
+
+
+class RequestRoutingResponse(DashboardModel):
+    request_id: str
+    # Empty when the request is older than the in-memory trace window, was
+    # served by another replica, or never reached account selection.
+    attempts: list[RoutingAttemptResponse] = Field(default_factory=list)

@@ -380,3 +380,47 @@ export type ConversationEntry = z.infer<typeof ConversationEntrySchema>;
 export type ConversationsResponse = z.infer<typeof ConversationsResponseSchema>;
 export type ConversationDetails = z.infer<typeof ConversationDetailsSchema>;
 export type ConversationFilterState = z.infer<typeof ConversationFilterStateSchema>;
+
+export const RoutingCandidateSchema = z.object({
+  accountId: z.string(),
+  rank: z.number().int().nullable().default(null),
+  routingPolicy: z.string(),
+  status: z.string(),
+  health: z.string(),
+  primaryUsedPercent: z.number().nullable().default(null),
+  secondaryUsedPercent: z.number().nullable().default(null),
+  overBudgetThreshold: z.boolean(),
+  eligible: z.boolean(),
+  overloadBackoff: z.boolean(),
+  unavailableReason: z.string().nullable().default(null),
+});
+
+export const RoutingAttemptSchema = z.object({
+  attempt: z.number().int(),
+  recordedAt: z.string(),
+  apiKeyId: z.string().nullable().default(null),
+  model: z.string().nullable().default(null),
+  routingStrategy: z.string(),
+  stickyKind: z.string().nullable().default(null),
+  stickyOwnerAccountId: z.string().nullable().default(null),
+  outcome: z.string(),
+  selectedAccountId: z.string().nullable().default(null),
+  servingRank: z.number().int().nullable().default(null),
+  decidedBy: z.string().nullable().default(null),
+  ownerFlags: z.record(z.string(), z.boolean()).default({}),
+  budgetThresholdPct: z.number(),
+  keyRanksAccounts: z.boolean(),
+  excludedAccountIds: z.array(z.string()).default([]),
+  rankedAccountsNotOffered: z.array(z.string()).default([]),
+  candidates: z.array(RoutingCandidateSchema).default([]),
+  errorCode: z.string().nullable().default(null),
+});
+
+export const RequestRoutingSchema = z.object({
+  requestId: z.string(),
+  attempts: z.array(RoutingAttemptSchema).default([]),
+});
+
+export type RoutingCandidate = z.infer<typeof RoutingCandidateSchema>;
+export type RoutingAttempt = z.infer<typeof RoutingAttemptSchema>;
+export type RequestRouting = z.infer<typeof RequestRoutingSchema>;
