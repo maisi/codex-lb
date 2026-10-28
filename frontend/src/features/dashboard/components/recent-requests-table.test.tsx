@@ -721,6 +721,19 @@ describe("RecentRequestsTable", () => {
     );
   });
 
+  it("looks up the routing decision by the proxy request id of streamed rows", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[{ ...LAYOUT_REQUEST, requestId: "resp_upstream", archiveRequestId: "proxy-req-1" }]}
+      />,
+    );
+    expect(within(openRequestDetails()).getByTestId("request-routing-panel")).toHaveTextContent(
+      "Routing for proxy-req-1",
+    );
+  });
+
   it("hides the routing decision from guests", () => {
     useAuthStore.setState({ role: "guest", permissions: ["read"], canWrite: false });
     render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[LAYOUT_REQUEST]} />);
