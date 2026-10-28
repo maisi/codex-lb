@@ -8,6 +8,7 @@ import {
   DashboardProjectionsSchema,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
+  RequestRoutingSchema,
   type ConversationTimeframe,
   type OverviewTimeframe,
   type RequestLogTimeframe,
@@ -149,4 +150,8 @@ export function getConversationDetails(conversationId: string) {
     : conversationId;
   const encoded = encodeURIComponent(opaqueId);
   return get(`${CONVERSATIONS_PATH}/${encoded}`, ConversationDetailsSchema);
+}
+
+export function getRequestRouting(requestId: string) {
+  return get(`${REQUEST_LOGS_PATH}/${encodeURIComponent(requestId)}/routing`, RequestRoutingSchema);
 }

@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { RequestArchivePanel } from "@/features/conversation-archive/components/request-archive-panel";
+import { RequestRoutingPanel } from "@/features/dashboard/components/request-routing-panel";
 import {
   DEFAULT_REQUEST_LOG_COLUMNS,
   MAX_REQUEST_LOG_COLUMN_WIDTH,
@@ -323,6 +324,7 @@ export function RecentRequestsTable({
   const blurred = usePrivacyStore((s) => s.blurred);
   // User agent, client IP and the archive panel are served only with `conversations:read`.
   const canReadConversations = usePermission("conversations:read");
+  const canReadRouting = usePermission("accounts:write");
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest, t);
   const visibleColumns = configuredVisibleColumns ?? DEFAULT_REQUEST_LOG_COLUMNS;
@@ -711,6 +713,8 @@ export function RecentRequestsTable({
                 </div>
               ) : null}
             </div>
+
+            {canReadRouting ? <RequestRoutingPanel requestId={selectedRequest?.requestId} /> : null}
 
             {canReadConversations ? (
               <RequestArchivePanel

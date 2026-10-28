@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.dialects.oracle import dialect as oracle_dialect
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
 
 from app.db.models import ApiKeyLimit, LimitType, LimitWindow
@@ -282,6 +284,51 @@ class TestUsage7d:
             ),
         ]
         session.execute.assert_awaited_once()
+
+
+class TestUsage7dOracleDeletedFlag:
+    """ORA-00932: Oracle rejected ``coalesce(deleted_at IS NOT NULL, :false)``.
+
+    The flag must be an integer CASE so the statements compile to SQL Oracle
+    accepts in a select list and GROUP BY.
+    """
+
+    @staticmethod
+    async def _oracle_sql(call) -> str:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        statements: list[str] = []
+
+        async def _execute(statement):
+            statements.append(str(statement.compile(dialect=oracle_dialect())))
+            empty_row = SimpleNamespace(
+                total_requests=0,
+                total_input_tokens=0,
+                total_output_tokens=0,
+                cached_input_tokens=0,
+                total_cost_usd=0.0,
+                account_id=None,
+                email=None,
+                is_deleted=0,
+                cost_usd=0.0,
+            )
+            return SimpleNamespace(all=lambda: [empty_row])
+
+        session.execute.side_effect = _execute
+        await call(repo)
+        assert len(statements) == 1
+        return statements[0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["usage_7d", "usage_7d_by_account"])
+    async def test_deleted_flag_is_an_integer_case_not_a_coalesced_boolean(self, method: str) -> None:
+        since = datetime(2026, 5, 1, 0, 0, 0)
+        until = datetime(2026, 5, 8, 0, 0, 0)
+
+        sql = await self._oracle_sql(lambda repo: getattr(repo, method)("key_1", since, until))
+
+        assert "deleted_at IS NOT NULL) THEN" in sql
+        assert re.search(r"coalesce\([^()]*deleted_at IS NOT NULL", sql, flags=re.IGNORECASE) is None
 
 
 @pytest.mark.asyncio
