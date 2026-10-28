@@ -2,30 +2,28 @@
 
 ## Purpose
 
-Define the supported multi-replica deployment topology contract: what an operator must provision (shared PostgreSQL, leader election, bridge ring identity, shared encryption key) and how startup guardrails, settings concurrency control, and metrics semantics behave across replicas.
+Define the supported multi-replica deployment topology contract: what an operator must provision (shared PostgreSQL or the verified Oracle pilot, leader election, bridge ring identity, shared encryption key) and how startup guardrails, settings concurrency control, and metrics semantics behave across replicas.
 ## Requirements
-### Requirement: Multi-replica deployments require shared PostgreSQL coordination
+### Requirement: Multi-replica deployments require shared database coordination
 
-Running more than one application replica SHALL require: a shared PostgreSQL database through which all cross-replica coordination flows (`scheduler_leader` lease, `bridge_ring_members`, `http_bridge_sessions`, `cache_invalidation`, `sticky_sessions`, `runtime_sentinels`); leader election enabled (`CODEX_LB_LEADER_ELECTION_ENABLED`, which defaults to `true`) so singleton schedulers run on exactly one replica; a unique instance id and a reachable replica-specific advertise URL per replica for bridge owner forwarding; and identical encryption key material mounted on every replica. Explicitly setting `CODEX_LB_LEADER_ELECTION_ENABLED=false` is the single-instance escape hatch that makes every replica treat itself as leader and MUST NOT be used with more than one replica.
+Running more than one application replica SHALL require a shared PostgreSQL database or the verified Oracle two-instance pilot through which all cross-replica coordination flows (`scheduler_leader`, `bridge_ring_members`, `http_bridge_sessions`, `cache_invalidation`, `sticky_sessions`, `runtime_sentinels`); leader election enabled (`CODEX_LB_LEADER_ELECTION_ENABLED`, default `true`); a unique instance id and reachable replica-specific advertise URL per replica; and identical encryption key material mounted on every replica. Each pilot instance MUST use one application worker. Explicitly disabling leader election MUST remain a single-instance escape hatch and MUST NOT be used with multiple replicas. Oracle support MUST retain its documented process-failover and client-retry acceptance boundaries.
 
 #### Scenario: Supported two-replica topology
-
-- **GIVEN** two replicas configured with the same PostgreSQL `CODEX_LB_DATABASE_URL`
-- **AND** `CODEX_LB_LEADER_ELECTION_ENABLED` at its default (`true`) on both replicas
-- **AND** each replica has a unique bridge instance id with a reachable replica-specific advertise URL
-- **AND** both replicas mount the same encryption key file
+- **GIVEN** two replicas configured with the same supported shared database
+- **AND** leader election is enabled on both
+- **AND** each replica has a unique bridge instance id and reachable advertise URL
+- **AND** both replicas mount the same encryption key
 - **WHEN** both replicas start
 - **THEN** exactly one replica acquires the scheduler leader lease and runs singleton schedulers
-- **AND** hard-continuity bridge requests landing on the non-owner replica are forwarded to the owner
+- **AND** hard-continuity requests reaching a non-owner are forwarded to the owner
 
 #### Scenario: Leader election left at its default preserves the singleton guarantee
-
-- **GIVEN** two replicas sharing one PostgreSQL database
-- **AND** `CODEX_LB_LEADER_ELECTION_ENABLED` is left at its default (enabled)
+- **GIVEN** two replicas sharing one supported database
+- **AND** leader election is left enabled
 - **WHEN** both replicas start
 - **THEN** exactly one replica acquires the lease and runs singleton schedulers
 - **AND** the operator observes no duplicate upstream polling (usage refresh, automations, retention)
-- **AND** explicitly setting `CODEX_LB_LEADER_ELECTION_ENABLED=false` is the single-instance escape hatch that makes every replica treat itself as leader and run singleton schedulers N-fold
+- **AND** explicitly disabling leader election would make each replica act as leader, run singleton schedulers N-fold, and is unsupported for this topology
 
 ### Requirement: SQLite deployments are single-process
 
@@ -42,7 +40,7 @@ SQLite database backends SHALL be operated with exactly one application process;
 
 - **GIVEN** a deployment using a SQLite `CODEX_LB_DATABASE_URL`
 - **WHEN** the operator wants more than one application process or replica
-- **THEN** the supported path is migrating to a shared PostgreSQL database, not sharing the SQLite file
+- **THEN** the supported path is migrating to a shared PostgreSQL database or the verified Oracle two-instance pilot
 
 ### Requirement: Startup verifies encryption-key consistency against the shared database
 

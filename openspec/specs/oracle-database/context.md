@@ -1,10 +1,10 @@
-# Oracle single-instance operation
+# Oracle operation
 
 ## Scope and evidence
 
-One codex-lb instance can use Oracle Autonomous Transaction Processing with the optional native Thin driver. The single-instance milestone was exercised against the operator's OCI Always Free database over the selected **TP** service, using an encrypted PEM wallet, TCPS and certificate identity verification. Application startup, dashboard settings, account import, API-key creation, a simulated upstream response with real reservation/settlement and request logging, restart and shutdown use the real application lifecycle. This verifies the database integration; real upstream credentials and multi-host HA are separate acceptance work.
+codex-lb can use Oracle Autonomous Transaction Processing with the optional native Thin driver. The single-instance milestone was exercised against the operator's OCI Always Free database over the selected **TP** service, using an encrypted PEM wallet, TCPS and certificate identity verification. Application startup, dashboard settings, account import, API-key creation, a simulated upstream response with real reservation/settlement and request logging, restart and shutdown use the real application lifecycle. The [two-instance process-failover context](../replica-operations/oracle-ha.md) extends that acceptance boundary; real upstream credentials and physical-host/network-partition failures remain separate work.
 
-Requirements live in [spec.md](spec.md); implementation and remaining HA work live in [the active change](../../changes/add-oracle-autonomous-backend/tasks.md). The change stays open while HA is deferred. No customer-specific connection identifiers, wallet contents or credentials belong in the repository.
+Requirements live in [spec.md](spec.md). The original [Oracle backend change](../../changes/add-oracle-autonomous-backend/tasks.md) tracks the broader backend work. No customer-specific connection identifiers, wallet contents or credentials belong in the repository.
 
 ## Installation and connection configuration
 
@@ -38,7 +38,7 @@ uv run --extra oracle codex-lb-db oracle-check --budget-only \
   --pool-size 4 --max-overflow 0 --replicas 2 --extra-replicas 1
 ```
 
-That hypothetical future topology budgets 16 normal sessions and 24 during update overlap, leaving six. It is a capacity calculation, not a throughput measurement or HA certification. Pool arguments affect the check only.
+The two-instance pilot budgets 16 normal sessions and 24 during update overlap, leaving six. This command is a capacity calculation, not a throughput measurement or availability guarantee; real-process acceptance separately exercises all application pool slots. Pool arguments affect the check only.
 
 Every physical request/background and migration connection initializes UTC before application statements. This matters because the target inherited SESSIONTIMEZONE +02:00 while DBTIMEZONE was +00:00. Timestamp variants retain microseconds and normalize aware instants, including SELECT and RETURNING.
 
@@ -54,11 +54,11 @@ Empty string and NULL remain distinct through a reversible Oracle-only codec: em
 
 `codex-lb-db oracle-schema [--json]` reports the offline model inventory without loading the driver or opening a connection. Unresolved custom representations cause an unsuccessful exit; a zero-blocker inventory does not verify a running deployment. `codex-lb-db check` additionally compares the installed tables, defaults, constraints, function indexes and sequences against expected storage.
 
-## TP, Free limits and future HA
+## TP, Free limits and process failover
 
 The tested target ran Autonomous **23.26.4.1.0** with python-oracledb 26.0.1. Its actual resource-manager rules reported TP active-statement concurrency 30 and HIGH concurrency three. Active-statement concurrency differs from the 30-total-session connection budget. Oracle recommends TP or LOW for short OLTP work; see [service names](https://docs.oracle.com/en/cloud/paas/autonomous-database/serverless/adbsb/predefined-database-services-names.html).
 
-The future topology is a health-aware load balancer, two separately addressable application instances and a shared database. Shared encryption material, distinct bridge IDs/peer addresses, leader election and one worker per instance remain necessary. Ownership components have database concurrency coverage, but host loss, failover and multi-instance peak budgets are still unverified. The existing [replica topology contract](../replica-operations/spec.md) currently requires PostgreSQL.
+The pilot topology is a health-aware load balancer, two separately addressable single-worker instances and a shared database. Shared encryption material, distinct bridge IDs/peer addresses and leader election remain necessary. The [operator guide](../../../docs/deployment/oracle-ha.md) covers rollout, bounded drain, client retry and the application connection budget. The [replica topology contract](../replica-operations/spec.md) and [pilot context](../replica-operations/oracle-ha.md) define its limits: an active stream can break, uncertain requests are not automatically replayed, and expired reservations follow the existing conservative cleanup policy. Database and gateway failover remain external infrastructure concerns.
 
 The shared database is a dependency for both application hosts. Always Free's documented storage budget is 20 GB, so log/usage retention matters. Autonomous Data Guard and point-in-time restore to a selected historical backup/timestamp are unavailable on Always Free; plan external exports and recovery. See [official Free limits](https://docs.oracle.com/en-us/iaas/autonomous-database-serverless/doc/autonomous-always-free.html).
 
@@ -100,7 +100,9 @@ For a stopped container named `codex-lb`, preserve its mounts with `--volumes-fr
 
 Packaging verification inspected both frozen dependency commands, the locked driver's Python 3.14 wheel availability and direct CLI help. Docker daemon access was unavailable locally; these changes do not claim a locally built/tested image.
 
-`make test-oracle` uses disposable test schemas. `CODEX_LB_TEST_ORACLE_URL` covers primitives and repository paths; `CODEX_LB_TEST_ORACLE_BASELINE_URL` isolates destructive fresh/interrupted/drift tests; `CODEX_LB_TEST_ORACLE_RUNTIME_URL` isolates the real application subprocess. Each user requires the installation permissions above. Runtime/repository probes refuse pre-existing tables and remove only their owned application objects. Baseline tests explicitly reset their dedicated schema.
+### Test schema isolation
+
+`make test-oracle` uses disposable test schemas. `CODEX_LB_TEST_ORACLE_URL` covers primitives and repository paths; `CODEX_LB_TEST_ORACLE_BASELINE_URL` isolates destructive fresh/interrupted/drift tests; `CODEX_LB_TEST_ORACLE_RUNTIME_URL` isolates the real application subprocess; `CODEX_LB_TEST_ORACLE_HA_URL` isolates real-process failover with native HAProxy. Each user requires the installation permissions above. Runtime/repository probes refuse pre-existing tables and remove only their owned application objects; the HA harness also refuses pre-existing views and sequences. Baseline tests explicitly reset their dedicated schema.
 
 The Oracle CI workflow creates separate users for installation and application smoke tests. It verifies a canceled row-lock wait and recovery of the same single-slot pool while the blocker remains held; a local TCP relay also verifies cancellation with silent traffic. TLS targets skip that local TCP fault injection, while wallet/UTC, row-lock cancellation and actual OCI writes are tested separately. The former strict cancellation expected failure has been removed after native-timeout-first ownership passed.
 
