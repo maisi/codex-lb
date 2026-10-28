@@ -2,13 +2,17 @@
 FROM ghcr.io/astral-sh/uv:0.12.19 AS uv-bin
 
 FROM rust:1.96.0-slim-bookworm AS native-egress-build
+ARG TARGETARCH
 
 WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+# amd64 and arm64 build in parallel in one builder. Shared caches made both
+# unpack the same crates at once ("failed to unpack package ... File exists")
+# and link into the same target directory, so each architecture gets its own.
+RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress \
     && cp target/release/codex-lb-native-egress /tmp/codex-lb-native-egress
 

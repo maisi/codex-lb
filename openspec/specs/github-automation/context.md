@@ -143,3 +143,22 @@ therefore had to subscribe to `pull_request: edited`.
 Issue #2032 exposed that canonical-only validation accepts malformed active deltas. The required OpenSpec job also runs `.github/scripts/validate_changed_openspec.py` against GitHub event revisions. PR selection uses the merge base and event head, while validation runs in the normal merge checkout. A target-only invalid change added after a PR branches does not enter that PR's validation set.
 
 Full history makes the merge base available. Disabling rename detection includes both old and new paths; surviving folders are validated, fully removed folders and archive paths are skipped. Strict validation is limited to touched active folders because unrelated legacy deltas can still be invalid. Validator arguments terminate options before the folder name, so a folder named `--help` cannot skip validation.
+
+## Rolling main image (`docker-main.yml`)
+
+`docker-main.yml` publishes `edge`, `main`, `latest` and `sha-<short>` from
+every push to `main`. It never cancels a running build
+(`cancel-in-progress: false`). An uncached `linux/amd64` + `linux/arm64` build
+compiles the native egress helper under QEMU and takes about 20 minutes. When
+quick follow-up merges cancelled each other's runs, no fresh image was
+published: on 2026-10-28 the runs for #50 and #46 were both cancelled. GitHub
+keeps at most one pending run per concurrency group, so a burst of merges builds
+the running commit and then only the newest one.
+
+Both Dockerfiles give each architecture its own cargo registry and `target`
+cache mount (`id=cargo-registry-${TARGETARCH}`,
+`id=cargo-target-${TARGETARCH}`, `sharing=locked`). With one shared mount, the
+parallel amd64 and arm64 builds unpacked the same crates at once whenever
+`Cargo.lock` changed. Run 40666285762 failed on
+`failed to unpack package headers v0.4.1 … File exists`. Both builds also
+linked into the same `target/release` binary.

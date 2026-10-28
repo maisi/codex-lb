@@ -41,6 +41,26 @@ def test_linux_container_builds_and_installs_locked_native_egress(dockerfile_nam
     assert "COPY --from=native-egress-build" in runtime
 
 
+@pytest.mark.parametrize("dockerfile_name", ["Dockerfile", "Dockerfile.distroless"])
+def test_native_egress_cargo_caches_are_per_architecture(dockerfile_name: str) -> None:
+    dockerfile = (_REPO_ROOT / dockerfile_name).read_text(encoding="utf-8")
+    native_stage = dockerfile.split(" AS native-egress-build", maxsplit=1)[1].split("\nFROM ", maxsplit=1)[0]
+
+    assert "ARG TARGETARCH" in native_stage
+    assert (
+        "--mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked"
+        in native_stage
+    )
+    assert "--mount=type=cache,id=cargo-target-${TARGETARCH},target=/src/target,sharing=locked" in native_stage
+
+
+def test_main_image_build_is_never_cancelled_by_a_newer_push() -> None:
+    workflow = (_REPO_ROOT / ".github/workflows/docker-main.yml").read_text(encoding="utf-8")
+
+    assert "cancel-in-progress: false" in workflow
+    assert "cancel-in-progress: true" not in workflow
+
+
 def test_native_egress_lockfile_pins_codex_release_family() -> None:
     lockfile = (_REPO_ROOT / "Cargo.lock").read_text(encoding="utf-8")
 
