@@ -12,9 +12,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Never cancel a running build: an uncached multi-arch build takes ~20 minutes,
+# and cancelling it on every quick follow-up merge left main without a fresh
+# image. GitHub keeps at most one run pending per group, so a burst of merges
+# still builds only the running commit and then the newest one.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
