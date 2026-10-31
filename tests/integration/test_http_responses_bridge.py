@@ -90,6 +90,72 @@ async def _cleanup_http_bridge_sessions(app_instance):
             inflight_future.cancel()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unanchored", [False, True])
+async def test_generated_thread_affinity_owner_forward_preserves_live_session(
+    async_client,
+    app_instance,
+    monkeypatch,
+    unanchored,
+):
+    """Real internal route, HMAC, durable/live session and fake upstream (no inference)."""
+    from app.modules.proxy import api as proxy_api_module
+    from app.modules.proxy.affinity import _codex_backend_identity
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_settings = proxy_module.get_settings()
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: owner_settings)
+    account_id = await _import_account(async_client, "acc_encoded_thread", "encoded-thread@example.com")
+    account = await _get_account(account_id)
+    upstream = _DeniesAnchoredTurnUpstreamWebSocket()
+    _install_denied_anchor_bridge_fakes(monkeypatch, account=account, upstream=upstream)
+    upstream_headers = []
+
+    async def connect(headers, access_token, account_id_header, *, base_url=None, session=None):
+        upstream_headers.append(headers)
+        return upstream
+
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    public_headers = {"session-id": "process-encoded", "thread-id": "thread-encoded"}
+    key = _codex_backend_identity(public_headers).thread_selection_key
+    assert key is not None and key.startswith("\n")
+    payload = proxy_module.ResponsesRequest(model="gpt-5.1", instructions="Return exactly OK.", input="hello")
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-b",
+        target_instance="instance-a",
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+        original_request_unanchored=unanchored,
+        original_affinity_kind="thread_header",
+        original_affinity_key=key,
+    )
+    headers = build_owner_forward_headers(headers=public_headers, payload=payload, context=context)
+    response = await async_client.post(
+        "/internal/bridge/responses",
+        json=payload.model_dump_for_forwarding(),
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert '"type":"response.completed"' in response.text
+    assert '"text":"OK"' in response.text
+    service = get_proxy_service_for_app(app_instance)
+    live_key = proxy_module._HTTPBridgeSessionKey("thread_header", key, None, strength="hard")
+    assert service._http_bridge_sessions[live_key].upstream is upstream
+    async with SessionLocal() as session:
+        record = (
+            await session.execute(
+                select(HttpBridgeSessionRecord).where(
+                    HttpBridgeSessionRecord.session_key_value == key,
+                )
+            )
+        ).scalar_one()
+        assert record.session_key_kind == "thread_header"
+        assert record.account_id == account.id
+    assert upstream_headers
+    assert all(not name.lower().startswith("x-codex-bridge-") for name in upstream_headers[0])
+
+
 def _encode_jwt(payload: dict) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")

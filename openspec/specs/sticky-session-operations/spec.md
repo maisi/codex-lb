@@ -1350,15 +1350,13 @@ When account invalidation (deactivation, re-authentication demand, proxy-binding
 
 ### Requirement: Owner forwarding rejects illegal reconstructed header metadata
 
-Owner-forwarded HTTP bridge requests MUST validate reconstructed bridge
-metadata before building signatures or posting headers to another owner.
-Metadata values that become signed bridge headers MUST NOT contain illegal HTTP
-header control characters. If original affinity, downstream turn-state,
-file-owner, client-IP, origin/target instance, or reservation metadata contains
-such a character, the proxy MUST fail closed with the structured
-`bridge_forward_invalid` error instead of sending the owner request. Ordinary
-client headers with illegal HTTP control characters MUST be omitted from the
-forwarded header map.
+Owner-forwarded HTTP bridge requests MUST validate reconstructed bridge metadata before signing or posting. Wire metadata MUST NOT contain illegal HTTP header control characters. The generated `\ncodex-lb-affinity-v1:` logical affinity namespace MAY retain its single leading LF only through a canonical UTF-8 Base64URL encoded `x-codex-bridge-affinity-key-b64` header. All other illegal control characters in affinity, downstream turn-state, file-owner, client-IP, origin/target instance, or reservation metadata MUST fail closed with `bridge_forward_invalid`. Ordinary unsafe client headers MUST be omitted.
+
+#### Scenario: Generated thread affinity crosses an owner hop
+- **GIVEN** a generated thread selection key with the internal leading LF
+- **WHEN** an origin builds an owner forward and the owner receives it
+- **THEN** every receiver MUST restore the exact logical identity before signature verification or session reconstruction
+- **AND** the wire headers MUST remain safe
 
 #### Scenario: Unsafe reservation metadata fails closed
 
@@ -1377,6 +1375,24 @@ forwarded header map.
 - **WHEN** the origin builds the owner-forward request
 - **THEN** that client header is not forwarded
 - **AND** the signed bridge-forward metadata remains valid
+
+### Requirement: Bridge affinity encoding preserves authenticated identity and legacy literals
+Safe legacy keys MUST remain literal, including `b64:` values. Encoded forwards MUST use only the distinct encoded-key header with canonical Base64URL UTF-8 and MUST validate the existing full-context signature over the decoded key and posted body. Malformed, duplicate, ambiguous, noncanonical, tampered or downgraded encoded forwards MUST fail closed. Public requests MUST NOT gain internal affinity provenance through either header.
+
+#### Scenario: Literal legacy prefix remains literal
+- **GIVEN** a safe raw key `b64:c2lk`
+- **WHEN** it is forwarded
+- **THEN** its identity MUST remain `b64:c2lk` in both receive paths
+
+#### Scenario: Encoded metadata cannot downgrade
+- **GIVEN** a forward uses the encoded header
+- **WHEN** the full-context signature is missing or invalid, or both affinity-key headers are present
+- **THEN** the owner MUST reject it with `bridge_forward_invalid`
+
+#### Scenario: Public encoded header is ignored
+- **GIVEN** a public request supplies an encoded bridge affinity header
+- **WHEN** its session key is reconstructed
+- **THEN** that header MUST NOT select an internal affinity identity
 
 ### Requirement: Isolated accounts release their soft sticky owners
 

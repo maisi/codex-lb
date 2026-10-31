@@ -192,6 +192,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
+from app.modules.proxy.bridge_affinity_headers import decode_bridge_affinity_key
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
@@ -3293,7 +3294,7 @@ def _forwarded_http_bridge_session_key(
     forwarded_affinity_key: str | None = None,
 ) -> _HTTPBridgeSessionKey | None:
     affinity_kind = forwarded_affinity_kind or _header_value_case_insensitive(headers, "x-codex-bridge-affinity-kind")
-    affinity_key = forwarded_affinity_key or _header_value_case_insensitive(headers, "x-codex-bridge-affinity-key")
+    affinity_key = forwarded_affinity_key if forwarded_affinity_key is not None else decode_bridge_affinity_key(headers)
     if affinity_kind is None or affinity_key is None:
         return None
     strength: Literal["hard", "soft"]
