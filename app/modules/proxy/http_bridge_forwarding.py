@@ -23,6 +23,13 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_budget_seconds
+from app.modules.proxy.affinity import _CODEX_SELECTION_KEY_PREFIX
+from app.modules.proxy.bridge_affinity_headers import (
+    HTTP_BRIDGE_AFFINITY_KEY_B64_HEADER,
+    HTTP_BRIDGE_AFFINITY_KEY_HEADER,
+    decode_bridge_affinity_key,
+    encode_bridge_affinity_key,
+)
 
 # HTTP-only and hop-by-hop headers that must not be forwarded through the
 # internal bridge. These headers are either illegal in WebSocket handshakes or
@@ -55,7 +62,6 @@ HTTP_BRIDGE_RESERVATION_ID_HEADER = "x-codex-bridge-reservation-id"
 HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER = "x-codex-bridge-reservation-key-id"
 HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
 HTTP_BRIDGE_AFFINITY_KIND_HEADER = "x-codex-bridge-affinity-kind"
-HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
 HTTP_BRIDGE_FILE_OWNER_HEADER = "x-codex-bridge-file-owner"
 HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER = "x-codex-bridge-original-unanchored"
 HTTP_BRIDGE_SIGNATURE_VERSION_HEADER = "x-codex-bridge-signature-version"
@@ -152,12 +158,20 @@ def _reject_illegal_bridge_header_value(name: str, value: str | None) -> None:
 
 
 def _validate_bridge_forward_context_headers(context: HTTPBridgeForwardContext) -> None:
+    # Permit only the internal namespace's leading LF in the logical key.
+    # It is encoded on the wire; never strip it from the signed context.
     for name, value in (
         (HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, context.origin_instance),
         (HTTP_BRIDGE_TARGET_INSTANCE_HEADER, context.target_instance),
         ("x-codex-turn-state", context.downstream_turn_state),
         (HTTP_BRIDGE_AFFINITY_KIND_HEADER, context.original_affinity_kind),
-        (HTTP_BRIDGE_AFFINITY_KEY_HEADER, context.original_affinity_key),
+        (
+            HTTP_BRIDGE_AFFINITY_KEY_HEADER,
+            context.original_affinity_key.removeprefix("\n")
+            if context.original_affinity_key is not None
+            and context.original_affinity_key.startswith(f"{_CODEX_SELECTION_KEY_PREFIX}:")
+            else context.original_affinity_key,
+        ),
         (HTTP_BRIDGE_FILE_OWNER_HEADER, context.file_owner_account_id),
         (HTTP_BRIDGE_CLIENT_IP_HEADER, context.client_ip),
     ):
@@ -335,7 +349,9 @@ def build_owner_forward_headers(
         forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1"
     if context.original_affinity_kind and context.original_affinity_key:
         forwarded[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = context.original_affinity_kind
-        forwarded[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = context.original_affinity_key
+        affinity_header, affinity_value = encode_bridge_affinity_key(context.original_affinity_key)
+        _reject_illegal_bridge_header_value(affinity_header, affinity_value)
+        forwarded[affinity_header] = affinity_value
     if context.file_owner_account_id:
         # This proof is accepted only with the full-context signature below;
         # the legacy primary signature intentionally remains byte-compatible.
@@ -404,6 +420,11 @@ def parse_forwarded_request(
                 error_type="server_error",
             ),
         )
+    encoded_affinity = any(name.lower() == HTTP_BRIDGE_AFFINITY_KEY_B64_HEADER for name in headers)
+    try:
+        affinity_key = decode_bridge_affinity_key(headers)
+    except ValueError:
+        return None, _invalid_bridge_forward_signature_error()
     client_ip = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER))
     signature_version = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER))
     original_unanchored_value = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
@@ -422,12 +443,17 @@ def parse_forwarded_request(
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
         original_request_unanchored=original_request_unanchored,
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
-        original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
+        original_affinity_key=affinity_key,
         file_owner_account_id=_optional_header(headers.get(HTTP_BRIDGE_FILE_OWNER_HEADER)),
         client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
         signature_version=signature_version,
     )
+    if encoded_affinity:
+        try:
+            _validate_bridge_forward_context_headers(context)
+        except ProxyResponseError:
+            return None, _invalid_bridge_forward_signature_error()
     # Tamper-proofing fast path (#1203): a VALIDATING tamper-proofing
     # signature proves the received body was not rewritten in transit —
     # including an injected ``"tools": []`` that the primary plain-dump
@@ -449,6 +475,10 @@ def parse_forwarded_request(
     )
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
+    if encoded_affinity:
+        # Encoded keys have no legacy peers; require the delimiter-safe,
+        # exact-body signature rather than extending the rollout downgrade.
+        return None, _invalid_bridge_forward_signature_error()
     if context.file_owner_account_id is not None or extract_input_file_ids(payload.input):
         # The rolling-upgrade primary signature does not bind the additive
         # file-owner proof. Never allow a stripped/forged proof to downgrade to
