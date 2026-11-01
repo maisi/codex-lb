@@ -77,6 +77,11 @@ async def oracle_runtime() -> AsyncIterator[AsyncEngine]:
     def remove_schema() -> None:
         with schema_engine.begin() as connection:
             Base.metadata.drop_all(connection)
+            # run_upgrade owns this ledger outside Base.metadata. Remove it only
+            # after this fixture verified and installed an empty owned schema.
+            if inspect(connection).has_table("alembic_version"):
+                connection.exec_driver_sql("DROP TABLE alembic_version")
+            assert inspect(connection).get_table_names() == []
 
     try:
         # Match production migration connections and their DDL timeout; the
