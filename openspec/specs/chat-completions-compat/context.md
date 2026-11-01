@@ -59,3 +59,11 @@ Responses-shaped chat request with a built-in tool:
 
 - Streaming chunk mapping is validated in unit tests.
 - Integration tests cover include_usage and tool call finish reasons.
+
+## Chat-derived call identifier boundary
+
+Chat `tool_calls[].id` values are provider-opaque. Hidden fallback can deliver a Gemini-style thought/signature identifier to a GPT Responses boundary where call IDs are limited to 64 characters. The shared Chat-message coercer therefore maps only overlong IDs on newly constructed function call/output items. It hashes the complete UTF-8 identifier and reserves every short ID in the request before allocating deterministic collision suffixes. Pairing and repeats share one request-local alias; source messages are not mutated.
+
+This is deliberately not a global provider-signature rewrite. Native Responses `input` (including Responses-shaped input sent to the Chat route) remains owned by its caller and is passed through unchanged. The same coercion rule applies when V1 Responses or compact compatibility requests use their optional `messages` field. This boundary mitigation does not repair or claim to repair provider-aware fallback selection.
+
+JSON escaping can carry an unpaired surrogate through Chat request validation. If an oversized ID cannot be encoded as UTF-8, the hashing boundary raises `ClientPayloadError(param="messages")` rather than stripping or repairing it. The Chat route returns HTTP 400 with the existing OpenAI `invalid_request_error` envelope and `Invalid request payload` message before upstream dispatch, for stream and non-stream requests. Valid scalar Unicode keeps the same complete-ID hash and paired alias. IDs of at most 64 characters bypass hashing unchanged; this does not add global Unicode validation or change native Responses input. For example, `"x" * 65 + "\ud800"` is rejected only when converted from Chat messages.

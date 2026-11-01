@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from hashlib import sha256
 from typing import cast
 
 from app.core.openai.contracts import (
@@ -70,7 +71,42 @@ def coerce_messages(
             continue
         input_messages.append(cast(JsonValue, _normalize_message_content(cast(OpenAIMessage, message_dict))))
     merged = _merge_instructions(existing_instructions, instruction_parts)
+    _normalize_call_ids(input_messages)
     return merged, input_messages
+
+
+def _normalize_call_ids(items: list[JsonValue]) -> None:
+    """Normalize only fresh Chat-derived items, never native Responses input."""
+    function_items = [
+        item for item in items if is_json_dict(item) and item.get("type") in ("function_call", "function_call_output")
+    ]
+    # Reserve the entire request first, including short IDs occurring after long ones.
+    reserved = {
+        call_id for item in function_items if isinstance(call_id := item.get("call_id"), str) and len(call_id) <= 64
+    }
+    aliases: dict[str, str] = {}
+    for item in function_items:
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or len(call_id) <= 64:
+            continue
+        if call_id not in aliases:
+            try:
+                encoded_id = call_id.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ClientPayloadError(
+                    "Oversized tool call identifiers must be valid UTF-8.", param="messages"
+                ) from exc
+            base = "call_" + sha256(encoded_id).hexdigest()[:32]
+            candidate = base
+            counter = 0
+            # Numeric disambiguation terminates even when different full IDs hash alike.
+            while candidate in reserved:
+                counter += 1
+                suffix = f"_{counter}"
+                candidate = base[: 64 - len(suffix)] + suffix
+            aliases[call_id] = candidate
+            reserved.add(candidate)
+        item["call_id"] = aliases[call_id]
 
 
 def _merge_instructions(existing: str, extra_parts: list[str]) -> str:
