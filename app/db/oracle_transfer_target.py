@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.models import Base
 from app.db.oracle_baseline import load_oracle_baseline, oracle_schema_drift
+from app.db.oracle_schema import oracle_head_contract
 from app.db.oracle_transfer_fence import has_incomplete_transfer
 
 
@@ -61,7 +62,7 @@ def prepare_target(database_url: str, connection: Connection, *, dry_run: bool) 
 
     try:
         tables = set(inspect(connection).get_table_names())
-        snapshot = load_oracle_baseline()
+        snapshot = oracle_head_contract()
         expected = {table.name for table in snapshot.tables}
         if not tables:
             if oracle_schema_drift(connection, snapshot, allow_missing=True):

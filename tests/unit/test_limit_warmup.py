@@ -238,10 +238,12 @@ class FakeRequestLogsRepo:
         upstream_proxy_endpoint_id: str | None = None,
         upstream_proxy_fallback_used: bool | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
+        processing_node: str | None = None,
     ) -> None:
         self.logs.append(
             {
                 "account_id": account_id,
+                "processing_node": processing_node,
                 "request_id": request_id,
                 "model": model,
                 "input_tokens": input_tokens,
@@ -303,6 +305,7 @@ async def test_fake_request_logs_repo_accepts_request_log_metadata_fields() -> N
     assert repo.logs == [
         {
             "account_id": None,
+            "processing_node": None,
             "request_id": "req_limit_warmup_contract",
             "model": "gpt-5.1",
             "input_tokens": 1,
@@ -871,7 +874,11 @@ async def test_stale_past_boundary_update_without_quota_recovery_does_not_warm()
 
 
 @pytest.mark.asyncio
-async def test_warmup_request_log_persists_route_metadata() -> None:
+async def test_warmup_request_log_persists_route_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "warmup-fixture")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
     repo = FakeWarmupRepo()
     logs = FakeRequestLogsRepo()
 
@@ -910,6 +917,7 @@ async def test_warmup_request_log_persists_route_metadata() -> None:
     assert logs.logs[0]["upstream_proxy_pool_id"] == "pool_1"
     assert logs.logs[0]["upstream_proxy_endpoint_id"] == "ep_1"
     assert logs.logs[0]["upstream_proxy_fallback_used"] is True
+    assert logs.logs[0]["processing_node"] == "warmup-fixture"
 
 
 @pytest.mark.asyncio

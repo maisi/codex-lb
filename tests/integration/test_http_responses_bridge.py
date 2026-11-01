@@ -92,11 +92,13 @@ async def _cleanup_http_bridge_sessions(app_instance):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unanchored", [False, True])
+@pytest.mark.parametrize("upstream_error", [False, True])
 async def test_generated_thread_affinity_owner_forward_preserves_live_session(
     async_client,
     app_instance,
     monkeypatch,
     unanchored,
+    upstream_error,
 ):
     """Real internal route, HMAC, durable/live session and fake upstream (no inference)."""
     from app.modules.proxy import api as proxy_api_module
@@ -105,10 +107,28 @@ async def test_generated_thread_affinity_owner_forward_preserves_live_session(
 
     _install_bridge_settings(monkeypatch, enabled=True)
     owner_settings = proxy_module.get_settings()
+    monkeypatch.setattr(proxy_module, "get_environment_settings", lambda: owner_settings)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: owner_settings)
     account_id = await _import_account(async_client, "acc_encoded_thread", "encoded-thread@example.com")
     account = await _get_account(account_id)
     upstream = _DeniesAnchoredTurnUpstreamWebSocket()
+    if upstream_error:
+
+        async def fail_after_created(text):
+            upstream.sent_text.append(text)
+            for event_type, status in [("response.created", "in_progress"), ("response.failed", "failed")]:
+                response: dict[str, Any] = {"id": "resp_owner_error_fixture", "status": status}
+                if status == "failed":
+                    response["error"] = {
+                        "type": "invalid_request_error",
+                        "code": "invalid_prompt",
+                        "message": "Synthetic owner error",
+                    }
+                await upstream._messages.put(
+                    _FakeUpstreamMessage("text", text=json.dumps({"type": event_type, "response": response}))
+                )
+
+        monkeypatch.setattr(upstream, "send_text", fail_after_created)
     _install_denied_anchor_bridge_fakes(monkeypatch, account=account, upstream=upstream)
     upstream_headers = []
 
@@ -137,8 +157,16 @@ async def test_generated_thread_affinity_owner_forward_preserves_live_session(
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    assert '"type":"response.completed"' in response.text
-    assert '"text":"OK"' in response.text
+    if upstream_error:
+        events = [
+            json.loads(line[6:])
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line[6:] != "[DONE]"
+        ]
+        assert any(event.get("type") == "response.failed" for event in events)
+    else:
+        assert '"type":"response.completed"' in response.text
+        assert '"text":"OK"' in response.text
     service = get_proxy_service_for_app(app_instance)
     live_key = proxy_module._HTTPBridgeSessionKey("thread_header", key, None, strength="hard")
     assert service._http_bridge_sessions[live_key].upstream is upstream
@@ -154,6 +182,101 @@ async def test_generated_thread_affinity_owner_forward_preserves_live_session(
         assert record.account_id == account.id
     assert upstream_headers
     assert all(not name.lower().startswith("x-codex-bridge-") for name in upstream_headers[0])
+    assert await service.drain_persistence_tasks(5.0)
+    logs = (await async_client.get("/api/request-logs")).json()["requests"]
+    assert len(logs) == 1
+    assert logs[0]["processingNode"] == "instance-a"
+    assert logs[0]["status"] == ("error" if upstream_error else "ok")
+    if upstream_error:
+        assert logs[0]["errorCode"] == "invalid_prompt"
+
+
+@pytest.mark.asyncio
+async def test_owner_forward_failure_does_not_attribute_ingress(async_client, app_instance, monkeypatch):
+    from app.core.clients.proxy import ProxyResponseError
+
+    _install_bridge_settings(monkeypatch, enabled=True)
+    service = get_proxy_service_for_app(app_instance)
+    key = proxy_module._HTTPBridgeSessionKey("session_header", "synthetic-owner-fixture", None)
+    owner = proxy_module._HTTPBridgeOwnerForward(
+        owner_instance="home-b", owner_endpoint="http://fixture.invalid", key=key
+    )
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=owner))
+
+    async def unavailable_owner(**kwargs):
+        kwargs["on_request_dispatched"]()
+        raise ProxyResponseError(
+            503,
+            {"error": {"code": "bridge_owner_unreachable", "message": "Synthetic owner unavailable"}},
+            failure_phase="owner_forward",
+            failure_detail="synthetic_connection_refused",
+        )
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(service._http_bridge_owner_client, "stream_responses", unavailable_owner)
+    response = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.1", "input": "Synthetic forwarding failure"},
+        headers={"x-codex-session-id": key.affinity_key},
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "bridge_owner_unreachable"
+    assert await service.drain_persistence_tasks(5.0)
+    rows = (await async_client.get("/api/request-logs")).json()["requests"]
+    assert len(rows) == 1
+    assert rows[0]["processingNode"] is None
+    assert rows[0]["errorCode"] == "bridge_owner_unreachable"
+
+
+@pytest.mark.asyncio
+async def test_owner_forward_recovery_attributes_actual_local_execution(async_client, app_instance, monkeypatch):
+    from app.core.clients.proxy import ProxyResponseError
+
+    _install_bridge_settings(monkeypatch, enabled=True)
+    local_settings = proxy_module.get_settings()
+    monkeypatch.setattr(proxy_module, "get_environment_settings", lambda: local_settings)
+    await _import_account(async_client, "acc_recovery_fixture", "recovery-fixture@example.com")
+    service = get_proxy_service_for_app(app_instance)
+    original_get_session = service._get_or_create_http_bridge_session
+    calls = 0
+
+    async def get_session(key, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return proxy_module._HTTPBridgeOwnerForward(
+                owner_instance="home-b",
+                owner_endpoint="http://fixture.invalid",
+                key=key,
+            )
+        return await original_get_session(key, **kwargs)
+
+    async def unavailable_owner(**kwargs):
+        # No dispatch callback: the origin is still allowed to recover locally.
+        raise ProxyResponseError(
+            503,
+            {"error": {"code": "bridge_owner_unreachable", "message": "Synthetic pre-dispatch failure"}},
+            failure_phase="owner_forward",
+        )
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_session)
+    monkeypatch.setattr(service._http_bridge_owner_client, "stream_responses", unavailable_owner)
+    monkeypatch.setattr(
+        proxy_module, "connect_responses_websocket", AsyncMock(return_value=_FakeBridgeUpstreamWebSocket())
+    )
+    response = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.1", "input": "Synthetic local recovery"},
+        headers={"x-codex-session-id": "synthetic-recovery-fixture"},
+    )
+    assert response.status_code == 200, response.text
+    assert calls == 2
+    assert await service.drain_persistence_tasks(5.0)
+    rows = (await async_client.get("/api/request-logs")).json()["requests"]
+    assert len(rows) == 1
+    assert rows[0]["processingNode"] == "instance-a"
+    assert rows[0]["status"] == "ok"
 
 
 def _encode_jwt(payload: dict) -> str:

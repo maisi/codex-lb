@@ -14,6 +14,7 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
     deviceScaleFactor: 2,
     launchOptions: {
+      executablePath: process.env.SCREENSHOT_CHROMIUM_EXECUTABLE,
       args: ["--use-gl=angle", "--use-angle=swiftshader"],
     },
   },

@@ -12,6 +12,7 @@ import {
   REQUEST_LOG_COLUMN_WIDTH_STEP,
 } from "@/features/dashboard/request-log-columns";
 import type { RequestLog } from "@/features/dashboard/schemas";
+import { RequestLogSchema } from "@/features/dashboard/schemas";
 
 const ISO = "2026-01-01T12:00:00+00:00";
 const NULL_FAILURE_METADATA = {
@@ -104,6 +105,16 @@ function openRequestDetails() {
 }
 
 describe("RecentRequestsTable", () => {
+  it.each(["home-b", null, undefined])("renders persisted processing node %s in the row and details", (node) => {
+    const request = RequestLogSchema.parse({ ...LAYOUT_REQUEST, processingNode: node });
+    expect(request.processingNode).toBe(node);
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[request]} />);
+    expect(within(screen.getAllByRole("row")[1]).getByText(`Node: ${node ?? "Unknown"}`)).toBeInTheDocument();
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("Processing node")).toBeInTheDocument();
+    expect(within(dialog).getByText(node ?? "Unknown")).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     toastSuccess.mockReset();
     toastError.mockReset();

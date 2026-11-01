@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 from collections.abc import Mapping
 from functools import cached_property, lru_cache
@@ -798,6 +799,16 @@ class Settings(BaseSettings):
         if "database_max_overflow" not in explicitly_set:
             self.database_max_overflow = 0
         return self
+
+    @property
+    def processing_node(self) -> str | None:
+        """Public execution label; never publish the implicit hostname identity."""
+        if "http_responses_session_bridge_instance_id" not in self.model_fields_set:
+            return None
+        label = self.http_responses_session_bridge_instance_id
+        if re.match(r"(?:sk-|gh[opusr]_|github_pat_|xox[baprs]-|AKIA|ASIA)", label, flags=re.IGNORECASE):
+            return None
+        return label if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", label, flags=re.ASCII) else None
 
     @model_validator(mode="after")
     def _validate_http_bridge_instance_configuration(self) -> "Settings":

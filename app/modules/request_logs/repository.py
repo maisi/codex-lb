@@ -1041,6 +1041,7 @@ class RequestLogsRepository:
         sticky_key_source: str | None = None,
         sticky_kind: str | None = None,
         sticky_key_hash: str | None = None,
+        processing_node: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
             # Telemetry write: this transaction only appends one request-log
@@ -1067,6 +1068,7 @@ class RequestLogsRepository:
                 api_key_id=api_key_id,
                 session_id=session_id,
                 request_id=resolved_request_id,
+                processing_node=processing_node,
                 archive_request_id=resolved_archive_request_id,
                 model=model,
                 plan_type=resolved_plan_type,

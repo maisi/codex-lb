@@ -15,6 +15,14 @@ The **Request Logs** token cell shows total tokens, with reported cached-input a
 
 The **Reports** page shows the reported reasoning total for the selected date range and filters. Its coverage count states how many requests supplied a reasoning value. The daily breakdown and CSV export include the same reasoning field.
 
+## Processing Node
+
+Request Logs show **Node** beneath the account and **Processing node** in Details. This identifies the proxy instance that executed the request. If `oci-a` forwards a bridged request to `home-b`, the execution record identifies `home-b`. A forwarding failure with unconfirmed execution remains **Unknown**.
+
+The label uses the existing `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID` topology setting only when explicitly configured. Choose a non-sensitive label such as `oci-a` or `home-b`: 1–64 ASCII letters, digits, underscores or hyphens, starting with a letter. Addresses, domains, paths and recognized credential prefixes are withheld. The automatic hostname stays internal. Historical records and requests without a safe configured label show **Unknown**; reading them on another instance does not change their provenance.
+
+*Spec: [proxy-runtime-observability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-runtime-observability)*
+
 ## Missing Usage
 
 A reported zero remains `0`. A missing value remains unknown and appears as `—` in the daily report or is omitted from request details. codex-lb does not turn missing usage into zero.

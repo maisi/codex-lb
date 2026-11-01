@@ -57,6 +57,7 @@ from fastapi.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
+from app.core.config.settings import get_settings
 from app.core.metrics.prometheus import (
     model_source_dispatch_abandoned_total,
     model_source_dispatch_total,
@@ -553,6 +554,7 @@ class SourceDispatch:
         try:
             async with get_background_session() as session:
                 await RequestLogsRepository(session).add_log(
+                    processing_node=get_settings().processing_node,
                     account_id=None,
                     request_id=source_response_id or proxy_request_id,
                     archive_request_id=proxy_request_id,

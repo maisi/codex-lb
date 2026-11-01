@@ -169,6 +169,8 @@ def _contents(engine: Engine) -> dict[str, list[tuple[Any, ...]]]:
 
 
 def test_public_transfer_copies_every_table_and_preserves_source(source: Path, target: Engine) -> None:
+    with sqlite3.connect(source) as connection:
+        connection.execute("UPDATE request_logs SET processing_node = 'home-b'")
     before = source.read_bytes()
     fenced = False
 
@@ -194,6 +196,7 @@ def test_public_transfer_copies_every_table_and_preserves_source(source: Path, t
     assert all(row.rows > 0 and len(row.checksum) == 64 for row in report.tables)
     assert report.dry_run is False
     with target.connect() as connection:
+        assert connection.scalar(text("SELECT processing_node FROM request_logs")) == "home-b"
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261024_000000_oracle_baseline"
 
 

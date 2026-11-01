@@ -7,18 +7,24 @@ from sqlalchemy.schema import CreateIndex
 
 from app.db.models import Base
 from app.db.oracle_baseline import load_oracle_baseline
-from app.db.oracle_schema import oracle_snapshot_from_metadata
+from app.db.oracle_schema import oracle_head_contract, oracle_snapshot_from_metadata
 from app.db.oracle_types import OracleStringStorage, configure_oracle_string_storage
 
 
 def test_oracle_baseline_is_frozen_and_matches_current_model_contract() -> None:
     baseline = load_oracle_baseline()
+    expected_head = oracle_head_contract()
     current = oracle_snapshot_from_metadata()
 
     assert len(baseline.tables) == len(Base.metadata.tables) == 68
-    for expected, actual in zip(baseline.tables, current.tables, strict=True):
+    assert "processing_node" not in {
+        column.name for table in baseline.tables if table.name == "request_logs" for column in table.columns
+    }
+    for expected, actual in zip(expected_head.tables, current.tables, strict=True):
         # Constraint-set ordering in emitted DDL is deliberately insignificant.
-        assert expected.model_copy(update={"ddl": ""}) == actual.model_copy(update={"ddl": ""})
+        assert expected.model_copy(
+            update={"ddl": "", "columns": tuple(sorted(expected.columns, key=lambda c: c.name))}
+        ) == actual.model_copy(update={"ddl": "", "columns": tuple(sorted(actual.columns, key=lambda c: c.name))})
     assert baseline.indexes == current.indexes
     assert baseline.sequences == current.sequences
     assert len(baseline.seeds) == 12

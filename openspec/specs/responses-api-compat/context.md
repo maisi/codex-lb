@@ -372,3 +372,7 @@ context. Monitor backoff waits and `owner_unavailable_transcript_replay` events
 alongside owner-unavailable failures after rollout. See [spec.md](spec.md) for
 the governing requirements and the archived
 `recover-account-switch-after-overload` change for verification evidence.
+
+## Request processing provenance
+
+The additive execution-node contract is documented in [proxy runtime observability context](../proxy-runtime-observability/context.md#request-processing-provenance) and [this capability's requirements](spec.md). Historical/unset/unsafe identity remains null. Default and Oracle lineages evolve independently without rewriting Oracle's frozen baseline. The existing request surfaces accept older backends and preserve Unknown rather than infer a node at read time.

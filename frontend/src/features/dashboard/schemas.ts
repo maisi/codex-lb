@@ -206,6 +206,7 @@ export const RequestLogSchema = z.object({
   apiKeyId: z.string().nullable().optional().default(null),
   requestId: z.string(),
   archiveRequestId: z.string().nullable().optional(),
+  processingNode: z.string().nullable().optional(),
   requestKind: z.enum(["normal", "warmup", "limit_warmup", "prewarm", "compaction", "realtime_live"]).optional().default("normal"),
   connectionRequestKind: z.enum(["normal", "prewarm"]).nullable().optional(),
   model: z.string(),

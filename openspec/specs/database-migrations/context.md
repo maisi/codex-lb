@@ -130,3 +130,7 @@ table and the subscription-overflow schema withdrawal. Like earlier sync
 merges it is an operation-free convergence marker. Downgrading from it to the
 fork beta6 merge leaves that revision and the upstream post-beta9 head stamped;
 see `tests/integration/test_upstream_fork_migration.py`.
+
+## Request processing provenance
+
+The additive execution-node contract is documented in [proxy runtime observability context](../proxy-runtime-observability/context.md#request-processing-provenance) and [this capability's requirements](spec.md). Historical/unset/unsafe identity remains null. Default and Oracle lineages evolve independently without rewriting Oracle's frozen baseline. The existing request surfaces accept older backends and preserve Unknown rather than infer a node at read time.

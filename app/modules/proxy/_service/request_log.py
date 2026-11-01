@@ -201,6 +201,7 @@ class _RequestLogMixin:
         conversation_id: str | None = None,
         client_ip: str | None = None,
         archive_request_id: str | None = None,
+        execution_local: bool = True,
         # True when the row's latencies span more than one upstream send
         # (bridge retry or direct WebSocket replay) or an account-capacity
         # wait. Not persisted; it only keeps the row out of the latency cohort samples.
@@ -219,8 +220,11 @@ class _RequestLogMixin:
         # ``latency_ms``; such rows are error rows and are not sampled.
         latency_upstream_terminal_ms: int | None = None,
     ) -> None:
+        from app.modules.proxy.service import get_environment_settings
+
         task = scheduler_for(self).create_task(
             self._persist_request_log(
+                processing_node=get_environment_settings().processing_node if execution_local else None,
                 affinity_observation=affinity_observation,
                 account_id=account_id,
                 api_key_id=api_key.id if api_key else None,
@@ -431,6 +435,7 @@ class _RequestLogMixin:
     async def _persist_request_log(
         self,
         *,
+        processing_node: str | None = None,
         affinity_observation: AffinityObservation | None = None,
         account_id: str | None,
         api_key_id: str | None,
@@ -483,6 +488,7 @@ class _RequestLogMixin:
         try:
             async with proxy._repo_factory() as repos:
                 await repos.request_logs.add_log(
+                    processing_node=processing_node,
                     sticky_key_source=affinity_observation.source if affinity_observation is not None else None,
                     sticky_kind=affinity_observation.kind if affinity_observation is not None else None,
                     sticky_key_hash=affinity_observation.key_hash if affinity_observation is not None else None,
@@ -557,6 +563,8 @@ class _RequestLogMixin:
         transport: str = _REQUEST_TRANSPORT_HTTP,
         upstream_transport: str | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
+        execution_local: bool = True,
+        bridge_stage: str | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
         conversation_id: str | None = None,
@@ -578,6 +586,8 @@ class _RequestLogMixin:
             service_tier=service_tier,
             requested_service_tier=service_tier,
             upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
+            execution_local=execution_local,
+            bridge_stage=bridge_stage,
             useragent=useragent,
             useragent_group=useragent_group,
             conversation_id=conversation_id,

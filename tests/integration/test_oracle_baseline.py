@@ -60,7 +60,7 @@ def baseline_engine() -> Iterator[Engine]:
 
 def _upgrade() -> None:
     result = run_upgrade(_URL, bootstrap_legacy=False)
-    assert result.current_revision == "20261024_000000_oracle_baseline"
+    assert result.current_revision == "20261101_000100_request_node"
 
 
 def test_oracle_upgrade_seeds_verifies_and_preserves_rows_on_restart(baseline_engine: Engine) -> None:

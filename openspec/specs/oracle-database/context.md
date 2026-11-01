@@ -109,3 +109,7 @@ The Oracle CI workflow creates separate users for installation and application s
 Oracle Free rejects a top-level `FETCH FIRST ... FOR UPDATE` in bridge retention and abandonment scans with ORA-02014. These paths bound candidate operation IDs in an independent subquery, then lock the eligible operation/session join without an outer row limit. Original eligibility filters and the deletion-time recheck preserve the live owner's duplicate-suppression ledger. Cost-backfill batches use the same selection pattern, preserving log eligibility, ID ordering and resume cursors.
 
 Related upstream context: [python-oracledb cancellation recovery](https://github.com/oracle/python-oracledb/issues/623), [SQLAlchemy Oracle termination](https://github.com/sqlalchemy/sqlalchemy/issues/13578), and the [driver connection guide](https://python-oracledb.readthedocs.io/en/stable/user_guide/connection_handling.html).
+
+## Request processing provenance
+
+The additive execution-node contract is documented in [proxy runtime observability context](../proxy-runtime-observability/context.md#request-processing-provenance) and [this capability's requirements](spec.md). Historical/unset/unsafe identity remains null. Default and Oracle lineages evolve independently without rewriting Oracle's frozen baseline. The existing request surfaces accept older backends and preserve Unknown rather than infer a node at read time.

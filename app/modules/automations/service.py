@@ -19,6 +19,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.background_jobs import resolve_background_job_toggle
 from app.core.config.dashboard_overrides import dashboard_overrides_bound
+from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
@@ -2112,6 +2113,7 @@ class AutomationsService:
             return
         try:
             await self._request_logs_repository.add_log(
+                processing_node=get_settings().processing_node,
                 account_id=account_id,
                 request_id=request_id,
                 model=model,

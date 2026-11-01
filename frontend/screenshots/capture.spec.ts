@@ -108,7 +108,7 @@ async function interceptApi(
     return route.abort();
   });
 
-  await page.route("**/health", (route) => fulfill(route, { status: "ok" }));
+  await page.route("**/health{,/**}", (route) => fulfill(route, { status: "ok" }));
 }
 
 // ── Theme ──
@@ -176,13 +176,42 @@ async function capture(
 
   await page.screenshot({
     path: path.join(SCREENSHOT_DIR, opts.file),
-    type: "jpeg",
-    quality: 90,
+    ...(opts.file.endsWith(".png") ? { type: "png" as const } : { type: "jpeg" as const, quality: 90 }),
     fullPage: opts.fullPage ?? false,
   });
 }
 
 // ── Scenes ──
+
+test("request processing node — synthetic fixture", async ({ page }) => {
+  const phase = process.env.REQUEST_NODE_SCREENSHOT_PHASE ?? "after";
+  const outputDir = process.env.REQUEST_NODE_SCREENSHOT_DIR ?? SCREENSHOT_DIR;
+  await page.clock.setFixedTime(new Date("2026-10-28T13:30:00Z"));
+  await capture(page, {
+    file: `request-processing-node-details-${phase}.png`, theme: "light", route: "/dashboard",
+    beforeScreenshot: async (currentPage) => {
+      await currentPage.route("**/api/request-logs?*", (route) => fulfill(route,
+        createRequestLogsResponse(requestLogs.slice(0, 2).map((row, index) => ({
+          ...row,
+          requestId: `synthetic-node-fixture-${index}`,
+          model: "Synthetic fixture",
+          processingNode: index === 0 ? "home-b" : null,
+        })), 2, false),
+      ));
+      await currentPage.reload({ waitUntil: "networkidle" });
+      await expect(currentPage.getByText("Synthetic fixture").first()).toBeVisible();
+      await currentPage.getByText("Synthetic fixture").first().scrollIntoViewIfNeeded();
+      if (phase === "after") {
+        await expect(currentPage.getByText("Node: home-b")).toBeVisible();
+        await expect(currentPage.getByText("Node: Unknown")).toBeVisible();
+      }
+      await currentPage.screenshot({ path: path.join(outputDir, `request-processing-node-${phase}.png`) });
+      await currentPage.getByRole("button", { name: /view details/i }).first().click();
+      await expect(currentPage.getByRole("dialog")).toBeVisible();
+      if (phase === "after") await expect(currentPage.getByRole("dialog").getByText("home-b")).toBeVisible();
+    },
+  });
+});
 
 test("dashboard — light", async ({ page }) => {
   await capture(page, { file: "dashboard.jpg", theme: "light", route: "/dashboard" });

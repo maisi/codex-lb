@@ -93,7 +93,7 @@ def test_real_oracle_transfer_retains_values_ledger_and_sequence_highwater(
         report = transfer_sqlite_to_oracle(_URL, source_sqlite=source, batch_size=2, progress=lambda _: None)
         assert {table.name for table in report.tables} == set(Base.metadata.tables)
         assert source.read_bytes() == before
-        assert current_revision(_URL) == "20261024_000000_oracle_baseline"
+        assert current_revision(_URL) == "20261101_000100_request_node"
         with oracle_target.begin() as connection:
             assert connection.scalar(select(Account.access_token_encrypted)) == encrypted
             assert connection.scalar(select(ModelContextWindowOverride.slug)) == ""
