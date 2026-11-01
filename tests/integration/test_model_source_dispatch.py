@@ -25,6 +25,7 @@ from aiohttp import web
 from sqlalchemy import select
 from starlette.requests import Request
 
+from app.core.config.settings import get_settings
 from app.db.models import ApiKeyUsageReservation, ModelSource, RequestLog
 from app.db.session import SessionLocal
 from app.modules.proxy import api as proxy_api
@@ -219,7 +220,11 @@ def _request_body(model: str, **extra: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_limited_key_streams_live_and_settles_from_source_usage(async_client, source_upstream) -> None:
+async def test_limited_key_streams_live_and_settles_from_source_usage(
+    async_client, source_upstream, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "source-fixture")
+    get_settings.cache_clear()
     await _enable_api_key_auth(async_client)
     state = _StubState()
     hold = asyncio.Event()
@@ -282,6 +287,7 @@ async def test_limited_key_streams_live_and_settles_from_source_usage(async_clie
     row = rows[0]
     assert row.status == "success"
     assert row.source == "model_source"
+    assert row.processing_node == "source-fixture"
     assert row.account_id is None
     assert row.api_key_id == key_id
     assert row.model_source_kind == "openai_compatible"

@@ -32,6 +32,7 @@ from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     WebsocketsUpstreamWebSocket,
 )
+from app.core.config.settings import Settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
 from app.core.utils.request_id import get_request_id
@@ -267,6 +268,11 @@ def test_responses_websocket_route_drain_preserves_terminal_ownership_and_reject
     monkeypatch,
 ):
     """Preserve settlement ownership while denying late upgrades with retryable errors."""
+    monkeypatch.setattr(
+        proxy_module,
+        "get_environment_settings",
+        lambda: Settings(http_responses_session_bridge_instance_id="home-b"),
+    )
     terminal_release = threading.Event()
     terminal_waiting = threading.Event()
     settlement_started = threading.Event()
@@ -547,6 +553,7 @@ def test_responses_websocket_route_drain_preserves_terminal_ownership_and_reject
     assert persisted_log.transport == "websocket"
     assert persisted_log.input_tokens == 3
     assert persisted_log.output_tokens == 2
+    assert persisted_log.processing_node == "home-b"
 
 
 def test_responses_websocket_route_drain_interrupts_blocked_idle_receive(

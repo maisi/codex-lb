@@ -621,7 +621,12 @@ async def test_backend_responses_preserves_non_message_developer_directive(async
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_client, monkeypatch):
+async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_client, app_instance, monkeypatch):
+    monkeypatch.setattr(
+        proxy_module,
+        "get_environment_settings",
+        lambda: Settings(http_responses_session_bridge_instance_id="retry-fixture"),
+    )
     for raw_account_id, email in (
         ("acc_stream_invalidated_a", "stream-invalidated-a@example.com"),
         ("acc_stream_invalidated_b", "stream-invalidated-b@example.com"),
@@ -633,6 +638,15 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
 
     captured_account_ids: list[str | None] = []
     invalidated_account_id: str | None = None
+    refresh_forces: list[bool] = []
+
+    async def fake_refresh(self, account, *, force=False, timeout_seconds):
+        # Synthetic successful OAuth refresh; the upstream still rejects this
+        # account's token, so the real retry path must select another account.
+        refresh_forces.append(force)
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_refresh)
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del payload, headers, access_token, base_url, raise_for_status, kwargs
@@ -664,7 +678,15 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
     assert event["type"] == "response.completed"
     assert event["response"]["id"] == "resp_stream_failover"
     assert captured_account_ids[0] == invalidated_account_id
-    assert captured_account_ids[1] != invalidated_account_id
+    assert len(captured_account_ids) == 3
+    assert captured_account_ids[1] == invalidated_account_id
+    assert captured_account_ids[2] != invalidated_account_id
+    assert refresh_forces.count(True) == 1
+    assert await app_instance.state.proxy_service.drain_persistence_tasks(5.0)
+    rows = (await async_client.get("/api/request-logs")).json()["requests"]
+    assert rows
+    assert {row["processingNode"] for row in rows} == {"retry-fixture"}
+    assert any(row["status"] == "ok" for row in rows)
 
 
 @pytest.mark.asyncio
@@ -2707,6 +2729,86 @@ async def test_v1_responses_non_streaming_failed_returns_error(async_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path,stream", [("/backend-api/codex/responses", True), ("/v1/responses", False)])
+@pytest.mark.parametrize(
+    "node,expected", [("oci-a", "oci-a"), (None, None), ("10.0.0.1", None), ("host.internal", None)]
+)
+async def test_request_processing_node_persists_execution_identity(
+    async_client, app_instance, monkeypatch, path, stream, node, expected
+):
+    settings = Settings(http_responses_session_bridge_enabled=False)
+    if node is not None:
+        settings.http_responses_session_bridge_instance_id = node
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "get_environment_settings", lambda: settings)
+    auth_json = _make_auth_json("acc_node_fixture", "node-fixture@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert imported.status_code == 200
+
+    async def fake_stream(*args, **kwargs):
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_node_fixture",'
+            '"object":"response","status":"completed","output":[],"usage":'
+            '{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post(
+        path,
+        json={"model": "gpt-5.1", "input": "synthetic node fixture", "stream": stream},
+        headers={
+            "x-processing-node": "spoofed-ingress",
+            "x-codex-processing-node": "spoofed-owner",
+            "x-codex-bridge-origin-instance": "spoofed-origin",
+        },
+    )
+    assert response.status_code == 200
+    assert "resp_node_fixture" in response.text
+    assert await app_instance.state.proxy_service.drain_persistence_tasks(5.0)
+    logs = await async_client.get("/api/request-logs")
+    assert logs.status_code == 200
+    rows = logs.json()["requests"]
+    assert len(rows) == 1
+    assert rows[0]["processingNode"] == expected
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["inputTokens"] == 3
+    assert rows[0]["outputTokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_request_processing_node_upstream_error_is_local(async_client, app_instance, monkeypatch):
+    monkeypatch.setattr(
+        proxy_module,
+        "get_environment_settings",
+        lambda: Settings(http_responses_session_bridge_instance_id="error-fixture"),
+    )
+    auth_json = _make_auth_json("acc_error_fixture", "error-fixture@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert imported.status_code == 200
+
+    async def failed_upstream(*args, **kwargs):
+        raise proxy_module.ProxyResponseError(
+            400, {"error": {"code": "invalid_prompt", "type": "invalid_request_error", "message": "Synthetic error"}}
+        )
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", failed_upstream)
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.1", "input": "Synthetic error fixture"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_prompt"
+    assert await app_instance.state.proxy_service.drain_persistence_tasks(5.0)
+    rows = (await async_client.get("/api/request-logs")).json()["requests"]
+    assert len(rows) == 1
+    assert rows[0]["processingNode"] == "error-fixture"
+    assert rows[0]["errorCode"] == "invalid_prompt"
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
     email = "streamer@example.com"
     raw_account_id = "acc_live"
@@ -2763,6 +2865,11 @@ async def test_backend_responses_terminal_disconnect_finalizes_settlement_and_su
     app_instance,
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        proxy_module,
+        "get_environment_settings",
+        lambda: Settings(http_responses_session_bridge_instance_id="disconnect-fixture"),
+    )
     email = "terminal-disconnect@example.com"
     raw_account_id = "acc_terminal_disconnect"
     expected_account_id = generate_unique_account_id(raw_account_id, email)
@@ -2900,6 +3007,7 @@ async def test_backend_responses_terminal_disconnect_finalizes_settlement_and_su
         assert log.archive_request_id == request_id
         assert log.account_id == expected_account_id
         assert log.status == "success"
+        assert log.processing_node == "disconnect-fixture"
 
 
 @pytest.mark.asyncio

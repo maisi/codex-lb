@@ -15,6 +15,7 @@ from sqlalchemy.pool import NullPool
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardRateLimitError
 from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
+from app.db.migrate import run_upgrade
 from app.db.models import (
     HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2,
     HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
@@ -37,7 +38,6 @@ from app.db.models import (
     StickySessionKind,
     UsageHistory,
 )
-from app.db.oracle_baseline import apply_oracle_baseline
 from app.db.oracle_connection import create_oracle_async_engine, create_oracle_sync_engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository, UsageReservationItemData
@@ -72,7 +72,7 @@ async def oracle_runtime() -> AsyncIterator[AsyncEngine]:
             if inspect(connection).get_table_names():
                 pytest.fail("Oracle runtime tests require an empty owned schema; existing tables are preserved.")
             created = True
-            apply_oracle_baseline(connection)
+        run_upgrade(_ORACLE_URL, bootstrap_legacy=False)
 
     def remove_schema() -> None:
         with schema_engine.begin() as connection:

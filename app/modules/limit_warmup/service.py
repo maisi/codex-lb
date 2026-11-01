@@ -146,6 +146,7 @@ class LimitWarmupRequestLogRepository(Protocol):
         upstream_proxy_endpoint_id: str | None = None,
         upstream_proxy_fallback_used: bool | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
+        processing_node: str | None = None,
     ) -> object: ...
 
 
@@ -673,6 +674,7 @@ class LimitWarmupService:
             else None
         )
         await self._request_logs_repo.add_log(
+            processing_node=get_settings().processing_node,
             account_id=account.id,
             request_id=result.request_id,
             model=model,

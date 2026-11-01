@@ -287,6 +287,7 @@ class QuotaWarmupService:
                 if settlement_cancellation is not None:
                     raise settlement_cancellation
             await self._request_logs.add_log(
+                processing_node=get_settings().processing_node,
                 account_id=account_id,
                 api_key_id=api_key_id,
                 request_id=request_id,
@@ -343,6 +344,7 @@ class QuotaWarmupService:
                     cached_input_tokens=0,
                 )
             await self._request_logs.add_log(
+                processing_node=get_settings().processing_node,
                 account_id=account_id,
                 api_key_id=api_key_id,
                 request_id=request_id,

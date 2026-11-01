@@ -8871,6 +8871,7 @@ async def _log_source_chat_completion(
     try:
         async with get_background_session() as session:
             await RequestLogsRepository(session).add_log(
+                processing_node=get_settings().processing_node,
                 account_id=None,
                 model_source_id=source.id,
                 model_source_kind=source.kind,

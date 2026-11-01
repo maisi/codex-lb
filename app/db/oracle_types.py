@@ -127,6 +127,8 @@ def configure_oracle_string_storage(metadata: MetaData) -> None:
             byte_length = None if large_text else 4 * original.length + 1 if original.length else 1024
             if (table.name, column.name) == ("accounts", "email"):
                 byte_length = 1281  # 320 Unicode code points, as accepted by dashboard identity fields.
+            if (table.name, column.name) == ("request_logs", "processing_node"):
+                byte_length = 64  # Public execution labels are bounded ASCII, never inventory or free-form text.
             column.type = original.with_variant(
                 OracleStringStorage(byte_length=byte_length, large_text=large_text), "oracle"
             )

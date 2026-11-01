@@ -32,7 +32,11 @@ def _make_account(account_id: str, email: str) -> Account:
 
 
 @pytest.mark.asyncio
-async def test_request_logs_api_returns_recent(async_client, db_setup):
+async def test_request_logs_api_returns_recent(async_client, db_setup, monkeypatch):
+    from app.core.config.settings import get_settings
+
+    monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "reader-fixture")
+    get_settings.cache_clear()
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
@@ -59,6 +63,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
             error_code=None,
             requested_at=now - timedelta(minutes=1),
             transport="http",
+            processing_node="home-b",
         )
         await logs_repo.add_log(
             account_id="acc_logs",
@@ -92,6 +97,8 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert body["hasMore"] is False
 
     latest = payload[0]
+    assert latest["processingNode"] is None
+    assert payload[1]["processingNode"] == "home-b"
     assert latest["status"] == "rate_limit"
     assert latest["apiKeyId"] == "key_logs_1"
     assert latest["apiKeyName"] == "Debug Key"

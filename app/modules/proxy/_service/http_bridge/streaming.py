@@ -127,6 +127,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
+    _OwnerForwardRequestError,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_quarantine_clear_fence,
@@ -1196,7 +1197,8 @@ class _HTTPBridgeStreamingMixin:
                     # an error row for a turn that then succeeded would corrupt
                     # the very error rate this row exists to show.
                     bridge_error_code, bridge_error_message = _proxy_error_code_message(exc)
-                    if bridge_error_code in _HTTP_BRIDGE_CONTINUITY_OWNER_ERROR_CODES:
+                    owner_forward_failed = isinstance(exc, _OwnerForwardRequestError)
+                    if bridge_error_code in _HTTP_BRIDGE_CONTINUITY_OWNER_ERROR_CODES or owner_forward_failed:
                         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
                         await self._write_stream_preflight_error(
                             account_id=None,
@@ -1212,6 +1214,8 @@ class _HTTPBridgeStreamingMixin:
                             useragent_group=useragent_group,
                             conversation_id=conversation_id,
                             client_ip=client_ip,
+                            execution_local=not owner_forward_failed,
+                            bridge_stage="owner_forward" if owner_forward_failed else None,
                         )
                     raise
                 if transport_failure_code is not None:

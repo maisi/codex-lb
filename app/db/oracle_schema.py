@@ -13,7 +13,7 @@ from sqlalchemy.engine import Dialect
 from sqlalchemy.sql.elements import ColumnElement, UnaryExpression
 
 from app.db.models import Base
-from app.db.oracle_baseline import OracleSnapshot
+from app.db.oracle_baseline import OracleColumn, OracleSnapshot, load_oracle_baseline
 from app.db.oracle_types import OracleStringStorage
 
 
@@ -35,6 +35,17 @@ class OracleSchemaBlocker:
 class OracleSchemaReport:
     table_count: int
     blockers: tuple[OracleSchemaBlocker, ...]
+
+
+def oracle_head_contract() -> OracleSnapshot:
+    """Evolve read-only catalog expectations; migrations still own their frozen DDL."""
+    baseline = load_oracle_baseline()
+    node = OracleColumn(name="processing_node", type_sql="VARCHAR2(64 BYTE)", nullable=True)
+    tables = tuple(
+        table.model_copy(update={"columns": (*table.columns, node)}) if table.name == "request_logs" else table
+        for table in baseline.tables
+    )
+    return baseline.model_copy(update={"tables": tables})
 
 
 def inspect_oracle_schema(metadata: MetaData | None = None) -> OracleSchemaReport:

@@ -435,11 +435,16 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell> : null}
                   {isColumnVisible("account") ? <TableCell className="truncate align-top text-sm">
+                    <div>
                     {isEmailLabel && blurred ? (
                       <span className="privacy-blur">{accountLabel}</span>
                     ) : (
                       accountLabel
                     )}
+                    </div>
+                    <div className="truncate text-[11px] text-muted-foreground" title={t("dashboard.requestDetails.processingNode")}>
+                      {t("dashboard.requests.processingNode", { node: request.processingNode ?? t("dashboard.requests.unknownNode") })}
+                    </div>
                   </TableCell> : null}
                   {isColumnVisible("plan") ? <TableCell className="align-top">
                     {planType ? (
@@ -621,6 +626,7 @@ export function RecentRequestsTable({
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label={t("dashboard.requests.columns.transport")} value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
+                <RequestDetailField label={t("dashboard.requestDetails.processingNode")} value={selectedRequest?.processingNode ?? t("dashboard.requests.unknownNode")} mono />
                 <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt, dateDisplayFormat) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.errorCode")} value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
