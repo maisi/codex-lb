@@ -4,6 +4,7 @@ import base64
 import json
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from starlette.responses import JSONResponse
 
@@ -756,3 +757,132 @@ async def test_v1_chat_completions_stream_include_usage(async_client, monkeypatc
     assert chunks[-2]["usage"] is None
     assert chunks[-1]["choices"] == []
     assert chunks[-1]["usage"]["total_tokens"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"], ids=["high", "low"])
+@pytest.mark.parametrize("location", ["assistant", "tool_call_id", "toolCallId", "call_id"])
+async def test_chat_overlong_unencodable_call_id_returns_400(
+    async_client, app_instance, monkeypatch, stream, surrogate, location
+):
+    auth_json = _make_auth_json("acc_invalid_call_id", "invalid-call-id@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert imported.status_code == 200
+    malformed_id = "x" * 65 + surrogate
+    if location == "assistant":
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": malformed_id, "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+                ],
+            }
+        ]
+    else:
+        messages = [{"role": "tool", location: malformed_id, "content": "result"}]
+    upstream_calls = []
+
+    async def fake_stream(*args, **kwargs):
+        upstream_calls.append((args, kwargs))
+        yield 'data: {"type":"response.completed","response":{"id":"unexpected"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    # Escaping permits malformed Unicode to reach server-side request conversion.
+    # json= would fail inside httpx's UTF-8 encoder before reaching the HTTP route.
+    body = json.dumps({"model": "gpt-5.2", "messages": messages, "stream": stream}, ensure_ascii=True).encode("ascii")
+    # Surface the real HTTP 500 on RED instead of ASGITransport re-raising it.
+    transport = ASGITransport(app=app_instance, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url=async_client.base_url) as client:
+        response = await client.post("/v1/chat/completions", content=body, headers={"Content-Type": "application/json"})
+
+    assert not upstream_calls
+    assert response.status_code == 400, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "messages"
+    assert error["code"] == "invalid_request_error"
+    assert error["message"] == "Invalid request payload"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/chat/completions/"])
+async def test_chat_overlong_call_ids_reach_upstream_paired(async_client, monkeypatch, stream, path):
+    # Use the real route, request validation, conversion, proxy and chat assembly.
+    # Only the upstream Responses stream is stubbed; no provider is contacted.
+    auth_json = _make_auth_json("acc_call_id_boundary", "call-id-boundary@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert imported.status_code == 200
+    opaque_id = "call_" + "a" * 24 + "__thought__" + "s" * 126
+    assert len(opaque_id) == 166
+    source_ids = [opaque_id, opaque_id[:-1] + "t", opaque_id]
+    messages = [{"role": "user", "content": "Run the tool."}]
+    for call_id in source_ids:
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "Calling.",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"key":"value"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": call_id, "content": "result"},
+            ]
+        )
+    before = json.dumps(messages, sort_keys=True)
+    seen_payloads = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        # Serialize with the real upstream payload serializer, not a fake conversion.
+        forwarded = payload.to_payload()
+        seen_payloads.append(forwarded)
+        items = forwarded["input"]
+        assert items[2]["type"] == "function_call"
+        assert items[3]["type"] == "function_call_output"
+        calls = [item for item in items if item.get("type") == "function_call"]
+        outputs = [item for item in items if item.get("type") == "function_call_output"]
+        call_ids = [item["call_id"] for item in calls]
+        assert len(call_ids) == 3
+        assert call_ids == [item["call_id"] for item in outputs]
+        assert all(len(call_id) <= 64 and call_id.isascii() for call_id in call_ids)
+        assert call_ids[0] == call_ids[2]
+        assert call_ids[0] != call_ids[1]
+        assert all(item["arguments"] == '{"key":"value"}' for item in calls)
+        assert all(item["output"] == "result" for item in outputs)
+        yield 'data: {"type":"response.output_text.delta","delta":"normalized"}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_call_id_boundary"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post(path, json={"model": "gpt-5.2", "messages": messages, "stream": stream})
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    assert json.dumps(messages, sort_keys=True) == before
+    if stream:
+        assert response.headers["content-type"].startswith("text/event-stream")
+        lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+        assert lines[-1] == "data: [DONE]"
+        chunks = [json.loads(line[len("data: ") :]) for line in lines[:-1]]
+        assert all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
+        deltas = [choice["delta"] for chunk in chunks for choice in chunk["choices"]]
+        assert any(delta.get("role") == "assistant" for delta in deltas)
+        assert "".join(delta.get("content", "") for delta in deltas) == "normalized"
+        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+    else:
+        body = response.json()
+        assert body["object"] == "chat.completion"
+        assert body["choices"][0]["message"]["content"] == "normalized"
+        assert body["choices"][0]["finish_reason"] == "stop"
