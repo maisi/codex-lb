@@ -17,7 +17,8 @@ _UPSTREAM_BETA9_HEAD = "20260913_000000_add_oidc_provider_flow"
 _MERGE_HEAD = "20260922_000000_merge_upstream_beta9_and_fork"
 _UPSTREAM_POST_BETA9_HEAD = "20260918_000000_merge_scim_and_overflow_heads"
 _POST_BETA9_MERGE_HEAD = "20260929_000000_merge_upstream_post_beta9_and_fork"
-_HEAD = "20261023_000000_renumber_api_key_account_priority"
+_RENUMBER_HEAD = "20261023_000000_renumber_api_key_account_priority"
+_HEAD = "20261101_000000_add_request_processing_node"
 
 
 @pytest.mark.asyncio
@@ -249,4 +250,4 @@ def test_beta9_fork_migration_graph_converges_to_one_head(tmp_path: Path) -> Non
     assert post_beta9_merge.down_revision == (_MERGE_HEAD, _UPSTREAM_POST_BETA9_HEAD)
     head = script.get_revision(_HEAD)
     assert head is not None
-    assert head.down_revision == _POST_BETA9_MERGE_HEAD
+    assert head.down_revision == _RENUMBER_HEAD
