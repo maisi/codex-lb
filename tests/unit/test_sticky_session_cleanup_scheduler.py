@@ -531,7 +531,7 @@ async def test_full_cleanup_lease_loss_during_session_teardown_preserves_confirm
         "get_settings",
         lambda: SimpleNamespace(leader_election_enabled=True, leader_election_ttl_seconds=5),
     )
-    monkeypatch.setattr(leader_election_module, "get_background_session", leader_session)
+    monkeypatch.setattr(leader_election_module, "get_leader_session", leader_session)
     monkeypatch.setattr(cleanup_scheduler, "_get_leader_election", lambda: leader)
     monkeypatch.setattr(cleanup_scheduler, "get_background_session", SessionThatBlocksOnExit)
     monkeypatch.setattr(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True)
