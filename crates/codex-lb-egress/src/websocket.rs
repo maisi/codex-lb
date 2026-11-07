@@ -437,6 +437,7 @@ pub(crate) async fn emit_websocket_setup_error(
             status: None,
             headers: Vec::new(),
             body: None,
+            failure_kind: None,
         },
     )
     .await
@@ -543,9 +544,62 @@ pub(crate) async fn emit_websocket_error(
             status,
             headers,
             body,
+            failure_kind: websocket_failure_kind(failure).map(str::to_owned),
         },
     )
     .await
+}
+
+/// Map a failure onto a fixed vocabulary. Only static names leave the
+/// helper: tungstenite and io messages can echo peer data, headers or URLs.
+pub(crate) fn websocket_failure_kind(failure: &NativeWebSocketFailure) -> Option<&'static str> {
+    match failure {
+        NativeWebSocketFailure::Connect(error) | NativeWebSocketFailure::WebSocket(error) => {
+            Some(websocket_error_kind(error))
+        }
+        NativeWebSocketFailure::Timeout => Some("connect_timeout"),
+        NativeWebSocketFailure::LivenessTimeout => Some("pong_timeout"),
+        NativeWebSocketFailure::Output(_) => None,
+    }
+}
+
+fn websocket_error_kind(error: &WebSocketError) -> &'static str {
+    use tungstenite::error::{CapacityError, ProtocolError};
+
+    match error {
+        WebSocketError::ConnectionClosed => "connection_closed",
+        WebSocketError::AlreadyClosed => "already_closed",
+        WebSocketError::Io(error) => io_error_kind(error.kind()),
+        WebSocketError::Tls(_) => "tls",
+        WebSocketError::Capacity(CapacityError::MessageTooLong { .. }) => "message_too_long",
+        WebSocketError::Capacity(_) => "capacity",
+        WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+            "reset_without_closing_handshake"
+        }
+        WebSocketError::Protocol(_) => "protocol",
+        WebSocketError::WriteBufferFull(_) => "write_buffer_full",
+        WebSocketError::Utf8(_) => "utf8",
+        WebSocketError::AttackAttempt => "attack_attempt",
+        WebSocketError::Url(_) => "url",
+        WebSocketError::Http(_) => "http",
+        WebSocketError::HttpFormat(_) => "http_format",
+    }
+}
+
+fn io_error_kind(kind: std::io::ErrorKind) -> &'static str {
+    use std::io::ErrorKind;
+
+    match kind {
+        ErrorKind::ConnectionReset => "io_connection_reset",
+        ErrorKind::ConnectionAborted => "io_connection_aborted",
+        ErrorKind::ConnectionRefused => "io_connection_refused",
+        ErrorKind::BrokenPipe => "io_broken_pipe",
+        ErrorKind::UnexpectedEof => "io_unexpected_eof",
+        ErrorKind::TimedOut => "io_timed_out",
+        ErrorKind::NotConnected => "io_not_connected",
+        ErrorKind::InvalidData => "io_invalid_data",
+        _ => "io_other",
+    }
 }
 
 fn websocket_tls_verification_failure(failure: &NativeWebSocketFailure) -> bool {
@@ -558,5 +612,57 @@ fn websocket_tls_verification_failure(failure: &NativeWebSocketFailure) -> bool 
             error_chain_has_invalid_certificate(error)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tungstenite::error::{CapacityError, ProtocolError};
+
+    use super::*;
+
+    #[test]
+    fn failure_kind_names_reset_without_closing_handshake() {
+        let failure = NativeWebSocketFailure::WebSocket(WebSocketError::Protocol(
+            ProtocolError::ResetWithoutClosingHandshake,
+        ));
+
+        assert_eq!(
+            websocket_failure_kind(&failure),
+            Some("reset_without_closing_handshake")
+        );
+    }
+
+    #[test]
+    fn failure_kind_names_io_reset_without_its_message() {
+        let failure = NativeWebSocketFailure::WebSocket(WebSocketError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "peer 203.0.113.7 sent RST token=secret",
+        )));
+
+        assert_eq!(
+            websocket_failure_kind(&failure),
+            Some("io_connection_reset")
+        );
+    }
+
+    #[test]
+    fn failure_kind_names_oversized_messages_and_liveness() {
+        let oversized = NativeWebSocketFailure::WebSocket(WebSocketError::Capacity(
+            CapacityError::MessageTooLong {
+                size: 2,
+                max_size: 1,
+            },
+        ));
+
+        assert_eq!(websocket_failure_kind(&oversized), Some("message_too_long"));
+        assert_eq!(
+            websocket_failure_kind(&NativeWebSocketFailure::LivenessTimeout),
+            Some("pong_timeout")
+        );
+        assert_eq!(
+            websocket_failure_kind(&NativeWebSocketFailure::Output(std::io::Error::other("x"))),
+            None
+        );
     }
 }

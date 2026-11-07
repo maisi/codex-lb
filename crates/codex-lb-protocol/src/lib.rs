@@ -179,6 +179,10 @@ pub enum NativeEvent {
         status: Option<u16>,
         headers: Vec<(String, String)>,
         body: Option<String>,
+        /// Stable, credential-free failure class (for example
+        /// `reset_without_closing_handshake` or `io_connection_reset`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_kind: Option<String>,
     },
     Cancelled {
         request_id: String,

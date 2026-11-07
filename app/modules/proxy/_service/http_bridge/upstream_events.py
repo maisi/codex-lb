@@ -267,6 +267,46 @@ _HTTP_BRIDGE_DENIED_ANCHOR_CLEAR_RETRY_DELAYS = (
 # incident does not permanently drain an account.
 _HTTP_BRIDGE_ACCOUNT_TIMEOUT_WINDOW_SECONDS = 300.0
 _HTTP_BRIDGE_ACCOUNT_TIMEOUT_EJECTION_THRESHOLD = 3
+# A mid-stream drop that repeats for one bridge key is evidence about that
+# conversation's request, not about whichever account served it: the same
+# replayed context then fails on every account and replica. Charge the first
+# drop in the window as before and leave the rest account-neutral, so one
+# client retrying a broken conversation cannot cool down the whole pool.
+_HTTP_BRIDGE_SESSION_MIDSTREAM_FAILURE_WINDOW_SECONDS = 900.0
+_HTTP_BRIDGE_SESSION_MIDSTREAM_FAILURE_KEY_CAP = 4096
+_HTTP_BRIDGE_REPEATED_SESSION_MIDSTREAM_FAILURE_DETAIL = "repeated_session_midstream_failure"
+_HTTP_BRIDGE_READER_FAILURE_MESSAGE_MAX_LENGTH = 160
+
+
+def _http_bridge_session_midstream_failure_already_charged(service: Any, session: "_HTTPBridgeSession") -> bool:
+    """Return whether this key's mid-stream drop was charged within the window.
+
+    Synchronous on purpose: with no await between the read and the write, two
+    readers failing together cannot both observe an uncharged key. The window
+    is anchored at the charged failure, so a key that keeps failing is charged
+    at most once per window. State is per replica.
+    """
+
+    failures: dict[Any, float] | None = getattr(service, "_http_bridge_session_midstream_failures", None)
+    if failures is None:
+        failures = {}
+        service._http_bridge_session_midstream_failures = failures
+    now = clock_for(service).monotonic()
+    charged_at = failures.get(session.key)
+    if charged_at is not None and now - charged_at < _HTTP_BRIDGE_SESSION_MIDSTREAM_FAILURE_WINDOW_SECONDS:
+        return True
+    failures.pop(session.key, None)
+    if len(failures) >= _HTTP_BRIDGE_SESSION_MIDSTREAM_FAILURE_KEY_CAP:
+        for key in [
+            key
+            for key, timestamp in failures.items()
+            if now - timestamp >= _HTTP_BRIDGE_SESSION_MIDSTREAM_FAILURE_WINDOW_SECONDS
+        ]:
+            del failures[key]
+        while len(failures) >= _HTTP_BRIDGE_SESSION_MIDSTREAM_FAILURE_KEY_CAP:
+            del failures[next(iter(failures))]
+    failures[session.key] = now
+    return False
 
 
 async def _record_http_bridge_account_timeout_signal(
@@ -1803,7 +1843,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             model=session.request_model,
             pending_count=failed_pending_count,
             detail=error_code,
-            error_message=_truncate_identifier(error_message),
+            # Still bounded, but long enough to keep the trailing native
+            # failure kind that the default 96-character cut would drop.
+            error_message=_truncate_identifier(
+                error_message, max_length=_HTTP_BRIDGE_READER_FAILURE_MESSAGE_MAX_LENGTH
+            ),
             upstream_close_code=observed_close_code,
             response_events_seen=observed_response_events,
             transport_classification=transport_classification
@@ -1815,6 +1859,24 @@ class _HTTPBridgeUpstreamEventsMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        if (
+            penalize_account
+            and failed_pending_count > 0
+            and observed_response_events > 0
+            and _http_bridge_session_midstream_failure_already_charged(self, session)
+        ):
+            penalize_account = False
+            _log_http_bridge_event(
+                "account_penalty_skipped",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                pending_count=failed_pending_count,
+                detail=_HTTP_BRIDGE_REPEATED_SESSION_MIDSTREAM_FAILURE_DETAIL,
+                response_events_seen=observed_response_events,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
         # Draining-only requests no longer count against the queue, but their
         # event-batcher contexts still belong to the disconnected operation
         # and must be discarded just like ordinary pending requests.

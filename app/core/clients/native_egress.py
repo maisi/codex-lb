@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
     }
 )
 _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
+_FAILURE_KIND_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}")
 # Per-request bound between the helper reader (one task draining the helper's
 # stdout for every in-flight request) and each request's consumer. The bound
 # is a *byte budget* with a generous event cap: framed SSE deltas are tens of
@@ -148,9 +150,11 @@ class NativeEgressTransportError(NativeEgressError):
         status_code: int | None = None,
         headers: tuple[tuple[str, str], ...] = (),
         body: bytes | None = None,
+        failure_kind: str | None = None,
     ) -> None:
         super().__init__(message)
         self.failure_phase = failure_phase
+        self.failure_kind = failure_kind
         self.retryable_same_contract = retryable_same_contract
         self.is_tls_verification_failure = is_tls_verification_failure
         self.status_code = status_code
@@ -1276,7 +1280,17 @@ def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressTran
         status_code=status if isinstance(status, int) else None,
         headers=headers,
         body=body,
+        failure_kind=_failure_kind_from_event(event),
     )
+
+
+def _failure_kind_from_event(event: Mapping[str, object]) -> str | None:
+    # The helper emits a fixed vocabulary; anything else is dropped so the
+    # field can be logged verbatim without echoing peer-controlled text.
+    failure_kind = event.get("failure_kind")
+    if isinstance(failure_kind, str) and _FAILURE_KIND_PATTERN.fullmatch(failure_kind):
+        return failure_kind
+    return None
 
 
 async def _read_event(stdout: asyncio.StreamReader) -> dict[str, object]:

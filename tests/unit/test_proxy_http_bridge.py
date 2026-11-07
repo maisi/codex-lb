@@ -48443,3 +48443,63 @@ async def test_http_bridge_reader_stamps_the_upstream_terminal_when_it_parses_th
 
     assert observed == {"terminal_at": 112.0, "finalizer_entered_at": 122.0}
     assert request_state.upstream_terminal_at == 112.0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_repeated_mid_stream_drops_charge_one_account_per_session_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A conversation whose replay keeps failing mid-stream must not cool
+    down every account it is retried on: within the window only the first
+    drop for that bridge key is account-attributable."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    fail_pending = AsyncMock(return_value=True)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+
+    async def drop_after_events(key_value: str, *, response_events: int = 40) -> bool:
+        request_state = proxy_service._WebSocketRequestState(
+            request_id=f"req-{key_value}",
+            model="gpt-5.2",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            transport="http",
+        )
+        request_state.response_event_count = response_events
+        session = _make_bridge_session(
+            key_value=key_value,
+            pending_requests=deque([request_state]),
+            queued_request_count=1,
+        )
+        session.upstream = cast(
+            UpstreamWebSocket,
+            SimpleNamespace(
+                receive=AsyncMock(
+                    return_value=UpstreamWebSocketMessage(
+                        kind="error",
+                        error="Upstream websocket receive failed (reset_without_closing_handshake)",
+                    )
+                ),
+                close=AsyncMock(),
+            ),
+        )
+        await service._relay_http_bridge_upstream_messages(session)
+        assert fail_pending.await_args is not None
+        return bool(fail_pending.await_args.kwargs["penalize_account"])
+
+    assert await drop_after_events("bridge-poisoned-replay") is True
+    assert await drop_after_events("bridge-poisoned-replay") is False
+    assert await drop_after_events("bridge-poisoned-replay") is False
+    # Other conversations on the same accounts keep ordinary health evidence.
+    assert await drop_after_events("bridge-other-conversation") is True
+    # The window is anchored at the charged drop and then re-arms.
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_HTTP_BRIDGE_SESSION_MIDSTREAM_FAILURE_WINDOW_SECONDS",
+        0.0,
+    )
+    assert await drop_after_events("bridge-poisoned-replay") is True

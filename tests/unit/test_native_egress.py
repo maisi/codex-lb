@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import stat
 from pathlib import Path
@@ -1400,3 +1401,77 @@ async def test_interpreted_sse_rejects_invalid_metadata_without_replay(
         assert not client._streams
     finally:
         await client.aclose()
+
+
+def _websocket_reset_helper_source(failure_kind: str) -> str:
+    return (
+        """#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    command = json.loads(line)
+    request_id = command["request_id"]
+    if command["type"] == "websocket_connect":
+        print(json.dumps({
+            "type": "websocket_open", "request_id": request_id,
+            "status": 101, "headers": [],
+        }), flush=True)
+    elif command["type"] == "websocket_send_text":
+        print(json.dumps({
+            "type": "websocket_sent", "request_id": request_id,
+            "command_id": command["command_id"],
+        }), flush=True)
+        print(json.dumps({
+            "type": "websocket_error", "request_id": request_id,
+            "command_id": None,
+            "message": "native websocket protocol failed",
+            "failure_phase": "protocol", "retryable_same_contract": False,
+            "is_tls_verification_failure": False,
+            "status": None, "headers": [], "body": None,
+            "failure_kind": """
+        + json.dumps(failure_kind)
+        + """,
+        }), flush=True)
+"""
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_error"),
+    [
+        ("reset_without_closing_handshake", "Upstream websocket receive failed (reset_without_closing_handshake)"),
+        # Anything outside the helper vocabulary must not reach logs verbatim.
+        ("Reset by 203.0.113.7 token=secret", "Upstream websocket receive failed"),
+    ],
+)
+async def test_native_websocket_receive_failure_surfaces_failure_kind(
+    tmp_path: Path,
+    failure_kind: str,
+    expected_error: str,
+) -> None:
+    from app.core.clients.proxy_websocket import NativeUpstreamWebSocket
+
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _websocket_reset_helper_source(failure_kind))
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+        )
+    )
+    upstream = NativeUpstreamWebSocket(websocket)
+
+    await upstream.send_text("response.create")
+    message = await upstream.receive()
+
+    assert message.kind == "error"
+    assert message.error == expected_error
+    # The kind is diagnostic only; it must not turn into an account-neutral code.
+    assert message.error_code is None
+    await upstream.close()
+    await client.aclose()
