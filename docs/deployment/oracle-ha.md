@@ -85,7 +85,7 @@ curl --fail http://127.0.0.1:2455/internal/drain/status
 
 Readiness becomes 503. Wait until the gateway has removed that backend and `in_flight` reaches zero, then stop it through the service manager. Remove its old HAProxy server entry, validate and gracefully reload again. Drain is bounded by `CODEX_LB_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` (default **30 seconds**); work exceeding that budget can be interrupted. SIGTERM also starts the admission/drain barrier. Allow sufficient service-manager termination grace for drain and cleanup. Before process shutdown commits, `/internal/drain/stop` can cancel an operator drain; otherwise restart the process to restore service.
 
-Oracle defaults are four connections and zero overflow in each of two pools: **16 application sessions** for A+B, **24** with one replacement. Leave the remaining six of the 30-session budget for migration, administration and other users; the migration peak needs two connections. Explicit pool overrides change this calculation. Check it before rollout:
+Oracle defaults are four connections and zero overflow in each request/background pool, plus one fixed connection reserved for scheduler lease acquisition, renewal and release. This gives **18 application sessions** for A+B, **27** with one replacement. Leave the remaining three of the 30-session budget for migration, administration and other users; the migration peak needs two connections. Explicit pool overrides change this calculation. Check it before rollout:
 
 ```sh
 uv run --extra oracle codex-lb-db oracle-check --budget-only \

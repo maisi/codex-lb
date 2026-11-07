@@ -22,8 +22,8 @@ from app.core.scheduling.leader_election_handle import (
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
-from app.modules.accounts.auth_manager import AuthManager
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
@@ -176,7 +176,12 @@ class AuthGuardianScheduler:
             if not candidate_ids:
                 return
             semaphore = asyncio.Semaphore(max(1, self.concurrency))
-            await asyncio.gather(*(self._refresh_candidate(account_id, semaphore) for account_id in candidate_ids))
+            # Own every worker through cancellation/error cleanup. gather can
+            # propagate one worker's cancellation before siblings finish their
+            # shielded token persistence and claim release.
+            async with asyncio.TaskGroup() as workers:
+                for account_id in candidate_ids:
+                    workers.create_task(self._refresh_candidate(account_id, semaphore))
 
     async def _refresh_candidate(self, account_id: str, semaphore: asyncio.Semaphore) -> None:
         if self._in_backoff(account_id):
@@ -339,13 +344,16 @@ async def _count_live_bridge_ring_members() -> int:
 
 
 @asynccontextmanager
-async def _default_accounts_repo_factory() -> AsyncIterator[AccountsRepository]:
-    async with get_background_session() as session:
-        yield AccountsRepository(session)
+async def _default_accounts_repo_factory() -> AsyncIterator[BackgroundAccountsRepository]:
+    # Both the eligibility read and the owned singleflight must return their
+    # connections before claim polling, admission waits, and OAuth I/O. Keeping
+    # outer/inner read transactions open exhausts Oracle's four-slot pool with
+    # only three guardian workers, blocking the claim operations they need.
+    yield BackgroundAccountsRepository()
 
 
 def _default_auth_manager_factory(repo: _AccountsRepositoryLike) -> _AuthManagerLike:
-    return AuthManager(cast(AccountsRepository, repo), refresh_repo_factory=_default_accounts_repo_factory)
+    return AuthManager(cast(AccountsRepositoryPort, repo), refresh_repo_factory=_default_accounts_repo_factory)
 
 
 def _jitter_delay(max_seconds: float) -> float:

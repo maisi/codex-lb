@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 import pytest
@@ -13,6 +13,7 @@ from sqlalchemy import Column, Integer, MetaData, String, Table, event, inspect,
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.core.scheduling.leader_election as leader_module
+import app.db.session as db_session
 from app.core.config.settings import Settings
 from app.core.scheduling.leader_election import LeaderElection
 from app.db.oracle_connection import create_oracle_async_engine
@@ -45,7 +46,7 @@ async def oracle_leaders(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Async
         async with factory() as session:
             yield session
 
-    monkeypatch.setattr(leader_module, "get_background_session", sessions)
+    monkeypatch.setattr(leader_module, "get_leader_session", sessions)
     settings = Settings(leader_election_enabled=True, leader_election_ttl_seconds=5)
     monkeypatch.setattr(leader_module, "get_settings", lambda: settings)
     created = False
@@ -64,6 +65,30 @@ async def oracle_leaders(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Async
                     await connection.run_sync(table.drop)
         finally:
             await engine.dispose()
+
+
+async def test_oracle_lease_pool_isolated_from_background_exhaustion(
+    oracle_leaders: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leader_engine = create_oracle_async_engine(_ORACLE_URL, pool_size=1, max_overflow=0)
+    monkeypatch.setattr(
+        db_session, "_background_session_factory", async_sessionmaker(oracle_leaders, expire_on_commit=False)
+    )
+    monkeypatch.setattr(
+        db_session, "_leader_session_factory", async_sessionmaker(leader_engine, expire_on_commit=False)
+    )
+    monkeypatch.setattr(leader_module, "get_leader_session", db_session.get_leader_session)
+    try:
+        async with AsyncExitStack() as stack:
+            for _ in range(4):
+                connection = await stack.enter_async_context(oracle_leaders.connect())
+                assert await connection.scalar(text("SELECT 1 FROM DUAL")) == 1
+            leader = LeaderElection("isolated-oracle")
+            assert await asyncio.wait_for(leader.try_acquire(), timeout=5)
+            assert await asyncio.wait_for(leader.renew(), timeout=5)
+            assert await asyncio.wait_for(leader.release(), timeout=5)
+    finally:
+        await leader_engine.dispose()
 
 
 async def test_oracle_first_leader_race_has_one_winner(
@@ -85,7 +110,7 @@ async def test_oracle_first_leader_race_has_one_winner(
         async with factory() as session:
             yield session
 
-    monkeypatch.setattr(leader_module, "get_background_session", sessions)
+    monkeypatch.setattr(leader_module, "get_leader_session", sessions)
     first, second = LeaderElection("first"), LeaderElection("second")
     outcomes = await asyncio.gather(first.try_acquire(), second.try_acquire(), return_exceptions=True)
     results: list[bool] = []

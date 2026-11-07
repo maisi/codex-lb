@@ -840,6 +840,32 @@ async def test_get_background_session_falls_back_to_main_pool_when_not_initializ
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["sqlite", "postgresql"])
+async def test_non_oracle_leader_session_uses_existing_background_pool(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = (
+        f"sqlite+aiosqlite:///{tmp_path / 'leader.db'}"
+        if backend == "sqlite"
+        else "postgresql+asyncpg://user:pass@localhost/db"
+    )
+    monkeypatch.setattr(session_module, "_background_engine", None)
+    monkeypatch.setattr(session_module, "_background_session_factory", None)
+    monkeypatch.setattr(session_module, "_leader_engine", None)
+    monkeypatch.setattr(session_module, "_leader_session_factory", None)
+    session_module.init_background_db(url)
+    background = session_module._background_engine
+    assert background is not None
+    try:
+        assert session_module._leader_engine is None
+        assert session_module._leader_session_factory is None
+        async with session_module.get_leader_session() as session:
+            assert session.bind is background
+    finally:
+        await background.dispose()
+
+
+@pytest.mark.asyncio
 async def test_safe_close_outlives_caller_cancellation() -> None:
     started = asyncio.Event()
     release = asyncio.Event()

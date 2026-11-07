@@ -191,17 +191,20 @@ def node_app(directory: Path, upstream: str) -> FastAPI:
     @app.post("/__ha__/warm-pools")
     async def warm_pools(hold: str) -> dict[str, int]:
         # Hold all physical slots simultaneously, proving each process has
-        # both independent pools and no overflow, rather than multiplying a
+        # all three independent pools and no overflow, rather than multiplying a
         # configured number without opening real connections.
         background = db_session._background_engine
+        leader = db_session._leader_engine
         assert background is not None
+        assert leader is not None
         async with AsyncExitStack() as stack:
-            for engine in (db_session.engine, background):
-                for _ in range(4):
+            for engine, size in ((db_session.engine, 4), (background, 4), (leader, 1)):
+                for _ in range(size):
                     await stack.enter_async_context(engine.connect())
             counts = {
                 "request": cast(QueuePool, db_session.engine.pool).checkedout(),
                 "background": cast(QueuePool, background.pool).checkedout(),
+                "leader": cast(QueuePool, leader.pool).checkedout(),
             }
             assert hold in {"steady", "overlap"}
             append_event(

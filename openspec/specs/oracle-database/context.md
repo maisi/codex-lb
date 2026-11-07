@@ -29,7 +29,7 @@ The migration mutex holds a dedicated DBMS_LOCK session across DDL commits and r
 
 ## Pool budgets, UTC and bounded cleanup
 
-Oracle defaults to **four connections and zero overflow in each of two independent pools**, for eight application sessions per instance. Existing explicit pool settings remain authoritative, and a budget consuming all 30 Always Free sessions is rejected before connecting. Other backends retain their existing defaults. Reserve additional connections for the two-connection migration peak and administration.
+Oracle defaults to **four connections and zero overflow in each of the request and background pools**, plus **one fixed leader-coordination connection**, for nine application sessions per instance. Existing explicit pool settings remain authoritative for request/background capacity, and a budget consuming all 30 Always Free sessions is rejected before connecting. Other backends retain their existing pools and defaults. Reserve additional connections for the two-connection migration peak and administration.
 
 `oracle-check --budget-only` opens no database connection. For example:
 
@@ -38,7 +38,15 @@ uv run --extra oracle codex-lb-db oracle-check --budget-only \
   --pool-size 4 --max-overflow 0 --replicas 2 --extra-replicas 1
 ```
 
-The two-instance pilot budgets 16 normal sessions and 24 during update overlap, leaving six. This command is a capacity calculation, not a throughput measurement or availability guarantee; real-process acceptance separately exercises all application pool slots. Pool arguments affect the check only.
+The two-instance pilot budgets 18 normal sessions and 27 during update overlap, leaving three. The formula is `(2 * (pool_size + max_overflow) + 1) * (replicas + extra_replicas)`. This command is a capacity calculation, not a throughput measurement or availability guarantee; real-process acceptance separately exercises all application pool slots. Pool arguments affect the check only.
+
+### Guardian pool starvation
+
+`Settings._apply_oracle_pool_defaults` applies the 4/0 defaults to each unspecified field so two replicas and a replacement fit Always Free's shared 30-session ceiling. The fixed leader slot now isolates scheduler acquisition, renewal, and release from request/background checkout contention without a new operator setting. It cannot protect against database outages or a locked scheduler lease row.
+
+Auth Guardian starts after 0–300 seconds of jitter and repeats six hours plus jitter after each pass. That matches six-hour bursts and a roughly three-minute post-startup burst. Its three workers formerly held outer eligibility-read sessions while independently owned refresh sessions retained freshness-read transactions across peer-claim polls, admission waits, and OAuth I/O. Four held readers could exhaust the background pool while claim/routing operations and lease renewal waited for another connection. Three 30-second claim-release retries could extend the burst after the initial failure.
+
+The guardian now reuses the existing per-operation background accounts repository: rows are detached before read-session rollback, and every read/write returns its connection before slow work. For example, three paused OAuth exchanges leave zero guardian connections checked out in the four-slot background pool; unrelated maintenance queries can continue. A worker task group waits for all started rotations, persistence, and claim releases when cancellation or a sibling error occurs. Local bounded-pool regressions reproduce the old failures and verify the new lifecycle; they do not establish a fresh live-Oracle acceptance result.
 
 Every physical request/background and migration connection initializes UTC before application statements. This matters because the target inherited SESSIONTIMEZONE +02:00 while DBTIMEZONE was +00:00. Timestamp variants retain microseconds and normalize aware instants, including SELECT and RETURNING.
 

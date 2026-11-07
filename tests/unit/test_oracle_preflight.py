@@ -133,9 +133,11 @@ def test_cli_budget_two_replicas_and_update_reserve(monkeypatch, capsys) -> None
     _cli(monkeypatch, "--budget-only", "--replicas", "2", "--extra-replicas", "1", url="sqlite:///unused.db")
 
     output = capsys.readouterr().out
-    assert "steady_sessions=16" in output
-    assert "overlap_sessions=24" in output
-    assert "remaining_sessions=6" in output
+    assert "pool_count_per_replica=3" in output
+    assert "leader_pool_size=1 leader_max_overflow=0" in output
+    assert "steady_sessions=18" in output
+    assert "overlap_sessions=27" in output
+    assert "remaining_sessions=3" in output
     assert "oracle_connection=not_checked" in output
     assert "oracle_runtime_support=single_instance" in output
     assert "not a throughput or HA guarantee" in output
@@ -155,7 +157,7 @@ def test_cli_uses_configured_pool_defaults_and_refuses_oversized_budget(monkeypa
 
     output = capsys.readouterr().out
     assert "pool_size=25 max_overflow=15" in output
-    assert "steady_sessions=80" in output
+    assert "steady_sessions=81" in output
     assert "Deliberately lower pool size/overflow" in output
 
 
@@ -168,7 +170,8 @@ def test_cli_uses_configured_pool_defaults_and_refuses_oversized_budget(monkeypa
         ("--replicas", "0"),
         ("--extra-replicas", "-1"),
         ("--session-limit", "0"),
-        ("--session-limit", "8"),  # Exact capacity also leaves no reserve.
+        ("--session-limit", "9"),  # Exact capacity also leaves no reserve.
+        ("--pool-size", "7", "--replicas", "2"),  # Leader slots consume the last two sessions.
         ("--timeout-seconds", "0"),
         ("--timeout-seconds", "nan"),
         ("--timeout-seconds", "inf"),
@@ -294,7 +297,7 @@ def test_cli_budget_is_usable_in_an_independent_process() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "remaining_sessions=6" in result.stdout
+    assert "remaining_sessions=3" in result.stdout
 
 
 def test_real_worker_is_killed_and_reaped_on_deadline(monkeypatch, tmp_path: Path, capsys) -> None:

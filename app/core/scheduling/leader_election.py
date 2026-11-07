@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config.settings import get_settings
 from app.core.scheduling.oracle_leader_lease import acquire_oracle_leader_lease, renew_oracle_leader_lease
 from app.db.models import SchedulerLeader
-from app.db.session import get_background_session
+from app.db.session import get_leader_session
 from app.db.sqlite_lock_retry import is_sqlite_lock_error, sqlite_error_name
 
 logger = logging.getLogger(__name__)
@@ -243,7 +243,7 @@ class LeaderElection:
         ttl = settings.leader_election_ttl_seconds
         loop = asyncio.get_running_loop()
         try:
-            async with get_background_session() as session:
+            async with get_leader_session() as session:
                 if _dialect_name(session) == "oracle":
                     remaining = await acquire_oracle_leader_lease(session, leader_id=self._leader_id, ttl=ttl)
                 else:
@@ -340,7 +340,7 @@ class LeaderElection:
 
         ttl = settings.leader_election_ttl_seconds
         loop = asyncio.get_running_loop()
-        async with get_background_session() as session:
+        async with get_leader_session() as session:
             # Both dialects evaluate the unexpired-lease guard and the new expiry
             # on the database's own execution-time clock, so a renewal delayed
             # past the deadline (event-loop stall, row/write-lock wait) matches 0
@@ -442,7 +442,7 @@ class LeaderElection:
             )
             return False
         try:
-            async with get_background_session() as session:
+            async with get_leader_session() as session:
                 await session.execute(
                     delete(SchedulerLeader).where(
                         SchedulerLeader.id == 1,
@@ -938,7 +938,7 @@ class LeaderElection:
         settings = get_settings()
         ttl = settings.leader_election_ttl_seconds
         try:
-            async with get_background_session() as session:
+            async with get_leader_session() as session:
                 # Guard the renewal on the lease still being unexpired at the
                 # database's execution-time clock so a shutdown/drain renewal can
                 # never resurrect a row whose ``expires_at`` has already passed.

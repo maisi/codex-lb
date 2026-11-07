@@ -190,8 +190,8 @@ def test_oracle_check_cli_preserves_existing_rows(oracle_probe: tuple[Engine, Ta
 
     assert result.returncode == 0, result.stderr
     assert "unsupported" in result.stdout.lower() or "unverified" in result.stdout.lower()
-    assert "16" in result.stdout
-    assert "24" in result.stdout
+    assert "steady_sessions=18" in result.stdout
+    assert "overlap_sessions=27" in result.stdout
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(table)) == 1
         assert connection.scalar(select(table.c.token_hash)) == b"d" * 32

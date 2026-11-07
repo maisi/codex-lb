@@ -213,11 +213,11 @@ def _warm_pools(cluster: Cluster, nodes: tuple[Child, ...], hold: str) -> int:
             )
             held = [event for event in cluster.events("pool_slots_held") if event["hold"] == hold]
             assert {event["pid"] for event in held} == {node.process.pid for node in nodes}
-            assert all(event["request"] == 4 and event["background"] == 4 for event in held)
+            assert all(event["request"] == 4 and event["background"] == 4 and event["leader"] == 1 for event in held)
         finally:
             cluster.release(f"pools-{hold}")
         counts = [call.result(timeout=45) for call in calls]
-        assert all(value == {"request": 4, "background": 4} for value in counts)
+        assert all(value == {"request": 4, "background": 4, "leader": 1} for value in counts)
     # Holding every slot can fail readiness probes; let each process (and the
     # gateway's checks) recover before later steps route through it.
     for node in nodes:
@@ -346,7 +346,7 @@ def _exercise_failover(cluster: Cluster, engine: Engine) -> None:
         jobs = eventually("singleton executions", lambda: cluster.events("singleton_start"))
         assert {event["instance"] for event in jobs} == {"ha-a"}
         timings["steady_application_sessions"] = _warm_pools(cluster, (node_a, node_b), "steady")
-        assert timings["steady_application_sessions"] == 16
+        assert timings["steady_application_sessions"] == 18
 
         # A second HTTP connection reaching B must forward to A's existing
         # WebSocket and preserve both the durable account pin and response
@@ -485,7 +485,7 @@ def _exercise_failover(cluster: Cluster, engine: Engine) -> None:
         completed += 1
         replacement = cluster.start_node("ha-c")
         timings["overlap_application_sessions"] = _warm_pools(cluster, (restarted, node_b, replacement), "overlap")
-        assert timings["overlap_application_sessions"] == 24
+        assert timings["overlap_application_sessions"] == 27
 
         _choose(client, gateway, "ha-b")
         with client.stream(

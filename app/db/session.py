@@ -23,6 +23,7 @@ from app.core.config.settings import get_settings
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.backend_support import require_supported_database_backend
 from app.db.oracle_connection import create_oracle_async_engine
+from app.db.oracle_preflight import ORACLE_LEADER_POOL_SIZE
 from app.db.sqlite_utils import (
     IntegrityCheck,
     SqliteFileIdentity,
@@ -391,6 +392,8 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 
 _background_engine: AsyncEngine | None = None
 _background_session_factory: async_sessionmaker[AsyncSession] | None = None
+_leader_engine: AsyncEngine | None = None
+_leader_session_factory: async_sessionmaker[AsyncSession] | None = None
 _sqlite_writer_lock: anyio.Lock | None = None
 _sqlite_lifetime_lock: sqlite3.Connection | None = None
 _sqlite_lifetime_lock_path: Path | None = None
@@ -989,7 +992,7 @@ def init_background_db(url: str | None = None) -> None:
     Args:
         url: Database URL. If None, uses settings.database_url.
     """
-    global _background_engine, _background_session_factory
+    global _background_engine, _background_session_factory, _leader_engine, _leader_session_factory
     db_url = normalize_sqlite_url(url or _settings.database_url)
     require_supported_database_backend(db_url, operation="Background database initialization")
 
@@ -1010,6 +1013,10 @@ def init_background_db(url: str | None = None) -> None:
         _configure_sqlite_engine(_background_engine.sync_engine, enable_wal=not is_sqlite_memory)
     elif _is_oracle_url(db_url):
         _background_engine = _create_oracle_engine(db_url)
+        # Lease renewals cannot queue behind background jobs. Keep a single
+        # dedicated slot, included in OracleSessionBudget, without another knob.
+        _leader_engine = create_oracle_async_engine(db_url, pool_size=ORACLE_LEADER_POOL_SIZE, max_overflow=0)
+        _leader_session_factory = async_sessionmaker(_leader_engine, expire_on_commit=False, class_=AsyncSession)
     else:
         _background_engine = _create_postgres_async_engine(
             db_url,
@@ -1017,6 +1024,23 @@ def init_background_db(url: str | None = None) -> None:
         )
 
     _background_session_factory = async_sessionmaker(_background_engine, expire_on_commit=False, class_=AsyncSession)
+
+
+@asynccontextmanager
+async def get_leader_session() -> AsyncIterator[AsyncSession]:
+    """Reserve Oracle lease capacity; other backends keep their existing pool."""
+    if _leader_session_factory is None:
+        async with get_background_session() as session:
+            yield session
+        return
+    session = _leader_session_factory()
+    try:
+        yield session
+    except BaseException:
+        await _safe_rollback(session)
+        raise
+    finally:
+        await close_session(session)
 
 
 @asynccontextmanager
@@ -1312,6 +1336,8 @@ async def close_db() -> bool:
     await engine.dispose()
     if _background_engine is not None:
         await _background_engine.dispose()
+    if _leader_engine is not None:
+        await _leader_engine.dispose()
     await asyncio.sleep(0)
     await _drain_wedged_teardown_registry()
     return sqlite_teardown_drained

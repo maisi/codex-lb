@@ -80,7 +80,7 @@ def _install(
     async def _session_cm():
         yield session
 
-    monkeypatch.setattr(leader_election_module, "get_background_session", _session_cm)
+    monkeypatch.setattr(leader_election_module, "get_leader_session", _session_cm)
 
 
 @pytest.mark.asyncio
@@ -507,7 +507,7 @@ async def test_dialect_selection_ignores_database_url_text(monkeypatch: pytest.M
     async def _session_cm():
         yield session
 
-    monkeypatch.setattr(leader_election_module, "get_background_session", _session_cm)
+    monkeypatch.setattr(leader_election_module, "get_leader_session", _session_cm)
 
     election = leader_election_module.LeaderElection(leader_id="node-a")
 

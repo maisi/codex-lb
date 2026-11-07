@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 _CHECK_SQL = "SELECT 1 FROM DUAL"
 _MAX_TIMEOUT_SECONDS = 300.0
+# Fixed capacity reserved for scheduler leases, independent of background jobs.
+ORACLE_LEADER_POOL_SIZE = 1
 _URL_OPTIONS = frozenset(
     {"service_name", "protocol", "config_dir", "wallet_location", "wallet_password", "ssl_server_cert_dn"}
 )
@@ -47,8 +49,8 @@ class OracleSessionBudget:
 
     @property
     def sessions_per_replica(self) -> int:
-        # Request and background engines have independent pools.
-        return 2 * (self.pool_size + self.max_overflow)
+        # Request/background pools plus the fixed, isolated leader pool.
+        return 2 * (self.pool_size + self.max_overflow) + ORACLE_LEADER_POOL_SIZE
 
     @property
     def steady_sessions(self) -> int:
@@ -66,7 +68,8 @@ class OracleSessionBudget:
         if self.remaining_sessions <= 0:
             raise OraclePreflightError(
                 "Connection budget leaves no operational reserve: "
-                f"2 pools * ({self.pool_size} pool_size + {self.max_overflow} max_overflow) * "
+                f"(2 pools * ({self.pool_size} pool_size + {self.max_overflow} max_overflow) "
+                f"+ {ORACLE_LEADER_POOL_SIZE} leader connection) * "
                 f"({self.replicas} replicas + {self.extra_replicas} extra_replicas) = "
                 f"{self.overlap_sessions} sessions, session_limit={self.session_limit}. "
                 "Deliberately lower pool size/overflow or replica overlap; the existing application defaults "
@@ -115,7 +118,8 @@ def run_oracle_preflight(
 ) -> None:
     _validate_timeout(timeout_seconds)
     print("oracle_runtime_support=single_instance; this check verifies connectivity only; HA remains unverified")
-    print(f"pool_count_per_replica=2 pool_size={budget.pool_size} max_overflow={budget.max_overflow}")
+    print(f"pool_count_per_replica=3 pool_size={budget.pool_size} max_overflow={budget.max_overflow}")
+    print(f"leader_pool_size={ORACLE_LEADER_POOL_SIZE} leader_max_overflow=0")
     print(f"replicas={budget.replicas} extra_replicas={budget.extra_replicas} session_limit={budget.session_limit}")
     print(f"steady_sessions={budget.steady_sessions}")
     print(f"overlap_sessions={budget.overlap_sessions}")

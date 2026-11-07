@@ -116,7 +116,7 @@ async def connect_oracle_async(database_url: str) -> oracledb.AsyncConnection:
 
 
 def create_oracle_async_engine(database_url: str, *, pool_size: int, max_overflow: int) -> AsyncEngine:
-    """Create either runtime pool within the shared Always Free session budget."""
+    """Create a runtime pool within the shared Always Free session budget."""
     url = _oracle_url(database_url)
     OracleSessionBudget(pool_size=pool_size, max_overflow=max_overflow).require_capacity()
 

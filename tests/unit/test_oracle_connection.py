@@ -67,7 +67,7 @@ def test_oversized_oracle_pool_fails_before_opening_a_connection() -> None:
         )
 
 
-def test_request_and_background_paths_use_native_oracle_pools(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_request_background_and_leader_paths_use_native_oracle_pools(monkeypatch: pytest.MonkeyPatch) -> None:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     import app.db.session as sessions
@@ -84,7 +84,12 @@ def test_request_and_background_paths_use_native_oracle_pools(monkeypatch: pytes
     monkeypatch.setattr(sessions, "create_oracle_async_engine", create)
     monkeypatch.setattr(sessions, "_background_engine", None)
     monkeypatch.setattr(sessions, "_background_session_factory", None)
+    monkeypatch.setattr(sessions, "_leader_engine", None)
+    monkeypatch.setattr(sessions, "_leader_session_factory", None)
     assert sessions._create_main_engine(url) is engine
     sessions.init_background_db(url)
     assert sessions._background_engine is engine
-    assert created == [(url, sessions._settings.database_pool_size, sessions._settings.database_max_overflow)] * 2
+    assert sessions._leader_engine is engine
+    assert created == [(url, sessions._settings.database_pool_size, sessions._settings.database_max_overflow)] * 2 + [
+        (url, 1, 0)
+    ]

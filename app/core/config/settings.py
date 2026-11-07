@@ -311,7 +311,8 @@ class Settings(BaseSettings):
     # server slots on PostgreSQL's default max_connections=100 for reserved
     # connections, the migration path's two-connection peak, and operations.
     # Oracle defaults each unspecified field to 4 + 0 per pool;
-    # its Always Free tier has a shared 30-session ceiling.
+    # a separate fixed leader connection makes 9 sessions per replica, within
+    # its Always Free tier's shared 30-session ceiling (27 at three replicas).
     database_pool_size: int = Field(default=25, gt=0)
     database_max_overflow: int = Field(default=15, ge=0)
     database_migrate_on_startup: bool = True

@@ -24,6 +24,20 @@ account locally; it does not globally de-route it or move owner-bound continuity
 to another account. At known expiry, selection and bridge reuse reject the
 account before upstream I/O.
 
+## Guardian connection ownership
+
+The guardian uses the existing per-operation background accounts repository for
+selection, eligibility reads, and its owned token-refresh singleflight. Loaded
+rows are detached before read-session rollback so they remain usable while the
+connection returns to the pool. Peer-claim polls, refresh-admission waits, and
+OAuth calls therefore run without retaining account-read transactions. A worker
+task group drains every started rotation and claim release when a pass is
+cancelled or a sibling fails. For example, three slow exchanges leave no guardian
+connections checked out from a four-slot pool, allowing maintenance to continue.
+The [Oracle incident context](../oracle-database/context.md#guardian-pool-starvation)
+records the cadence, capacity constraints, and separate lease pool. The
+[requirements](spec.md) define the lifecycle contract.
+
 ## Upstream Usage Source
 
 codex-lb refreshes account usage by calling:

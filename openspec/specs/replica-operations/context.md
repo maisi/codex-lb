@@ -46,8 +46,8 @@ is not bypassed. Multi-process SQLite is still unsupported because concurrent wr
 PostgreSQL or the Oracle pilot.
 
 Oracle's pilot uses one worker per instance and preserves explicit process-failover/client-retry
-boundaries. The [Oracle operations context](oracle-ha.md) explains the shared secrets, sixteen/
-twenty-four-session pool budget, lease/retry behavior and feasibility of later stream continuation.
+boundaries. The [Oracle operations context](oracle-ha.md) explains the shared secrets, eighteen/
+twenty-seven-session pool budget, lease/retry behavior and feasibility of later stream continuation.
 
 ## Why the encryption-key fingerprint sentinel
 
