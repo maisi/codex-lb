@@ -162,3 +162,27 @@ parallel amd64 and arm64 builds unpacked the same crates at once whenever
 `Cargo.lock` changed. Run 40666285762 failed on
 `failed to unpack package headers v0.4.1 … File exists`. Both builds also
 linked into the same `target/release` binary.
+
+## Runtime zlib security updates
+
+The [runtime package requirement](spec.md#requirement-runtime-images-apply-zlib-security-updates)
+covers the zlib1g findings from CI run 42381574349 (2026-11-07). Trivy reported
+CVE-2026-76844 and CVE-2026-85091 against the Debian 13 base package even though
+the image built successfully.
+
+`Dockerfile` refreshes zlib1g in the final runtime's existing apt transaction,
+using the base image's configured Debian archives, including security updates.
+Refreshing only a build stage would leave the final stage's package untouched.
+The installed-version check uses Debian's comparator and a lower bound so
+newer security revisions remain usable. For example, the reported
+`1:1.3.dfsg+really1.3.1-1+b1` fails the check, while
+`1:1.3.dfsg+really1.3.1-1+deb13u1` and `-1+deb13u2` pass. A stale archive or
+missing package stops the build rather than silently producing a vulnerable
+runtime; apt lists are still removed in the same layer.
+
+CI and release Trivy scans both build `Dockerfile`; rolling main images use
+it too. The HIGH/CRITICAL gate and CVE handling are unchanged.
+`Dockerfile.distroless` is not currently built or scanned by those workflows.
+Its Debian 12 zlib1g is refreshed in `python-build` before shared-library
+staging and copying. Debian 12 keeps its own package line; the Debian 13
+version floor does not establish a fixed Debian 12 revision.

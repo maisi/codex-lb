@@ -53,13 +53,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Base tags can lag Debian security updates (CVE-2026-76844, CVE-2026-85091).
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
         bsdutils gzip libblkid1 libc-bin libc6 libcap2 libmount1 libpcre2-8-0 \
         libsmartcols1 libsqlite3-0 libssl3t64 \
-        libsystemd0 libudev1 libuuid1 openssl perl-base sed util-linux \
+        libsystemd0 libudev1 libuuid1 openssl perl-base sed util-linux zlib1g \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssl-provider-legacy \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' zlib1g)" ge \
+        '1:1.3.dfsg+really1.3.1-1+deb13u1' \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip uninstall -y pip setuptools wheel || true \
