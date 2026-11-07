@@ -40,6 +40,7 @@ from app.core.clients.native_egress import (
     NativeWebSocketRequest,
     NativeWebSocketRoutingMetadata,
     discover_native_egress_client,
+    native_failure_detail,
 )
 from app.core.clients.proxy import (
     _CHATGPT_ACCOUNT_ID_HEADER,
@@ -472,12 +473,12 @@ def _native_websocket_transport_error(
     operation: str,
 ) -> UpstreamWebSocketTransportError:
     phase = exc.failure_phase if isinstance(exc, NativeEgressTransportError) else "protocol"
-    # The helper validates failure_kind against a fixed vocabulary, so it is
-    # safe to surface; it is the only record of *why* the socket died.
-    failure_kind = exc.failure_kind if isinstance(exc, NativeEgressTransportError) else None
+    # Both the helper's failure kind and the phase fallback are validated
+    # identifiers; they are the only record of *why* the socket died.
+    detail = native_failure_detail(exc)
     message = f"Upstream websocket {operation} failed"
-    if failure_kind:
-        message = f"{message} ({failure_kind})"
+    if detail:
+        message = f"{message} ({detail})"
     if phase == "liveness_timeout":
         return UpstreamWebSocketTransportError(
             message,

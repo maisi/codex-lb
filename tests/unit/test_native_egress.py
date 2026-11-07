@@ -1442,8 +1442,9 @@ for line in sys.stdin:
     ("failure_kind", "expected_error"),
     [
         ("reset_without_closing_handshake", "Upstream websocket receive failed (reset_without_closing_handshake)"),
-        # Anything outside the helper vocabulary must not reach logs verbatim.
-        ("Reset by 203.0.113.7 token=secret", "Upstream websocket receive failed"),
+        # Anything outside the helper vocabulary must not reach logs verbatim;
+        # the validated phase is reported instead.
+        ("Reset by 203.0.113.7 token=secret", "Upstream websocket receive failed (protocol)"),
     ],
 )
 async def test_native_websocket_receive_failure_surfaces_failure_kind(
@@ -1474,4 +1475,61 @@ async def test_native_websocket_receive_failure_surfaces_failure_kind(
     # The kind is diagnostic only; it must not turn into an account-neutral code.
     assert message.error_code is None
     await upstream.close()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_websocket_queue_overflow_is_named_consumer_backpressure(tmp_path: Path) -> None:
+    from app.core.clients.proxy_websocket import NativeUpstreamWebSocket
+
+    helper = tmp_path / "native-helper"
+    _write_helper(
+        helper,
+        """#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    command = json.loads(line)
+    request_id = command["request_id"]
+    if command["type"] == "websocket_connect":
+        print(json.dumps({
+            "type": "websocket_open", "request_id": request_id,
+            "status": 101, "headers": [],
+        }), flush=True)
+    elif command["type"] == "websocket_send_text":
+        print(json.dumps({
+            "type": "websocket_sent", "request_id": request_id,
+            "command_id": command["command_id"],
+        }), flush=True)
+        for index in range(200):
+            print(json.dumps({
+                "type": "websocket_text", "request_id": request_id,
+                "text": f"event {index}",
+            }), flush=True)
+""",
+    )
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+        )
+    )
+    upstream = NativeUpstreamWebSocket(websocket)
+
+    await upstream.send_text("response.create")
+    # Let the helper outrun a consumer that is not reading.
+    for _ in range(200):
+        if websocket._completed:
+            break
+        await asyncio.sleep(0.01)
+    message = await upstream.receive()
+    while message.kind == "text":
+        message = await upstream.receive()
+
+    assert message.kind == "error"
+    assert message.error == "Upstream websocket receive failed (consumer_backpressure)"
     await client.aclose()

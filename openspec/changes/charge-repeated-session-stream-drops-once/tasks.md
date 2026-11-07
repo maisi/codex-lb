@@ -4,6 +4,7 @@
 - [x] 1.2 Parse it defensively in the native egress client and append it to relay error messages
 - [x] 1.3 Keep the kind visible in the bridge `reader_failure` log line
 - [x] 1.4 Cover the mapping in Rust and the subprocess-to-relay path in Python
+- [x] 1.5 Fall back to the validated failure phase when no kind exists (local queue overflow, helper framing errors)
 
 ## 2. Account health
 

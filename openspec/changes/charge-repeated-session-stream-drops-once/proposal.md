@@ -23,7 +23,8 @@ logged as `Upstream websocket receive failed`.
 - The native helper adds a credential-free `failure_kind` from a fixed
   vocabulary to websocket error events. Python accepts only that shape and
   appends it to the relay error message, and the bridge `reader_failure` log
-  keeps it untruncated.
+  keeps it untruncated. Failures without a kind name their phase instead, so a
+  local queue overflow appears as `consumer_backpressure`.
 
 ## Capabilities
 

@@ -1284,6 +1284,24 @@ def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressTran
     )
 
 
+def native_failure_detail(exc: NativeEgressError) -> str | None:
+    """Name why a native operation failed, for logs only.
+
+    Prefer the helper's failure kind. Failures raised in this process (for
+    example ``consumer_backpressure``) have no kind, so fall back to their
+    phase; a framing violation of the helper protocol is ``native_protocol``.
+    """
+
+    if isinstance(exc, NativeEgressProtocolError):
+        return "native_protocol"
+    if not isinstance(exc, NativeEgressTransportError):
+        return None
+    for detail in (exc.failure_kind, exc.failure_phase):
+        if isinstance(detail, str) and _FAILURE_KIND_PATTERN.fullmatch(detail):
+            return detail
+    return None
+
+
 def _failure_kind_from_event(event: Mapping[str, object]) -> str | None:
     # The helper emits a fixed vocabulary; anything else is dropped so the
     # field can be logged verbatim without echoing peer-controlled text.
