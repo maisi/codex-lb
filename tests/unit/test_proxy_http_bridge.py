@@ -29080,6 +29080,14 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
     )
     monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    # Rejected plaintext replay must not depend on a preceding test having
+    # created the database schema for these alternative recovery paths.
+    monkeypatch.setattr(service._durable_bridge, "get_replayable_transcript", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "retire_continuity_owner_if_unavailable",
+        AsyncMock(return_value=False),
+    )
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
