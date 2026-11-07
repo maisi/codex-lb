@@ -6,6 +6,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -1478,13 +1479,8 @@ async def test_native_websocket_receive_failure_surfaces_failure_kind(
     await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_native_websocket_queue_overflow_is_named_consumer_backpressure(tmp_path: Path) -> None:
-    from app.core.clients.proxy_websocket import NativeUpstreamWebSocket
-
-    helper = tmp_path / "native-helper"
-    _write_helper(
-        helper,
+def _websocket_burst_helper_source(count: int) -> str:
+    return (
         """#!/usr/bin/env python3
 import json
 import sys
@@ -1502,13 +1498,26 @@ for line in sys.stdin:
             "type": "websocket_sent", "request_id": request_id,
             "command_id": command["command_id"],
         }), flush=True)
-        for index in range(200):
+        for index in range("""
+        + str(count)
+        + """):
             print(json.dumps({
                 "type": "websocket_text", "request_id": request_id,
                 "text": f"event {index}",
             }), flush=True)
-""",
+        print(json.dumps({
+            "type": "websocket_close", "request_id": request_id,
+            "code": 1000, "reason": "done",
+        }), flush=True)
+"""
     )
+
+
+async def _open_burst_websocket(tmp_path: Path, count: int) -> tuple[SubprocessNativeEgressClient, Any, Any]:
+    from app.core.clients.proxy_websocket import NativeUpstreamWebSocket
+
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _websocket_burst_helper_source(count))
     client = SubprocessNativeEgressClient(helper)
     websocket = await client.websocket(
         NativeWebSocketRequest(
@@ -1519,13 +1528,41 @@ for line in sys.stdin:
         )
     )
     upstream = NativeUpstreamWebSocket(websocket)
-
     await upstream.send_text("response.create")
-    # Let the helper outrun a consumer that is not reading.
-    for _ in range(200):
+    # Let the helper outrun a consumer that is not reading yet.
+    for _ in range(300):
         if websocket._completed:
             break
         await asyncio.sleep(0.01)
+    return client, websocket, upstream
+
+
+@pytest.mark.asyncio
+async def test_native_websocket_absorbs_a_reasoning_burst_while_the_consumer_is_late(tmp_path: Path) -> None:
+    # A Responses reasoning flush is hundreds of frames; the HTTP bridge
+    # previously lost the stream after 64 of them.
+    client, _websocket, upstream = await _open_burst_websocket(tmp_path, 500)
+
+    texts = []
+    message = await upstream.receive()
+    while message.kind == "text":
+        texts.append(message.text)
+        message = await upstream.receive()
+
+    assert texts == [f"event {index}" for index in range(500)]
+    assert message.kind == "close"
+    assert message.close_code == 1000
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_websocket_queue_overflow_is_named_consumer_backpressure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native_egress_module, "_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT", 64)
+    client, _websocket, upstream = await _open_burst_websocket(tmp_path, 200)
+
     message = await upstream.receive()
     while message.kind == "text":
         message = await upstream.receive()
