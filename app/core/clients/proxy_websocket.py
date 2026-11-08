@@ -207,9 +207,10 @@ class UpstreamWebSocketMessage:
 class UpstreamWebSocketTransportError(RuntimeError):
     """Credential-safe post-connect transport failure with stable classification."""
 
-    def __init__(self, message: str, *, error_code: str) -> None:
+    def __init__(self, message: str, *, error_code: str, pre_dispatch: bool = False) -> None:
         super().__init__(message)
         self.error_code = error_code
+        self.pre_dispatch = pre_dispatch
 
 
 def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> str:
@@ -488,6 +489,7 @@ def _native_websocket_transport_error(
     return UpstreamWebSocketTransportError(
         message,
         error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if account_neutral else "upstream_unavailable",
+        pre_dispatch=operation == "send" and isinstance(exc, NativeEgressTransportError) and exc.pre_dispatch,
     )
 
 

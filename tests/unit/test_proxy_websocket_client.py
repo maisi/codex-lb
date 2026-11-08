@@ -45,6 +45,7 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket,
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+from tests.native_websocket import failing_native_upstream
 from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 
 
@@ -310,6 +311,24 @@ async def test_direct_adapter_classifies_keepalive_timeout_after_close_ack() -> 
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pre_dispatch", [False, True])
+async def test_native_send_adapter_preserves_only_positive_pre_dispatch_evidence(pre_dispatch: bool) -> None:
+    upstream, send_command = await failing_native_upstream(pre_dispatch=pre_dispatch)
+    try:
+        with pytest.raises(UpstreamWebSocketTransportError) as exc_info:
+            await upstream.send_text("response.create")
+        assert exc_info.value.error_code == "upstream_unavailable"
+        assert exc_info.value.pre_dispatch is pre_dispatch
+        if pre_dispatch:
+            send_command.assert_not_awaited()
+        else:
+            send_command.assert_awaited_once()
+    finally:
+        with contextlib.suppress(NativeEgressTransportError):
+            await upstream.close()
 
 
 @pytest.mark.asyncio

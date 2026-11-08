@@ -89,6 +89,7 @@ _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
 # transport-failure lifecycle aborts the committed body, moving issue #2364's
 # empty 200 from the owner onto the origin.
 HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER = "x-codex-bridge-local-pre-dispatch-refusal"
+HTTP_BRIDGE_SEND_FAILURE_HEADER = "x-codex-bridge-send-failure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +237,11 @@ class HTTPBridgeOwnerClient:
                         raise ProxyResponseError(
                             response.status,
                             _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
-                            failure_phase="owner_forward_status",
+                            failure_phase=(
+                                "http_bridge_send"
+                                if _bool_header(response.headers.get(HTTP_BRIDGE_SEND_FAILURE_HEADER))
+                                else "owner_forward_status"
+                            ),
                             failure_detail="owner_forward_non_200",
                             upstream_status_code=response.status,
                             # Rebuilding the error from the owner's body alone

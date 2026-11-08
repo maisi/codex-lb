@@ -376,3 +376,27 @@ the governing requirements and the archived
 ## Request processing provenance
 
 The additive execution-node contract is documented in [proxy runtime observability context](../proxy-runtime-observability/context.md#request-processing-provenance) and [this capability's requirements](spec.md). Historical/unset/unsafe identity remains null. Default and Oracle lineages evolve independently without rewriting Oracle's frozen baseline. The existing request surfaces accept older backends and preserve Unknown rather than infer a node at read time.
+
+## Closed native HTTP bridge sends
+
+The [send-failure contract](spec.md#requirement-http-bridge-closed-socket-sends-preserve-dispatch-safety-and-terminal-errors)
+distinguishes a native adapter's local closed check from a command whose
+acknowledgement was lost. Only the local check proves this frame never left the
+process. For example, a continuation anchored at `resp_previous` can reconnect
+once on the same account and resend that anchor after a local rejection; a
+possibly dispatched command keeps its unknown delivery state and is not resent.
+
+The native HTTP response policy previously re-raised even a settled submit
+failure inside a committed stream. Handled-send provenance now preserves its
+retryable 502 before commitment, or an ordinary terminal failure afterward.
+The owner response carries that provenance privately to the origin; it is not
+exposed as a public response header. Prewarm failures receive the same shaping
+after their separate cleanup, before the visible request is dispatched.
+
+Reattach also checks resource-close ownership before starting and immediately
+before swapping connections. Old cleanup reads the session's mutable socket
+after awaiting alias, lease and reader cleanup, so installing a replacement
+under that owner could let the old cleanup close it. A failed handoff closes
+its unpublished replacement. No setting or migration is needed. Local closed
+checks remain account neutral, and unused half-open probes are returned;
+ambiguous attempts retain their existing probe and operation settlement rules.

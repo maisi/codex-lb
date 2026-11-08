@@ -38,6 +38,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.clock import REAL_SCHEDULER, Scheduler, clock_for, scheduler_for
 from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -3432,6 +3433,35 @@ def _http_bridge_owner_lookup_unavailable_error_envelope() -> OpenAIErrorEnvelop
         "HTTP bridge owner metadata unavailable; retry later.",
         error_type="server_error",
     )
+
+
+def _require_http_bridge_reconnectable_generation(session: _HTTPBridgeSession) -> None:
+    # Resource close owns the mutable upstream, aliases and leases until it
+    # finishes. A replacement must never be installed under that close owner.
+    if session.resource_close_task is not None:
+        raise ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", "HTTP responses session bridge is retiring"),
+        )
+
+
+def _begin_http_bridge_reconnect(
+    session: _HTTPBridgeSession,
+    inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]],
+    *,
+    restart_reader: bool,
+) -> tuple[UpstreamWebSocket, asyncio.Task[None] | None]:
+    """Claim connection handoff synchronously before the first reconnect await."""
+    _require_http_bridge_reconnectable_generation(session)
+    old_upstream = session.upstream
+    old_reader = session.upstream_reader if restart_reader else None
+    session.handoff_in_progress = True
+    handoff_future = inflight_sessions.get(session.key) or asyncio.get_running_loop().create_future()
+    inflight_sessions.setdefault(session.key, handoff_future)
+    setattr(handoff_future, "_http_bridge_handoff", True)
+    session.handoff_future = handoff_future
+    session.closed = True
+    return old_upstream, old_reader
 
 
 def _mark_http_bridge_reader_handoff_reconnect_failed(session: Any, old_reader: Any) -> None:

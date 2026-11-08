@@ -161,10 +161,13 @@ class NativeEgressTransportError(NativeEgressError):
         headers: tuple[tuple[str, str], ...] = (),
         body: bytes | None = None,
         failure_kind: str | None = None,
+        pre_dispatch: bool = False,
     ) -> None:
         super().__init__(message)
         self.failure_phase = failure_phase
         self.failure_kind = failure_kind
+        # Positive local evidence only; helper error events never set this.
+        self.pre_dispatch = pre_dispatch
         self.retryable_same_contract = retryable_same_contract
         self.is_tls_verification_failure = is_tls_verification_failure
         self.status_code = status_code
@@ -570,6 +573,7 @@ class NativeEgressWebSocket:
             raise NativeEgressTransportError(
                 "native websocket is closed",
                 failure_phase="websocket_send",
+                pre_dispatch=True,
             )
         self._command_sequence += 1
         command_id = f"{self._request_id}:{self._command_sequence}"

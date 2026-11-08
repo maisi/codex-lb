@@ -71,6 +71,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
     _alias_fallback_key,
+    _begin_http_bridge_reconnect,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
@@ -125,6 +126,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _refresh_reused_http_bridge_session_with_handoff,
     _register_http_bridge_turn_state_aliases_locked,
     _require_http_bridge_bound_account_not_excluded,
+    _require_http_bridge_reconnectable_generation,
     _reserve_http_bridge_unanchored_handoff,
     _settle_failed_http_bridge_creation,
     _turn_keys,
@@ -1992,15 +1994,9 @@ class _HTTPBridgeMixin(
             kind=session.key.affinity_kind, key=session.key.affinity_key
         )
         require_same_account = account_neutral_recovery or (require_same_account and not goal_restart)
-        old_upstream = session.upstream
-        old_reader = session.upstream_reader if restart_reader else None
-        session.handoff_in_progress = True
-        inflight_sessions = self._http_bridge_inflight_sessions
-        handoff_future = inflight_sessions.get(session.key) or asyncio.get_running_loop().create_future()
-        inflight_sessions.setdefault(session.key, handoff_future)
-        setattr(handoff_future, "_http_bridge_handoff", True)
-        session.handoff_future = handoff_future
-        session.closed = True
+        old_upstream, old_reader = _begin_http_bridge_reconnect(
+            session, self._http_bridge_inflight_sessions, restart_reader=restart_reader
+        )
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
                 try:
@@ -2043,6 +2039,7 @@ class _HTTPBridgeMixin(
             required_preferred_account_id = resolve_required_account_id(
                 ("requested reconnect owner", requested_preferred_account_id),
                 ("account-neutral recovery", session.account.id if account_neutral_recovery else None),
+                ("same-account reconnect", session.account.id if require_same_account else None),
             )
             close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
             hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
@@ -2412,6 +2409,7 @@ class _HTTPBridgeMixin(
                 if old_lease is not None:
                     await self._load_balancer.release_account_lease(old_lease)
                     session.account_lease = None
+            _require_http_bridge_reconnectable_generation(session)
             session.account_lease = selected_account_lease
             session.replace_connection(account, connect_headers, upstream, _token_expiry(account, self._encryptor))
             session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission

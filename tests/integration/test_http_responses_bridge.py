@@ -67,6 +67,7 @@ from app.modules.proxy.load_balancer import (
 )
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from tests.native_websocket import failing_native_upstream
 
 pytestmark = pytest.mark.integration
 _TEST_SYNC_TIMEOUT_SECONDS = 5.0
@@ -14758,6 +14759,110 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "prewarm"),
+    [
+        ("/v1/responses", False),
+        ("/backend-api/codex/responses", False),
+        ("/internal/bridge/responses", False),
+        ("/backend-api/codex/responses", True),
+        ("/internal/bridge/responses", True),
+    ],
+)
+@pytest.mark.parametrize("pre_dispatch", [False, True])
+@pytest.mark.parametrize("after_commit", [False, True])
+async def test_http_bridge_native_send_failure_returns_retryable_envelope(
+    async_client,
+    app_instance,
+    monkeypatch,
+    route,
+    prewarm,
+    pre_dispatch,
+    after_commit,
+):
+    from app.modules.proxy import api as proxy_api_module
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, codex_prewarm_enabled=prewarm)
+    owner_settings = proxy_module.get_settings()
+    monkeypatch.setattr(proxy_module, "get_environment_settings", lambda: owner_settings)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: owner_settings)
+    if after_commit:
+
+        async def skip_startup_probe(stream, **_kwargs):
+            return stream, None
+
+        monkeypatch.setattr(proxy_api_module, "_probe_stream_startup_error", skip_startup_probe)
+    account_id = await _import_account(async_client, "acc_native_send_error", "native-send-error@example.com")
+    account = await _get_account(account_id)
+    upstream, send_command = await failing_native_upstream(pre_dispatch=pre_dispatch)
+    # Let the send path observe the completed native socket before the reader
+    # consumes its queued close. No inference or native helper process runs.
+    never_receive = asyncio.Event()
+
+    async def receive():
+        await never_receive.wait()
+        raise AssertionError("reader should have been cancelled")
+
+    monkeypatch.setattr(upstream, "receive", receive)
+    _install_denied_anchor_bridge_fakes(monkeypatch, account=account, upstream=cast(Any, upstream))
+    connects = []
+
+    async def connect(*args, **kwargs):
+        connects.append((args, kwargs))
+        return upstream
+
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    headers = {
+        "session_id": "native-send-failure",
+        "thread-id": "native-send-thread",
+        "user-agent": "codex_exec/0.153.4",
+    }
+    payload = proxy_module.ResponsesRequest(model="gpt-5.1", instructions="Return OK.", input="hello", stream=True)
+    if route == "/internal/bridge/responses":
+        headers = build_owner_forward_headers(
+            headers=headers,
+            payload=payload,
+            context=HTTPBridgeForwardContext(
+                origin_instance="instance-b",
+                target_instance="instance-a",
+                codex_session_affinity=True,
+                downstream_turn_state=None,
+                original_request_unanchored=True,
+            ),
+        )
+    try:
+        response = await async_client.post(route, json=payload.model_dump_for_forwarding(), headers=headers)
+        if after_commit:
+            assert response.status_code == 200
+            events = [
+                json.loads(line[6:])
+                for line in response.text.splitlines()
+                if line.startswith("data: ") and line[6:] != "[DONE]"
+            ]
+            failed = [event for event in events if event.get("type") == "response.failed"]
+            assert len(failed) == 1
+            assert failed[0]["response"]["error"]["code"] == "upstream_unavailable"
+            assert "_codex_lb_synthetic_transport_failure" not in response.text
+        else:
+            assert response.status_code == 502, response.text
+            assert response.json()["error"]["code"] == "upstream_unavailable"
+            if route == "/internal/bridge/responses":
+                assert response.headers.get("x-codex-bridge-send-failure") == "1"
+        assert len(connects) == (2 if pre_dispatch and not prewarm else 1)
+        if pre_dispatch:
+            send_command.assert_not_awaited()
+        else:
+            # One response.create and the best-effort websocket_close command.
+            sent = [call.args[2]["type"] for call in send_command.await_args_list]
+            assert sent.count("websocket_send_text") == 1
+        service = get_proxy_service_for_app(app_instance)
+        assert all(not item.pending_requests for item in service._http_bridge_sessions.values())
+    finally:
+        await upstream.close()
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailable(
     async_client,
     app_instance,
@@ -17905,10 +18010,12 @@ async def test_forwarded_denied_anchor_refusal_marks_the_owner_error_as_a_local_
 
 
 @pytest.mark.asyncio
-async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_before_commit(
+@pytest.mark.parametrize("send_failure", [False, True])
+async def test_native_codex_owner_forward_handled_failure_returns_502_before_commit(
     async_client,
     app_instance,
     monkeypatch,
+    send_failure,
 ):
     """The origin half must deliver the owner's refusal, not abort its own body.
 
@@ -17920,7 +18027,10 @@ async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_befo
     lifecycle aborts the committed body, putting issue #2364's zero-byte 200 on
     the origin instead of the owner.
     """
-    from app.modules.proxy.http_bridge_forwarding import HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER
+    from app.modules.proxy.http_bridge_forwarding import (
+        HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER,
+        HTTP_BRIDGE_SEND_FAILURE_HEADER,
+    )
 
     _install_bridge_settings_with_limits(
         monkeypatch,
@@ -17979,19 +18089,22 @@ async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_befo
 
     # The owner answers exactly as the route above does: the fence's 502
     # envelope plus the marker that says the owner, not upstream, refused.
+    error_code = "upstream_unavailable" if send_failure else "stream_incomplete"
     owner_refusal_body = json.dumps(
         {
             "error": {
                 "message": "The previous response anchor was rejected upstream; retry the request.",
                 "type": "server_error",
-                "code": "stream_incomplete",
+                "code": error_code,
             }
         }
     )
 
     class FakeOwnerResponse:
         status = 502
-        headers = {HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"}
+        headers = {
+            (HTTP_BRIDGE_SEND_FAILURE_HEADER if send_failure else HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER): "1"
+        }
 
         async def __aenter__(self) -> "FakeOwnerResponse":
             return self
@@ -18044,10 +18157,11 @@ async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_befo
         service._ring_membership = original_ring
 
     assert response.status_code == 502, f"native client received {response.status_code} with body {response.text!r}"
-    assert response.json()["error"]["code"] == "stream_incomplete"
+    assert response.json()["error"]["code"] == error_code
     # The marker belongs to the internal forward contract; the external client
     # sees only the ordinary error envelope.
     assert HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER not in response.headers
+    assert HTTP_BRIDGE_SEND_FAILURE_HEADER not in response.headers
 
 
 # --- Reproduction for #1384 takeover (narrowed scope): accepted, output-free capacity failure ---

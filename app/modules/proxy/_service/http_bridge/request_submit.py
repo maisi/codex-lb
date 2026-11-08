@@ -230,7 +230,7 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
+from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay, resolve_required_account_id
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
@@ -437,6 +437,7 @@ async def _send_http_bridge_request_text_with_archive_id(
         on_send_started()
     token = set_request_id(request_state.archive_request_id)
     try:
+        previous_attempt = request_state.response_create_attempt
         request_state.response_create_attempt_count += 1
         attempt = _HTTPBridgeResponseCreateAttempt(ordinal=request_state.response_create_attempt_count)
         request_state.response_create_attempt = attempt
@@ -444,13 +445,18 @@ async def _send_http_bridge_request_text_with_archive_id(
         session.upstream_reader_wakeup.set()
         try:
             await session.upstream.send_text(text_data)
-        except BaseException:
+        except BaseException as exc:
             # A failed or cancelled send is settled by its caller. Disarm the
             # owner watchdog before lifecycle ownership is released so the
             # reader cannot race that cleanup and settle the request twice.
             attempt.disarmed = True
             if request_state.response_create_attempt is attempt:
                 request_state.response_create_sent_at = None
+                if isinstance(exc, UpstreamWebSocketTransportError) and exc.pre_dispatch:
+                    # No frame left this process. Do not retain an upstream
+                    # attempt or consume a half-open probe for a local refusal.
+                    request_state.response_create_attempt_count -= 1
+                    request_state.response_create_attempt = previous_attempt
             session.upstream_reader_wakeup.set()
             raise
     finally:
@@ -1886,7 +1892,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 text_data=text_data,
             )
-        except BaseException:
+        except BaseException as exc:
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
             cleanup_task = scheduler_for(self).create_task(
@@ -1900,6 +1906,16 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             )
             await _await_task_deferring_cancellation(cleanup_task)
+            if isinstance(exc, UpstreamWebSocketTransportError):
+                # Prewarm precedes the ordinary send handler. Its warmup state
+                # has already been retired; preserve the same HTTP contract
+                # for the still-undispatched visible request.
+                raise ProxyResponseError(
+                    502,
+                    openai_error(exc.error_code, str(exc)),
+                    failure_phase="http_bridge_send",
+                    local_pre_dispatch_refusal=True,
+                ) from exc
             raise
         try:
             # Reuses the pre-prewarm snapshot: the registered admission waiter
@@ -2313,13 +2329,52 @@ class _HTTPBridgeRequestSubmitMixin:
                         upstream_send_started = True
 
                     try:
-                        await _send_http_bridge_request_text_with_archive_id(
-                            session,
-                            request_state,
-                            text_data,
-                            on_send_started=mark_upstream_send_started,
-                            clock=clock,
-                        )
+                        for send_index in range(2):
+                            try:
+                                await _send_http_bridge_request_text_with_archive_id(
+                                    session,
+                                    request_state,
+                                    text_data,
+                                    on_send_started=mark_upstream_send_started,
+                                    clock=clock,
+                                )
+                                break
+                            except UpstreamWebSocketTransportError as send_error:
+                                if send_error.pre_dispatch:
+                                    upstream_send_started = False
+                                if (
+                                    not send_error.pre_dispatch
+                                    or send_index > 0
+                                    or request_state.replay_count > 0
+                                    or request_state.response_event_count > 0
+                                    or request_state.response_id is not None
+                                ):
+                                    raise
+                                async with session.pending_lock:
+                                    if any(pending is not request_state for pending in session.pending_requests):
+                                        raise
+                                # Only explicit transport evidence permits
+                                # this retry. Keep the admitted operation and
+                                # anchor on their account; an ambiguous retry
+                                # send goes straight to send_failure below.
+                                request_state.replay_count += 1
+                                send_account_id = session.account.id
+                                try:
+                                    await self._reconnect_http_bridge_session(
+                                        session,
+                                        request_state=request_state,
+                                        restart_reader=True,
+                                        require_same_account=True,
+                                        require_preferred_account=request_state.file_required_preferred_account,
+                                    )
+                                    resolve_required_account_id(
+                                        ("bridge send", send_account_id),
+                                        ("replacement upstream", session.account.id),
+                                    )
+                                except ProxyResponseError as reconnect_error:
+                                    reconnect_error.failure_phase = "http_bridge_send"
+                                    reconnect_error.local_pre_dispatch_refusal = True
+                                    raise
                     except BaseException as exc:
                         request_state.recovery_attempt_dispatched = upstream_send_started
                         request_state.operation_dispatched = (
@@ -2425,7 +2480,9 @@ class _HTTPBridgeRequestSubmitMixin:
             # Liveness expiry and local network loss are transport failures,
             # not evidence against the selected account. Keep this in sync
             # with the reader path's shared provenance classification.
-            account_neutral = is_account_neutral_websocket_error_code(error_code)
+            account_neutral = is_account_neutral_websocket_error_code(error_code) or (
+                isinstance(exc, UpstreamWebSocketTransportError) and exc.pre_dispatch
+            )
             if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
                 # The sender claimed ownership beside the failing send while
                 # holding lifecycle_lock. It therefore owns the entire session
@@ -2520,6 +2577,8 @@ class _HTTPBridgeRequestSubmitMixin:
             raise ProxyResponseError(
                 502,
                 openai_error(error_code, failure_error_message),
+                failure_phase="http_bridge_send" if request_enqueued else None,
+                local_pre_dispatch_refusal=isinstance(exc, UpstreamWebSocketTransportError) and exc.pre_dispatch,
             ) from exc
 
     async def _maybe_prewarm_http_bridge_session(

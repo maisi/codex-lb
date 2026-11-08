@@ -286,6 +286,7 @@ from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingRespons
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER,
+    HTTP_BRIDGE_SEND_FAILURE_HEADER,
     parse_forwarded_request,
 )
 from app.modules.proxy.images_observability import (
@@ -6701,6 +6702,8 @@ async def _stream_responses(
             # error response instead of being replayed into the committed body
             # as a terminated stream (issue #2364).
             and not startup_error.local_pre_dispatch_refusal
+            # Submit has already settled this failure for an HTTP response.
+            and startup_error.failure_phase != "http_bridge_send"
         )
         if native_transport_startup_failure:
             assert isinstance(startup_error, ProxyResponseError)
@@ -6725,7 +6728,7 @@ async def _stream_responses(
                 startup_error,
                 headers={
                     **rate_limit_headers,
-                    **_owner_forward_local_refusal_headers(startup_error, forwarded_request=forwarded_request),
+                    **_owner_forward_error_provenance_headers(startup_error, forwarded_request=forwarded_request),
                 },
             )
     stream = _normalize_public_responses_stream(
@@ -6787,12 +6790,12 @@ def _strip_internal_bridge_headers(headers: Mapping[str, str]) -> dict[str, str]
     return {key: value for key, value in headers.items() if not key.lower().startswith("x-codex-bridge-")}
 
 
-def _owner_forward_local_refusal_headers(
+def _owner_forward_error_provenance_headers(
     error: ProxyResponseError | OpenAIErrorEnvelopeModel,
     *,
     forwarded_request: bool,
 ) -> dict[str, str]:
-    """Mark an owner instance's error response as a local pre-dispatch refusal.
+    """Keep handled send failures and pre-dispatch refusals across the owner hop.
 
     The origin instance rebuilds the error from the status and the body, and
     the body cannot express the difference between a refusal the owner raised
@@ -6805,9 +6808,12 @@ def _owner_forward_local_refusal_headers(
 
     if not forwarded_request or not isinstance(error, ProxyResponseError):
         return {}
-    if not error.local_pre_dispatch_refusal:
-        return {}
-    return {HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"}
+    headers: dict[str, str] = {}
+    if error.local_pre_dispatch_refusal:
+        headers[HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER] = "1"
+    if error.failure_phase == "http_bridge_send":
+        headers[HTTP_BRIDGE_SEND_FAILURE_HEADER] = "1"
+    return headers
 
 
 async def _http_bridge_active_for_request(
@@ -8328,10 +8334,12 @@ async def _stream_response_error_events(
         # not one: it keeps the terminal event so a native Codex client is not
         # left with a committed body that ends without one (issue #2364).
         local_refusal = exc.local_pre_dispatch_refusal
+        handled_send_failure = exc.failure_phase == "http_bridge_send"
         await release_owned_reservation()
         if (
             preserve_native_failure_lifecycle
             and not local_refusal
+            and not handled_send_failure
             and error_code
             in {
                 "stream_incomplete",
@@ -8367,12 +8375,17 @@ async def _stream_response_error_events(
             response_id=response_id,
             error_param=error.param_state if error else None,
         )
-        if not local_refusal and error_code in {
-            "stream_incomplete",
-            "stream_idle_timeout",
-            "upstream_request_timeout",
-            "upstream_unavailable",
-        }:
+        if (
+            not local_refusal
+            and not handled_send_failure
+            and error_code
+            in {
+                "stream_incomplete",
+                "stream_idle_timeout",
+                "upstream_request_timeout",
+                "upstream_unavailable",
+            }
+        ):
             # Marking a local refusal as a synthetic transport failure would
             # only move the abort one layer out: the native normalizer converts
             # a marked terminal straight back into a terminated stream.

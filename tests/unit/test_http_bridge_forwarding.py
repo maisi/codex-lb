@@ -28,6 +28,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_RESERVATION_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_MODEL_HEADER,
+    HTTP_BRIDGE_SEND_FAILURE_HEADER,
     HTTP_BRIDGE_SIGNATURE_HEADER,
     HTTP_BRIDGE_SIGNATURE_V2_HEADER,
     HTTP_BRIDGE_SIGNATURE_VERSION_HEADER,
@@ -1411,10 +1412,11 @@ async def test_owner_forward_non_200_body_read_failure_keeps_rejected(
 
 
 @pytest.mark.parametrize(
-    ("owner_headers", "expected_local_refusal"),
+    ("owner_headers", "expected_local_refusal", "expected_send_failure"),
     [
-        ({HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"}, True),
-        ({}, False),
+        ({HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"}, True, False),
+        ({HTTP_BRIDGE_SEND_FAILURE_HEADER: "1"}, False, True),
+        ({}, False, False),
     ],
 )
 @pytest.mark.asyncio
@@ -1422,6 +1424,7 @@ async def test_owner_forward_non_200_carries_local_refusal_provenance(
     monkeypatch: pytest.MonkeyPatch,
     owner_headers: dict[str, str],
     expected_local_refusal: bool,
+    expected_send_failure: bool,
 ) -> None:
     """The rebuilt error must keep what only the owner could know.
 
@@ -1487,6 +1490,7 @@ async def test_owner_forward_non_200_carries_local_refusal_provenance(
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
     assert exc_info.value.local_pre_dispatch_refusal is expected_local_refusal
+    assert exc_info.value.failure_phase == ("http_bridge_send" if expected_send_failure else "owner_forward_status")
 
 
 @pytest.mark.asyncio
