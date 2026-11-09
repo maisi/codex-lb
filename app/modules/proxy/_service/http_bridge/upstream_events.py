@@ -1521,9 +1521,9 @@ async def _invalidate_denied_http_bridge_anchor(
 ) -> bool:
     """Retire an anchor upstream has explicitly denied.
 
-    ``previous_response_not_found`` against an anchor the proxy injected is a
-    verdict, not a symptom: the id came from this proxy's own durable record,
-    no client asked for it, and upstream says it does not exist. The poison
+    A previous-response denial or missing-tool-output rejection against an
+    anchor the proxy injected invalidates its continuation: no client asked
+    for that anchor, and upstream cannot use the constructed delta. The poison
     counter cannot act on that verdict because it only scores reader failures
     (see ``_HTTP_BRIDGE_ANCHOR_POISON_DETAILS``), so the dead id survives at
     any threshold and is re-injected into the following turn, where the
@@ -2796,6 +2796,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             anonymous_event_prefers_draining = event_type not in {"response.failed", "response.incomplete", "error"}
+            allow_unanchored_continuity_error = is_previous_response_not_found_event or (
+                is_missing_tool_output_event
+                and len(session.pending_requests) == 1
+                and session.pending_requests[0].prompt_cache_continuation_success_recorded
+                and session.pending_requests[0].previous_response_id is None
+            )
             if event_type == "response.created":
                 matched_request_state = _assign_websocket_response_id(session.pending_requests, response_id)
                 created_request_state = matched_request_state
@@ -2813,7 +2819,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
-                    allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                    allow_unanchored_previous_response_error=allow_unanchored_continuity_error,
                     prefer_draining_requests=anonymous_event_prefers_draining,
                     event_type=event_type,
                 )
@@ -2932,7 +2938,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         or is_missing_tool_output_event,
                         previous_response_id_hint=previous_response_id_hint,
                         error_message=error_message,
-                        allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                        allow_unanchored_previous_response_error=allow_unanchored_continuity_error,
                         allow_precreated_terminal_fallback=True,
                         prefer_draining_requests=anonymous_event_prefers_draining,
                     )
@@ -2972,7 +2978,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             session.pending_requests,
                             previous_response_id_hint=previous_response_id_hint,
                             error_message=error_message,
-                            allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                            allow_unanchored_previous_response_error=allow_unanchored_continuity_error,
                         ),
                     )
                     if not grouped_previous_response_request_states and is_missing_tool_output_event:
@@ -3036,7 +3042,7 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
-            if is_previous_response_not_found_event:
+            if is_previous_response_not_found_event or is_missing_tool_output_event:
                 # This branch settles every request that shared the denied
                 # anchor and then returns, so the single-request retirement
                 # below is never reached for a fan-out denial.
@@ -3459,30 +3465,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             event_block = f"data: {rewritten_text}\n\n"
 
-        if (
-            status_request_state is not None
+        is_anchored_missing_tool_output_event = bool(
+            is_missing_tool_output_event
+            and status_request_state is not None
             and status_request_state.previous_response_id is not None
-            and is_missing_tool_output_event
-        ):
-            status_request_state.error_http_status_override = 502
-            event, payload, event_type, rewritten_text = _rewrite_websocket_continuity_corruption_event(
-                request_state=status_request_state,
-                upstream_control=session.upstream_control,
-                reason="missing_tool_output",
-                reconnect_requested=True,
-                original_text=text,
-            )
-            event_block = f"data: {rewritten_text}\n\n"
-
-        if (
-            status_request_state is not None
-            and is_previous_response_not_found_event
-            and status_request_state.prompt_cache_continuation_attempted
-            and status_request_state.proxy_injected_previous_response_id
-            and status_request_state.fresh_upstream_request_is_retry_safe
-            and status_request_state.fresh_upstream_request_text is not None
-            and not has_other_pending_requests
-        ):
+        )
+        if status_request_state is not None and (is_previous_response_not_found_event or is_missing_tool_output_event):
             # Retire while the exact denied id and its proxy/full-resend
             # provenance are still attached. Fresh-body installation clears
             # them, and a successful retry returns before the generic terminal
@@ -3492,6 +3480,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session,
                 request_states=(status_request_state,),
             )
+
+        if (
+            status_request_state is not None
+            and (is_previous_response_not_found_event or is_missing_tool_output_event)
+            and status_request_state.prompt_cache_continuation_attempted
+            and status_request_state.proxy_injected_previous_response_id
+            and status_request_state.fresh_upstream_request_is_retry_safe
+            and status_request_state.fresh_upstream_request_text is not None
+            and not has_other_pending_requests
+        ):
             if status_request_state.file_required_preferred_account:
                 # The full resend still names an account-scoped upload, so it
                 # cannot use the account-switch-only preparation path. Install
@@ -3513,7 +3511,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     status_request_state.response_id = None
                 _record_prompt_cache_continuation(
                     outcome="fallback",
-                    reason="invalid_or_expired_response",
+                    reason="missing_tool_output" if is_missing_tool_output_event else "invalid_or_expired_response",
                     request_id=status_request_state.request_log_id or status_request_state.request_id,
                 )
                 if await self._retry_http_bridge_precreated_request(session):
@@ -3522,6 +3520,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if status_request_state in session.pending_requests:
                         session.pending_requests.remove(status_request_state)
                         session.queued_request_count = max(0, session.queued_request_count - 1)
+
+        if status_request_state is not None and is_anchored_missing_tool_output_event:
+            # Recovery may have consumed the injected anchor before its send
+            # failed. Still deliver the original sanitized failure in that
+            # case, without treating a successful replay as corruption.
+            status_request_state.error_http_status_override = 502
+            event, payload, event_type, rewritten_text = _rewrite_websocket_continuity_corruption_event(
+                request_state=status_request_state,
+                upstream_control=session.upstream_control,
+                reason="missing_tool_output",
+                reconnect_requested=True,
+                original_text=text,
+            )
+            event_block = f"data: {rewritten_text}\n\n"
 
         if status_request_state is not None and is_previous_response_not_found_event:
             status_request_state.error_http_status_override = 502
@@ -3537,12 +3549,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                 original_text=text,
             )
             event_block = f"data: {rewritten_text}\n\n"
-            await _retire_denied_http_bridge_anchor(
-                self,
-                session,
-                request_states=(status_request_state,),
-            )
-
         retry_error_code = _websocket_precreated_retry_error_code(
             status_request_state,
             event_type=event_type,

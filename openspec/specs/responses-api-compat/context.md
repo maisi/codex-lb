@@ -400,3 +400,44 @@ under that owner could let the old cleanup close it. A failed handoff closes
 its unpublished replacement. No setting or migration is needed. Local closed
 checks remain account neutral, and unused half-open probes are returned;
 ambiguous attempts retain their existing probe and operation settlement rules.
+
+## Prompt-cache continuation tool boundaries
+
+The [continuation requirements](spec.md#requirement-prompt-cache-continuations-exclude-unproven-tool-boundaries)
+distinguish an exact request-input prefix from the output owned by the response
+anchor. The stored count and fingerprint cover the request input; an anchored
+response also contributes its generated tool calls. For example, input
+`[user(A)]` can produce response `R` with `function_call(C)`. A later full
+request `[user(A), user(B)]` matches the old prefix but cannot safely become
+`previous_response_id=R, input=[user(B)]`: it would inherit unanswered `C`.
+Likewise, a full transcript that includes `function_call(C)` after that prefix
+can replay output already owned by `R`.
+
+Interrupted-output injection cannot protect this late optimization: it runs
+before request preparation and requires an already attached anchor. The
+prompt-cache builder now skips injection when the completed response has
+pending calls or its proposed suffix includes function, custom, apply-patch,
+or tool-search protocol items. These requests keep their full client body;
+ordinary message suffixes remain eligible. The trade-off is lower cache
+efficiency for tool-bearing turns without fabricating results or guessing
+response-output boundaries.
+
+An upstream missing-tool-output rejection retires a proxy-built full-resend
+anchor through the existing durable owner and response-id fences. Eligible
+prompt-cache requests attempt their retained verified full body once, before
+the error is rewritten or a reconnect is requested. File-required accounts
+stay pinned; other bodies need the existing account-neutral replay proof.
+Unsafe or concurrent requests fail closed after retirement. Client-supplied
+anchors retain their fail-closed contract. A rejection of the sole pending
+unanchored resend is correlated to that request and terminates without another
+continuation fallback.
+
+The bounded continuation reasons `skipped/tool_boundary` and
+`fallback/missing_tool_output` distinguish preventive skips from recovery.
+Production logs from 2026-11-08/09 showed repeated `exact_prefix` success
+followed by missing-tool-output failure on the same anchor; they did not
+include raw inputs, so they cannot identify the precise tool shape of each
+incident. Bridge regression fixtures exercise completion-to-submit tool
+boundaries, successful and rejected full resends, next-request retirement,
+explicit anchors, concurrent requests, and file ownership. No configuration or
+migration is needed.

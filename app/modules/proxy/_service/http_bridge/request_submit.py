@@ -730,6 +730,11 @@ class _HTTPBridgeRequestSubmitMixin:
             skip_reason = "missing_response"
         elif session.last_completed_input_count <= 0 or session.last_completed_input_prefix_fingerprint is None:
             skip_reason = "missing_prefix"
+        elif session.last_pending_tool_calls:
+            # The input fingerprint excludes this response's output. Adding
+            # its anchor here also bypasses the earlier interrupted-output
+            # injection, which only runs for an already anchored payload.
+            skip_reason = "tool_boundary"
 
         if skip_reason is None:
             async with session.pending_lock:
@@ -755,6 +760,24 @@ class _HTTPBridgeRequestSubmitMixin:
                 _fingerprint_input_items(input_items[:stored_count]) != session.last_completed_input_prefix_fingerprint
             ):
                 skip_reason = "prefix_mismatch"
+            elif any(
+                isinstance(item, dict)
+                and item.get("type")
+                in (
+                    "function_call",
+                    "function_call_output",
+                    "custom_tool_call",
+                    "custom_tool_call_output",
+                    "apply_patch_call",
+                    "apply_patch_call_output",
+                    "tool_search_call",
+                    "tool_search_output",
+                )
+                for item in input_items[stored_count:]
+            ):
+                # These may replay output already owned by the anchor. An
+                # exact request-input prefix cannot prove that boundary.
+                skip_reason = "tool_boundary"
 
         if skip_reason is not None or payload is None or input_items is None:
             _record_prompt_cache_continuation(

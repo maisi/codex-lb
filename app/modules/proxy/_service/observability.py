@@ -43,6 +43,8 @@ _PROMPT_CACHE_CONTINUATION_REASONS = {
     "account_mismatch",
     "api_key_mismatch",
     "invalid_or_expired_response",
+    "missing_tool_output",
+    "tool_boundary",
 }
 
 
