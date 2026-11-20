@@ -132,6 +132,7 @@ from app.modules.reports.cache import ReportsCaches
 from app.modules.request_logs import api as request_logs_api
 from app.modules.role_mappings import api as role_mappings_api
 from app.modules.runtime import api as runtime_api
+from app.modules.runtime.oracle_maintenance import OracleQuotaWorker
 from app.modules.scim import api as scim_api
 from app.modules.scim import management_api as scim_tokens_api
 from app.modules.settings import api as settings_api
@@ -819,6 +820,7 @@ async def lifespan(app: FastAPI):
                 warn_threshold_seconds=settings.event_loop_lag_warn_threshold_seconds,
             )
         )
+    oracle_quota = OracleQuotaWorker() if settings.database_url.startswith("oracle+oracledb://") else None
     startup_module._startup_complete = True
 
     try:
@@ -943,6 +945,8 @@ async def lifespan(app: FastAPI):
         await rate_limit_reset_credits_scheduler.stop()
         await account_usage_rollup_scheduler.stop()
         await account_deletion_scheduler.stop()
+        if oracle_quota is not None:
+            await oracle_quota.stop()
         await data_retention_scheduler.stop()
         await telemetry_scheduler.stop()
         # Release the scheduler leader lease only after every leader-gated

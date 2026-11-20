@@ -65,6 +65,8 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("GET", "/api/conversations/"): PermissionRequirement(Permission.CONVERSATIONS_READ),
     ("GET", "/api/conversations/{conversation_id:path}"): PermissionRequirement(Permission.CONVERSATIONS_READ),
     ("GET", "/api/dashboard/overview"): PermissionRequirement(Permission.ACCOUNTS_READ),
+    ("GET", "/api/runtime/oracle-storage"): PermissionRequirement(Permission.DASHBOARD_READ),
+    ("POST", "/api/runtime/oracle-storage/maintenance"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/dashboard/projections"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/models"): PermissionRequirement(Permission.DASHBOARD_READ),
     ("GET", "/api/request-logs/{request_id}/routing"): PermissionRequirement(Permission.ACCOUNTS_WRITE),

@@ -102,6 +102,14 @@ docker run -d --name codex-lb-oracle \
 
 For Compose, keep the existing volume declaration and use the updated image/build and Oracle environment in the service. One-shot commands use `docker compose run --rm --no-deps --entrypoint python server -m app.db.migrate ...` after `docker compose stop server`; replace `server` and supply your normal `-f` arguments as needed. Do not run `docker compose down -v`, because that deletes the source volume. Keep the old container/volume until application acceptance; start only the Oracle instance after cutover.
 
+### Oracle quota maintenance
+
+The dashboard shows the free schema quota for the bridge tablespace when it falls below 3 GiB. Operators with operations write access can select **Run maintenance** while at least 2 GiB remains. The worker picks up requests within a minute under normal load. Below 2 GiB it starts maintenance automatically, even with the dashboard closed.
+
+Maintenance estimates reclaimable space in the bridge request and event segments and two event indexes. It considers segments with at least 128 MiB of estimated reclaimable space and uses online moves or index rebuilds where there is enough workspace. The dashboard reports when the remaining space is needed for live data or is too small for an online operation. Check the schema allocation in that case. While space remains critical, automatic retries are spaced one hour apart. Transcript retention and the schema quota are preserved.
+
+[Oracle database specification](https://github.com/maisi/codex-lb/tree/main/openspec/specs/oracle-database)
+
 ## Data paths
 
 | Environment | Path |
