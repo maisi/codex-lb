@@ -285,7 +285,9 @@ async def test_owner_wait_is_capped_by_original_request_deadline(async_client, r
     monkeypatch.setattr(streaming, "_iter_account_capacity_wait_sse", advance_wait)
     response, _ = await _post(async_client, "/v1/responses", [_user("second")], anchor=first_body["id"])
     assert response.status_code == 502, response.text
-    assert waits == [10.0]
+    # The virtual clock starts at the real monotonic value, so "deadline - now"
+    # carries float rounding that depends on the host's uptime.
+    assert waits == [pytest.approx(10.0, abs=1e-6)]
     assert len(owner_upstream.sent_text) == 1
     assert replacement.sent_text == []
 
