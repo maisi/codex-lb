@@ -67,6 +67,20 @@
       "groupSlug": null
     },
     {
+      "description": "Hold Python base-image minor/major bumps: binary wheels (psycopg-binary, oracledb) lag new CPython releases, so runtime upgrades stay a deliberate change",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "python"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Require human merging for every dependency",
       "matchPackageNames": [
         "*"
@@ -74,7 +88,7 @@
       "automerge": false
     },
     {
-      "description": "Keep already marked security updates immediate without reviving suppressed updates",
+      "description": "Keep already marked security updates immediate in one grouped PR, so merging one fix does not rebase and re-run CI on every sibling PR",
       "matchJsonata": [
         "isVulnerabilityAlert = true and $not(enabled = false) and $not($exists(skipReason))"
       ],
@@ -83,8 +97,8 @@
         "at any time"
       ],
       "prCreation": "immediate",
-      "groupName": null,
-      "groupSlug": null,
+      "groupName": "security updates",
+      "groupSlug": "security",
       "dependencyDashboardApproval": false,
       "minimumReleaseAge": null,
       "automerge": false,
@@ -113,8 +127,8 @@
       "at any time"
     ],
     "automerge": false,
-    "groupName": null,
-    "groupSlug": null,
+    "groupName": "security updates",
+    "groupSlug": "security",
     "prCreation": "immediate",
     "dependencyDashboardApproval": false,
     "minimumReleaseAge": null,
