@@ -1,7 +1,7 @@
-# syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.12.19 AS uv-bin
+# syntax=docker/dockerfile:1.29
+FROM ghcr.io/astral-sh/uv:0.13.10 AS uv-bin
 
-FROM rust:1.96.0-slim-bookworm AS native-egress-build
+FROM rust:1.100.0-slim-bookworm AS native-egress-build
 ARG TARGETARCH
 
 WORKDIR /src
@@ -16,7 +16,7 @@ RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/r
     cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress \
     && cp target/release/codex-lb-native-egress /tmp/codex-lb-native-egress
 
-FROM oven/bun:1.4.2-alpine AS frontend-build
+FROM oven/bun:1.4.5-alpine AS frontend-build
 
 WORKDIR /app/frontend
 
