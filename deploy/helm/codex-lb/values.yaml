@@ -46,7 +46,7 @@ test:
     # @param test.image.repository Helm test pod image repository
     repository: library/busybox
     # @param test.image.tag Helm test pod image tag
-    tag: "1.37"
+    tag: "1.38"
     # @param test.image.digest Helm test pod image digest (overrides tag when set)
     digest: ""
     # @param test.image.pullPolicy Helm test pod image pull policy
