@@ -19,6 +19,7 @@ import { useDialogState } from "@/hooks/use-dialog-state";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
+import { OracleStorageNotice } from "@/features/dashboard/components/oracle-storage-notice";
 import { AccountList } from "@/features/dashboard/components/account-list";
 import { AccountSummaryLine } from "@/features/dashboard/components/account-summary-line";
 import { AccountViewModeToggle } from "@/features/dashboard/components/account-view-mode-toggle";
@@ -432,6 +433,8 @@ export function DashboardPage() {
           </button>
         </div>
       </div>
+
+      <OracleStorageNotice />
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 

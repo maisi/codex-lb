@@ -918,6 +918,8 @@ export const handlers = [
     return HttpResponse.json({ status: "ok" });
   }),
 
+  http.get("/api/runtime/oracle-storage", () => HttpResponse.json(null)),
+
   http.get("/api/runtime/version", () => {
     return HttpResponse.json({
       currentVersion: "1.19.0",

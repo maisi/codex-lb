@@ -25,6 +25,7 @@ const EXPECTED_ENDPOINTS = [
 	"GET /health/ready",
 	// runtime
 	"GET /api/runtime/version",
+	"GET /api/runtime/oracle-storage",
 	// dashboard
 	"GET /api/dashboard/overview",
 	"GET /api/dashboard/projections",

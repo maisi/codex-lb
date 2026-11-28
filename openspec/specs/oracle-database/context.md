@@ -121,3 +121,9 @@ Related upstream context: [python-oracledb cancellation recovery](https://github
 ## Request processing provenance
 
 The additive execution-node contract is documented in [proxy runtime observability context](../proxy-runtime-observability/context.md#request-processing-provenance) and [this capability's requirements](spec.md). Historical/unset/unsafe identity remains null. Default and Oracle lineages evolve independently without rewriting Oracle's frozen baseline. The existing request surfaces accept older backends and preserve Unknown rather than infer a node at read time.
+
+## Bridge quota maintenance
+
+A busy period can leave expired SecureFiles extents allocated to the schema even after retention removes the transcript rows. At 2.5 GiB free an operator can queue online compaction from the dashboard. Below 2 GiB the worker checks every minute and retries a completed or failed attempt after an hour of sustained pressure. A nonblocking schema-specific DBMS_LOCK serializes automatic and manual work across replicas. The status record survives restarts.
+
+The worker considers the standard bridge LOBs and two event indexes, reserving workspace for the replacement segments and concurrent traffic. When the existing quota cannot accommodate an online copy, the operator sees the insufficient-space outcome. Online operations can briefly contend with writes. Previously missed usage records are outside the recovery scope.

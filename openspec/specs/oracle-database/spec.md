@@ -166,7 +166,6 @@ Oracle encryption-key fingerprint verification against a prepared test schema MU
 - **THEN** it logs the mismatch and preserves the sentinel
 - **AND** off mode skips database verification
 
-
 ### Requirement: Verified single-instance runtime can install and operate
 
 After real-database verification, Oracle application startup SHALL support one application instance using an isolated, explicitly selected application schema. Installation MUST use an immutable Alembic-owned Oracle baseline, MUST preserve unrelated schemas and data, and MUST reject incompatible or partially installed schema rather than stamp unverified live ORM metadata. Repeat upgrades MUST be idempotent. Multi-instance operation MUST follow the separately verified Oracle two-instance failover pilot contract.
@@ -199,7 +198,6 @@ Oracle bridge retention and abandonment scans SHALL select and lock eligible ope
 - **WHEN** Oracle retention processes a limited batch
 - **THEN** it deletes at most that many eligible operations
 - **AND** the live nonterminal operation remains until its owner becomes stale
-
 
 ### Requirement: Oracle defaults fit a single Free instance
 
@@ -404,3 +402,26 @@ Oracle MUST receive nullable 64-byte processing-node storage through an additive
 - **WHEN** the evolved model and dedicated migration lineage are inspected without a live database
 - **THEN** processing-node storage is nullable VARCHAR2(64 BYTE) with no default
 - **AND** the immutable baseline remains independently verifiable
+
+### Requirement: Oracle quota maintenance
+The service SHALL monitor the finite schema quota of the bridge tablespace on Oracle. It SHALL show a dashboard warning below 3 GiB, permit operators with operations write access to request maintenance, and attempt maintenance without dashboard traffic strictly below 2 GiB. SQLite, PostgreSQL and unlimited quotas SHALL produce no quota warning or maintenance DDL.
+
+#### Scenario: Manual warning range
+- **WHEN** available quota is at least 2 GiB and below 3 GiB
+- **THEN** the dashboard shows remaining quota and offers a maintenance action to authorized operators
+
+#### Scenario: Critical quota
+- **WHEN** available quota falls below 2 GiB
+- **THEN** an independent worker initiates maintenance, serializing attempts across replicas and backing off after unsuccessful attempts
+
+#### Scenario: Online recovery
+- **WHEN** eligible bridge segments have reclaimable space and sufficient working space
+- **THEN** the worker uses targeted online maintenance, preserves transcript rows, constraints and retention, and rechecks quota
+
+#### Scenario: Insufficient space or failure
+- **WHEN** an attempt cannot safely recover space or a database operation fails
+- **THEN** the dashboard exposes the outcome and the service continues monitoring
+
+#### Scenario: Other backends
+- **WHEN** another supported database backend is in use
+- **THEN** the application runs no Oracle maintenance queries or worker and displays no Oracle controls

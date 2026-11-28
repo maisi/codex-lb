@@ -604,3 +604,27 @@ async def test_oracle_folds_keep_an_hours_first_second_in_that_hour(oracle_runti
                 .all()
             )
             assert buckets == {seven: 1, eight: 1}, table.__tablename__
+
+
+async def test_oracle_storage_lock_and_status_survive_implicit_commits(oracle_runtime: AsyncEngine) -> None:
+    from app.modules.runtime.oracle_storage import OracleStorage, StorageOperation
+
+    sessions = async_sessionmaker(oracle_runtime)
+    async with sessions() as first, sessions() as second:
+        owner = await OracleStorage.open(first)
+        peer = await OracleStorage.open(second)
+        async with owner.lock() as acquired:
+            assert acquired
+            await owner.mark("running")
+            await owner.execute(
+                StorageOperation("alter index IDX_HTTP_BRIDGE_OPERATION_EVENTS_OPERATION_SEQUENCE rebuild online", 0, 0)
+            )
+            assert (await peer.status()).maintenance == "running"
+            async with peer.lock() as acquired_elsewhere:
+                assert not acquired_elsewhere
+            # Fresh schemas can have deferred LOB segments.
+            await owner.operations()
+            await owner.mark("completed")
+        async with peer.lock() as acquired_after_release:
+            assert acquired_after_release
+            assert (await peer.status()).maintenance == "completed"
